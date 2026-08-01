@@ -646,6 +646,45 @@ app.whenReady().then(() => {
     arch: process.arch,
     installDirectory: "E:\\Medo_music\\release"
   }));
+  ipcMain.handle("app:check-update", async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch("https://api.github.com/repos/Medo-bao/MedoMusic/releases/latest", {
+        signal: controller.signal,
+        headers: {
+          Accept: "application/vnd.github+json",
+          "User-Agent": `MedoMusic/${app.getVersion()}`,
+          "X-GitHub-Api-Version": "2022-11-28"
+        }
+      });
+      if (!response.ok) throw new Error(`github-${response.status}`);
+      const release = await response.json();
+      const currentVersion = app.getVersion();
+      const latestVersion = String(release.tag_name || release.name || "").replace(/^v/i, "").trim();
+      const parts = (version) => String(version).split(/[+-]/, 1)[0].split(".").map((part) => Number.parseInt(part, 10) || 0);
+      const current = parts(currentVersion);
+      const latest = parts(latestVersion);
+      let comparison = 0;
+      for (let index = 0; index < Math.max(current.length, latest.length); index += 1) {
+        const difference = (latest[index] || 0) - (current[index] || 0);
+        if (difference !== 0) {
+          comparison = difference;
+          break;
+        }
+      }
+      const updateAvailable = comparison > 0;
+      const releaseUrl = String(release.html_url || "");
+      if (updateAvailable && /^https:\/\/github\.com\/Medo-bao\/MedoMusic\/releases\//i.test(releaseUrl)) {
+        await shell.openExternal(releaseUrl);
+      }
+      return { currentVersion, latestVersion, updateAvailable, releaseUrl };
+    } catch (error) {
+      return { error: error?.name === "AbortError" ? "timeout" : "unavailable" };
+    } finally {
+      clearTimeout(timeout);
+    }
+  });
 
   ipcMain.handle("music:discover-default-library", async () => {
     const folder = app.getPath("music");

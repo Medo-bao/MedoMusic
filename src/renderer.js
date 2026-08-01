@@ -2689,6 +2689,28 @@ async function renderAppInfo() {
   document.querySelector("#about-install-directory").textContent = info.installDirectory;
 }
 
+document.querySelector("#check-for-updates").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const label = button.querySelector("span:last-child");
+  if (button.disabled) return;
+  button.disabled = true;
+  button.classList.remove("latest", "failed");
+  button.classList.add("checking");
+  label.textContent = "\u6b63\u5728\u68c0\u67e5";
+  const result = await window.medo.checkForUpdates();
+  button.classList.remove("checking");
+  if (result?.error) {
+    button.classList.add("failed");
+    label.textContent = "\u68c0\u67e5\u5931\u8d25";
+  } else if (result?.updateAvailable) {
+    label.textContent = `\u53d1\u73b0 ${result.latestVersion}`;
+  } else {
+    button.classList.add("latest");
+    label.textContent = "\u8f6f\u4ef6\u5df2\u6700\u65b0";
+  }
+  button.disabled = false;
+});
+
 function formatTime(seconds) {
   if (!Number.isFinite(seconds)) return "0:00";
   return `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;

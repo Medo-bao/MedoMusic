@@ -111,7 +111,8 @@ async function run() {
         platform: "win32",
         arch: "x64",
         installDirectory: "E:\\Medo_music\\release"
-      })
+      }),
+      checkForUpdates: async () => ({ currentVersion: "1.4.0", latestVersion: "1.4.0", updateAvailable: false })
     };
   });
 
@@ -140,6 +141,8 @@ async function run() {
     throw new Error(`Settings panel is hidden; main=${mainClass}; browser=${errors.join(" | ")}`);
   }
   if (await page.locator(".settings-action").count() !== 3) throw new Error("Settings actions mismatch");
+  await page.locator("#check-for-updates").click();
+  if (await page.locator("#check-for-updates span:last-child").textContent() !== "\u8f6f\u4ef6\u5df2\u6700\u65b0") throw new Error("Update check latest state mismatch");
   if (await page.locator("#about-version").innerText() !== "MedoMusic 0.1.8") throw new Error("App info mismatch");
   if (await page.locator(".page-header .header-actions").count() !== 0) throw new Error("Header actions remain");
   if (await page.locator(".theme-option").count() !== 3) throw new Error("Theme options mismatch");

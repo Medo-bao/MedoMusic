@@ -803,6 +803,23 @@ h1 { margin: 0; font-size: 34px; line-height: 1.08; font-weight: 350; letter-spa
 }
 .app-info dt { color: var(--secondary); }
 .app-info dd { margin: 0; overflow-wrap: anywhere; color: var(--text); font-variant-numeric: tabular-nums; }
+.update-check-button {
+  min-width: 126px;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--text);
+  transition: color 180ms ease, background-color 180ms ease, border-color 180ms ease, transform 200ms var(--ease-out), box-shadow 220ms ease;
+}
+.update-check-button .glyph { color: var(--accent); font-size: 15px; }
+.update-check-button.checking .glyph { animation: update-check-spin .75s linear infinite; }
+.update-check-button.latest { color: #2f9860; border-color: color-mix(in srgb, #2f9860 38%, var(--line)); background: color-mix(in srgb, #2f9860 10%, transparent); }
+.update-check-button.latest .glyph { color: #2f9860; }
+.update-check-button.failed { color: #d36a62; border-color: color-mix(in srgb, #d36a62 38%, var(--line)); }
+@keyframes update-check-spin { to { transform: rotate(360deg); } }
 
 .playback-detail { display: none; }
 .playback-detail-open {

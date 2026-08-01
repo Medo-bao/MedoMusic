@@ -61,5 +61,6 @@ contextBridge.exposeInMainWorld("medo", {
     ipcRenderer.on("tray:command", listener);
     return () => ipcRenderer.removeListener("tray:command", listener);
   },
-  getAppInfo: () => ipcRenderer.invoke("app:get-info")
+  getAppInfo: () => ipcRenderer.invoke("app:get-info"),
+  checkForUpdates: () => ipcRenderer.invoke("app:check-update")
 });
