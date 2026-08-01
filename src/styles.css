@@ -1705,7 +1705,8 @@ body.playback-detail-active #lyric-translation-toggle:not([hidden]) {
   transition: opacity 150ms ease, filter 180ms ease, transform 220ms cubic-bezier(.22,1,.36,1), visibility 0s linear 220ms;
   pointer-events: none;
 }
-.volume-control.adjusting #volume-percent {
+.volume-control.adjusting #volume-percent,
+.volume-control:has(#volume:hover) #volume-percent {
   opacity: 1;
   visibility: visible;
   filter: blur(0);

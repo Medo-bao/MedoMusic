@@ -118,6 +118,9 @@ async function run() {
 
   await page.goto(pathToFileURL(path.join(root, "src", "index.html")).href);
   if (await page.locator("#volume-percent").textContent() !== "70%") throw new Error("Default volume percentage mismatch");
+  await page.locator("#volume").hover();
+  await page.waitForTimeout(220);
+  if (Number(await page.locator("#volume-percent").evaluate((element) => getComputedStyle(element).opacity)) < .95) throw new Error("Volume percentage is not visible on hover");
   await page.locator("#volume").evaluate((element) => {
     element.value = "0.75";
     element.dispatchEvent(new Event("input", { bubbles: true }));

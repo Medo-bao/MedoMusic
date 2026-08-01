@@ -39,8 +39,10 @@ let lastLyricsWindowPayload = null;
 let lyricsWindowLocked = true;
 let lyricsWindowPointerTimer = null;
 let lyricsWindowPointerInside = false;
+let lyricsWindowTopTimer = null;
 let trayMuted = false;
 let trayLyricsSize = 34;
+const METADATA_COVER_VERSION = 3;
 
 function audioPathsFromArguments(args = []) {
   return [...new Set(args
@@ -343,6 +345,14 @@ function keepLyricsWindowOnTop(window = lyricsWindow) {
   if (window.isVisible()) window.moveTop();
 }
 
+function startLyricsWindowTopGuard() {
+  clearInterval(lyricsWindowTopTimer);
+  lyricsWindowTopTimer = setInterval(() => {
+    if (!lyricsWindow || lyricsWindow.isDestroyed() || !lyricsWindow.isVisible()) return;
+    keepLyricsWindowOnTop(lyricsWindow);
+  }, 2000);
+}
+
 function setLyricsWindowLocked(locked) {
   lyricsWindowLocked = Boolean(locked);
   const window = createLyricsWindow();
@@ -526,9 +536,16 @@ function createLyricsWindow() {
     lyricsWindow?.webContents.send("lyrics-window:lock-state", lyricsWindowLocked);
     updateLyricsWindowPointerTracking();
   });
+  lyricsWindow.on("show", () => keepLyricsWindowOnTop(lyricsWindow));
+  lyricsWindow.on("always-on-top-changed", (_event, isAlwaysOnTop) => {
+    if (!isAlwaysOnTop) setTimeout(() => keepLyricsWindowOnTop(lyricsWindow), 0);
+  });
+  startLyricsWindowTopGuard();
   lyricsWindow.on("closed", () => {
     clearInterval(lyricsWindowPointerTimer);
     lyricsWindowPointerTimer = null;
+    clearInterval(lyricsWindowTopTimer);
+    lyricsWindowTopTimer = null;
     lyricsWindow = null;
   });
   return lyricsWindow;
@@ -1106,7 +1123,7 @@ app.whenReady().then(() => {
       const stat = await fs.stat(filePath);
       const cache = await getMetadataCache();
       const cached = cache[filePath];
-      if (cached?.mtimeMs === stat.mtimeMs && cached?.size === stat.size) return cached.value;
+      if (cached?.mtimeMs === stat.mtimeMs && cached?.size === stat.size && cached?.coverVersion === METADATA_COVER_VERSION) return cached.value;
       const { parseFile, selectCover } = await import("music-metadata");
       const metadata = await parseFile(filePath, {
         duration: true,
@@ -1117,7 +1134,7 @@ app.whenReady().then(() => {
         const picture = selectCover(metadata.common.picture);
         const image = picture ? nativeImage.createFromBuffer(Buffer.from(picture.data)) : null;
         if (image && !image.isEmpty()) {
-          const jpeg = image.resize({ width: 160, height: 160, quality: "good" }).toJPEG(72);
+          const jpeg = image.resize({ width: 320, height: 320, quality: "good" }).toJPEG(85);
           cover = `data:image/jpeg;base64,${jpeg.toString("base64")}`;
         }
       } catch {
@@ -1133,7 +1150,7 @@ app.whenReady().then(() => {
         bitsPerSample: metadata.format.bitsPerSample || null,
         cover
       };
-      cache[filePath] = { mtimeMs: stat.mtimeMs, size: stat.size, value };
+      cache[filePath] = { mtimeMs: stat.mtimeMs, size: stat.size, coverVersion: METADATA_COVER_VERSION, value };
       scheduleMetadataCacheWrite();
       return value;
     } catch {
