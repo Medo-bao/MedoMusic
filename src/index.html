@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark light">
+  <title>MedoMusic</title>
+  <script>
+    (() => {
+      const preference = localStorage.getItem("medo.theme") || "system";
+      const resolved = preference === "system"
+        ? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
+        : preference;
+      document.documentElement.dataset.theme = resolved;
+      document.documentElement.style.backgroundColor = resolved === "light" ? "#f4f6f7" : "#111416";
+    })();
+  </script>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div class="window-titlebar" aria-label="窗口控制">
+    <button id="window-minimize" class="window-control" title="最小化" aria-label="最小化"><span class="window-icon minimize-icon"></span></button>
+    <button id="window-maximize" class="window-control" title="最大化" aria-label="最大化"><span class="window-icon maximize-icon"></span></button>
+    <button id="window-close" class="window-control close" title="关闭" aria-label="关闭"><span class="window-icon close-icon"></span></button>
+  </div>
+  <button id="back-button" class="global-back glyph" title="返回" aria-label="返回">&#xE72B;</button>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div id="sidebar-resizer" class="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="调整导航栏宽度"></div>
+      <div class="side-top">
+        <button class="glyph menu-button" title="菜单">&#xE700;</button>
+        <div class="app-name"><span class="groove-logo"></span><strong>MedoMusic</strong></div>
+      </div>
+
+      <label class="side-search">
+        <input id="search-input" type="search" placeholder="搜索">
+        <span class="glyph">&#xE721;</span>
+      </label>
+
+      <nav>
+        <button class="nav-item active" data-view="library">
+          <span class="glyph">&#xE8D6;</span><span>我的音乐</span>
+        </button>
+        <button class="nav-item" data-view="recent">
+          <span class="glyph">&#xE823;</span><span>最近播放</span>
+        </button>
+      </nav>
+
+      <div id="playlist-favorite-slot" class="playlist-favorite-slot"></div>
+      <button id="playlists-overview" class="playlist-title">
+        <span class="glyph playlist-title-icon">&#xE8FD;</span>
+        <span class="playlist-title-label">播放列表</span>
+        <span class="glyph playlist-title-arrow">&#xE76C;</span>
+      </button>
+      <div id="playlist-list" class="playlist-list"></div>
+
+      <button id="settings-button" class="nav-item settings" data-view="settings">
+        <span class="glyph">&#xE713;</span><span>设置</span>
+      </button>
+    </aside>
+
+    <main>
+      <header class="page-header">
+        <h1 id="view-title">我的音乐</h1>
+      </header>
+
+      <section id="playlist-hero" class="playlist-hero" hidden>
+        <button id="playlist-art" class="playlist-art" title="更换封面" aria-label="更换封面">
+          <img id="playlist-cover" alt="">
+          <span class="glyph">&#xE8FD;</span>
+          <i></i><i></i><i></i>
+          <span class="cover-edit glyph">&#xE70F;</span>
+        </button>
+        <div class="playlist-overview">
+          <span class="playlist-kicker">播放列表</span>
+          <h1 id="playlist-name"></h1>
+          <p id="playlist-meta"></p>
+          <div class="playlist-actions">
+            <button id="playlist-play-all" class="playlist-primary">
+              <span class="glyph">&#xE768;</span>全部播放
+            </button>
+            <button id="playlist-add-songs"><span class="glyph">&#xE710;</span>添加歌曲</button>
+            <button id="playlist-rename"><span class="glyph">&#xE70F;</span>重命名</button>
+            <button id="playlist-delete"><span class="glyph">&#xE74D;</span>删除</button>
+            <button id="collection-back"><span class="glyph">&#xE72B;</span>返回</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="pivot-bar">
+        <div class="pivots">
+          <button class="pivot active" data-sort="songs">歌曲</button>
+          <button class="pivot" data-sort="artists">艺术家</button>
+          <button class="pivot" data-sort="albums">专辑</button>
+        </div>
+        <div class="library-tools">
+          <button id="shuffle-all" class="text-button"><span class="glyph">&#xE8B1;</span>无序播放所有</button>
+          <button id="recent-play-count-sort" class="text-button" hidden><span class="glyph">&#xE9D9;</span>按播放次数排序</button>
+          <span class="divider"></span>
+          <span id="track-count">0 首歌曲</span>
+          <div id="sort-control" class="sort-control" aria-label="排序依据">
+            <label class="sort-choice">
+              <span id="library-sort-value" class="sort-value">创建时间</span>
+              <select id="library-sort" aria-label="排序依据">
+              <option value="added">创建时间</option>
+              <option value="az">A 到 Z</option>
+              <option value="artist">歌手</option>
+              <option value="album">专辑</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      </section>
+
+      <div id="selection-actions" class="selection-actions" hidden>
+        <button id="cancel-selection" class="selection-command"><span class="glyph">&#xE711;</span><span>取消</span></button>
+        <span class="selection-divider"></span>
+        <button id="play-selected" class="selection-command"><span class="glyph">&#xE768;</span><span>播放</span></button>
+        <button id="next-selected" class="selection-command"><span class="glyph">&#xE893;</span><span>播放下一首</span></button>
+        <button id="queue-selected" class="selection-command"><span class="glyph">&#xE710;</span><span>添加到列表</span></button>
+        <button id="select-all" class="selection-command"><span class="glyph">&#xE8B3;</span><span>全选</span></button>
+        <strong id="selection-count">已选择 0 首</strong>
+      </div>
+
+      <section class="content-area">
+        <div id="track-list" class="track-list"></div>
+        <div id="empty-state" class="empty-state">
+          <img src="../Groove/Assets/MissingAlbumArt.jpg" alt="">
+          <h2>这里还没有音乐</h2>
+          <p>添加电脑上的歌曲，或者导入 Groove 创建的播放列表。</p>
+          <div>
+            <button id="empty-add" class="primary-button">查找音乐</button>
+            <button id="empty-zpl" class="secondary-button">导入播放列表</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="settings-panel" class="settings-panel" aria-label="设置">
+        <div class="settings-group">
+          <div class="settings-heading">
+            <div>
+              <h2>音乐库</h2>
+              <p>添加本地音乐，导入 Groove 播放列表，或管理自动扫描的文件夹。</p>
+            </div>
+          </div>
+          <div class="settings-actions">
+            <button id="add-files" class="settings-action">
+              <span class="glyph">&#xE8E5;</span>
+              <span><strong>添加音乐文件</strong></span>
+            </button>
+            <button id="add-folder" class="settings-action">
+              <span class="glyph">&#xE8B7;</span>
+              <span><strong>添加音乐文件夹</strong></span>
+            </button>
+            <button id="header-playlist" class="settings-action">
+              <span class="glyph">&#xE8A5;</span>
+              <span><strong>导入播放列表</strong></span>
+            </button>
+          </div>
+
+          <div class="folder-heading">
+            <div>
+              <h3>音乐文件夹</h3>
+              <p id="folder-summary">尚未添加自动扫描目录</p>
+            </div>
+            <div class="folder-actions">
+              <button id="refresh-library" class="secondary-button">刷新音乐库</button>
+              <button id="settings-add-folder" class="secondary-button">添加文件夹</button>
+            </div>
+          </div>
+          <div id="folder-list" class="folder-list"></div>
+        </div>
+
+        <div class="settings-group">
+          <div class="settings-heading">
+            <div>
+              <h2>外观</h2>
+              <p>选择适合当前环境的界面主题。</p>
+            </div>
+          </div>
+          <div class="theme-options" role="radiogroup" aria-label="颜色模式">
+            <button class="theme-option active" data-theme-value="system" role="radio" aria-checked="true">
+              <span class="theme-preview system-preview"><i></i><b></b></span>
+              <span><strong>跟随系统</strong><small>自动匹配 Windows 外观</small></span>
+              <span class="theme-check glyph">&#xE73E;</span>
+            </button>
+            <button class="theme-option" data-theme-value="light" role="radio" aria-checked="false">
+              <span class="theme-preview light-preview"><i></i><b></b></span>
+              <span><strong>浅色模式</strong><small>明亮背景，适合日间使用</small></span>
+              <span class="theme-check glyph">&#xE73E;</span>
+            </button>
+            <button class="theme-option" data-theme-value="dark" role="radio" aria-checked="false">
+              <span class="theme-preview dark-preview"><i></i><b></b></span>
+              <span><strong>深色模式</strong><small>深色背景，适合夜间使用</small></span>
+              <span class="theme-check glyph">&#xE73E;</span>
+            </button>
+          </div>
+          <div class="theme-color-setting">
+            <div><h3>自定义主题色</h3><p>调整按钮、选中状态与渐变强调色。</p></div>
+            <div class="theme-color-controls">
+              <label><span>主色</span><input id="theme-primary-color" type="color" value="#2864ff"></label>
+              <label><span>渐变色</span><input id="theme-secondary-color" type="color" value="#d934ff"></label>
+              <button id="reset-theme-colors" class="secondary-button">恢复默认</button>
+            </div>
+          </div>
+          <div class="display-setting">
+            <div><h3>音乐内容显示</h3><p>切换我的音乐页面的显示密度。</p></div>
+            <div class="segmented-control" role="radiogroup" aria-label="音乐内容显示">
+              <button class="display-option active" data-display-value="thumbnail" role="radio" aria-checked="true">缩略图</button>
+              <button class="display-option" data-display-value="compact" role="radio" aria-checked="false">紧凑列表</button>
+            </div>
+          </div>
+          <div class="display-setting lyric-source-setting">
+            <div><h3>歌词来源</h3><p>优先读取本地歌词，歌词缺失时在线查找。</p></div>
+            <div class="segmented-control lyric-source-options" role="radiogroup" aria-label="歌词来源">
+              <button class="lyric-source-option active" data-lyric-source="online" role="radio" aria-checked="true">在线补全</button>
+              <button class="lyric-source-option" data-lyric-source="local" role="radio" aria-checked="false">仅本地</button>
+            </div>
+          </div>
+          <div class="display-setting word-lyrics-setting">
+            <div><h3>逐字歌词（实验功能）</h3><p>按照歌词时间轴从左向右显示播放进度。</p></div>
+            <div class="segmented-control word-lyrics-options" role="radiogroup" aria-label="逐字歌词">
+              <button class="word-lyrics-option" data-word-lyrics-value="on" role="radio" aria-checked="false">开启</button>
+              <button class="word-lyrics-option active" data-word-lyrics-value="off" role="radio" aria-checked="true">关闭</button>
+            </div>
+          </div>
+          <div class="display-setting lyric-translation-setting">
+            <div><h3>歌词中文翻译</h3><p>自动识别非中文歌词，并在歌曲详情页和桌面歌词中显示中文翻译。</p></div>
+            <div class="segmented-control lyric-translation-options" role="radiogroup" aria-label="歌词中文翻译">
+              <button class="lyric-translation-option active" data-translation-value="on" role="radio" aria-checked="true">开启</button>
+              <button class="lyric-translation-option" data-translation-value="off" role="radio" aria-checked="false">关闭</button>
+            </div>
+          </div>
+          <div class="display-setting detail-lyric-size-setting">
+            <div><h3>歌词字体大小</h3><p>调整歌词字号。</p></div>
+            <label class="desktop-lyric-size-control"><input id="detail-lyric-size" type="range" min="18" max="38" step="1" value="26"><output id="detail-lyric-size-value">26 px</output></label>
+          </div>
+          <div class="display-setting desktop-lyric-size-setting">
+            <div><h3>桌面歌词字体大小</h3><p>调整桌面歌词悬浮窗中的歌词字号。</p></div>
+            <label class="desktop-lyric-size-control"><input id="desktop-lyric-size" type="range" min="16" max="64" step="2" value="34"><output id="desktop-lyric-size-value">34 px</output></label>
+          </div>
+          <div class="display-setting desktop-lyric-color-setting">
+            <div><h3>桌面歌词字体颜色</h3><p>单独调整桌面歌词的主色与渐变色。</p></div>
+            <div class="theme-color-controls">
+              <label><span>主色</span><input id="desktop-lyric-primary-color" type="color" value="#2864ff"></label>
+              <label><span>渐变色</span><input id="desktop-lyric-secondary-color" type="color" value="#d934ff"></label>
+              <button id="reset-desktop-lyric-colors" class="secondary-button">恢复默认</button>
+            </div>
+          </div>
+          <div class="display-setting desktop-lyric-lock-setting">
+            <div><h3>锁定桌面歌词</h3><p>锁定后悬浮窗不会遮挡鼠标操作，可在这里或托盘菜单解除锁定。</p></div>
+            <div class="segmented-control desktop-lyric-lock-options" role="radiogroup" aria-label="锁定桌面歌词">
+              <button class="desktop-lyric-lock-option" data-locked-value="true" role="radio" aria-checked="false">锁定</button>
+              <button class="desktop-lyric-lock-option active" data-locked-value="false" role="radio" aria-checked="true">不锁定</button>
+            </div>
+          </div>
+          <div class="display-setting desktop-lyric-position-setting">
+            <div><h3>桌面歌词位置</h3><p>将桌面歌词悬浮窗还原到主显示器顶部居中的默认位置。</p></div>
+            <button id="reset-desktop-lyric-position" class="secondary-button">还原默认位置</button>
+          </div>
+        </div>
+
+        <div class="settings-group">
+          <div class="settings-heading">
+            <div>
+              <h2>关闭行为</h2>
+              <p>选择点击右上角关闭按钮时 MedoMusic 的处理方式。</p>
+            </div>
+          </div>
+          <div class="segmented-control close-behavior-options" role="radiogroup" aria-label="关闭行为">
+            <button class="close-behavior-option active" data-close-value="background" role="radio" aria-checked="true">最小化到后台</button>
+            <button class="close-behavior-option" data-close-value="quit" role="radio" aria-checked="false">直接退出软件</button>
+          </div>
+        </div>
+
+        <div class="settings-group about-group">
+          <div class="settings-heading">
+            <div>
+              <h2>关于 MedoMusic</h2>
+              <p>本地 Windows 音乐播放器。</p>
+            </div>
+          </div>
+          <dl class="app-info">
+            <div><dt>应用版本</dt><dd id="about-version">正在读取</dd></div>
+            <div><dt>安装目录</dt><dd id="about-install-directory">E:\Medo_music\release</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <section id="playback-detail" class="playback-detail" aria-label="歌曲播放详情">
+        <div id="detail-backdrop" class="detail-backdrop"></div>
+        <div class="detail-layout">
+          <article class="detail-track">
+            <img id="detail-cover" src="../Groove/Assets/MissingAlbumArt.jpg" alt="">
+            <h1 id="detail-title">未选择歌曲</h1>
+            <strong id="detail-artist">未知艺术家</strong>
+            <span id="detail-album">未知专辑</span>
+            <small id="detail-format"></small>
+          </article>
+          <section class="lyrics-stage" aria-label="歌词">
+            <div id="lyrics-lines" class="lyrics-lines">
+              <p class="lyrics-empty">正在查找歌词</p>
+            </div>
+          </section>
+          <aside class="detail-queue">
+            <header>
+              <div class="detail-queue-title">
+                <span>正在播放</span>
+                <span class="detail-queue-meta">
+                  <strong id="detail-queue-count">0 首歌曲</strong>
+                  <button id="detail-refresh-lyrics" class="glyph" title="从网络刷新当前歌词" aria-label="从网络刷新当前歌词">&#xE72C;</button>
+                  <button id="detail-clear-queue" class="glyph" title="清空播放队列" aria-label="清空播放队列">&#xE74D;</button>
+                </span>
+              </div>
+              <button id="detail-save-queue" class="detail-save-queue"><span class="glyph">&#xE74E;</span><span class="detail-save-label">保存为歌单</span></button>
+            </header>
+            <div id="detail-queue-list"></div>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <footer class="player">
+      <div class="song-info">
+        <button id="open-playback-detail" class="mini-cover-button" title="打开播放详情">
+          <img id="mini-cover" src="../Groove/Assets/MissingAlbumArt.jpg" alt="">
+        </button>
+        <div>
+          <strong id="now-title">未选择歌曲</strong>
+          <span id="now-album">MedoMusic</span>
+        </div>
+      </div>
+
+      <div class="player-center">
+        <div class="controls">
+          <button id="play-mode-button" class="glyph play-mode-button" data-mode="sequence" title="列表循环">&#xE8EE;</button>
+          <button id="previous-button" class="glyph" title="上一首">&#xE892;</button>
+          <button id="play-button" class="glyph play-button" title="播放">&#xE768;</button>
+          <button id="next-button" class="glyph" title="下一首">&#xE893;</button>
+          <button id="favorite-button" class="heart-button" title="收藏">♡</button>
+        </div>
+        <div class="timeline">
+          <span id="current-time">0:00</span>
+          <input id="progress" type="range" min="0" max="100" value="0" step="0.1">
+          <span id="duration">0:00</span>
+        </div>
+      </div>
+
+      <div class="player-right">
+        <button id="lyric-translation-toggle" class="glyph lyric-translation-toggle" title="隐藏中文翻译" aria-label="隐藏中文翻译" hidden>&#xE8C1;</button>
+        <button id="toggle-detail-track" class="glyph detail-panel-toggle" title="隐藏或显示专辑信息">&#xE93C;</button>
+        <button id="toggle-detail-queue" class="glyph detail-panel-toggle" title="隐藏或显示播放列表">&#xE8FD;</button>
+        <button id="desktop-lyrics-button" class="glyph" title="桌面歌词">&#xE8D2;</button>
+        <button id="volume-button" class="glyph volume-icon" title="静音" aria-label="静音">&#xE767;</button>
+        <div class="volume-control">
+          <output id="volume-percent" for="volume">70%</output>
+          <input id="volume" type="range" min="0" max="1" value="0.7" step="0.01" aria-label="音量">
+        </div>
+      </div>
+    </footer>
+  </div>
+  <audio id="audio"></audio>
+  <script src="./renderer.js"></script>
+</body>
+</html>
