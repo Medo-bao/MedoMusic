@@ -12,9 +12,30 @@ let lastRequestedHeight = 0;
 let lastRequestedWidth = 0;
 
 function measureTextWidth(element) {
-  const range = document.createRange();
-  range.selectNodeContents(element);
-  return Math.ceil(range.getBoundingClientRect().width);
+  const style = getComputedStyle(element);
+  const clone = element.cloneNode(true);
+  clone.removeAttribute("id");
+  clone.style.cssText = [
+    "position:fixed",
+    "left:-100000px",
+    "top:0",
+    "display:inline-block",
+    "width:max-content",
+    "max-width:none",
+    "overflow:visible",
+    "white-space:nowrap",
+    "visibility:hidden",
+    "pointer-events:none"
+  ].join(";");
+  clone.style.fontFamily = style.fontFamily;
+  clone.style.fontSize = style.fontSize;
+  clone.style.fontWeight = style.fontWeight;
+  clone.style.letterSpacing = style.letterSpacing;
+  clone.style.lineHeight = style.lineHeight;
+  document.body.append(clone);
+  const width = Math.ceil(clone.getBoundingClientRect().width);
+  clone.remove();
+  return width;
 }
 
 function updateLyricLayout() {
@@ -23,6 +44,24 @@ function updateLyricLayout() {
     const islandStyle = getComputedStyle(island);
     const verticalPadding = parseFloat(islandStyle.paddingTop) + parseFloat(islandStyle.paddingBottom);
     const horizontalPadding = parseFloat(islandStyle.paddingLeft) + parseFloat(islandStyle.paddingRight);
+    document.documentElement.style.removeProperty("--desktop-current-fit-size");
+    document.documentElement.style.removeProperty("--desktop-next-fit-size");
+    const naturalCurrentWidth = measureTextWidth(current);
+    const naturalNextWidth = measureTextWidth(next);
+    const availableTextWidth = Math.max(1, window.innerWidth - horizontalPadding - 8);
+    let currentFitSize = Math.max(11, lyricSize * Math.min(1, availableTextWidth / Math.max(1, naturalCurrentWidth)));
+    const nextBaseSize = Math.max(13, Math.round(lyricSize * .58));
+    const nextFitSize = Math.max(11, nextBaseSize * Math.min(1, availableTextWidth / Math.max(1, naturalNextWidth)));
+    document.documentElement.style.setProperty("--desktop-current-fit-size", `${currentFitSize}px`);
+    document.documentElement.style.setProperty("--desktop-next-fit-size", `${nextFitSize}px`);
+    if (current.scrollWidth > current.clientWidth) {
+      currentFitSize = Math.max(10, currentFitSize * current.clientWidth / current.scrollWidth * .995);
+      document.documentElement.style.setProperty("--desktop-current-fit-size", `${currentFitSize}px`);
+    }
+    if (next.scrollWidth > next.clientWidth) {
+      const correctedNextSize = Math.max(10, nextFitSize * next.clientWidth / next.scrollWidth * .995);
+      document.documentElement.style.setProperty("--desktop-next-fit-size", `${correctedNextSize}px`);
+    }
     const currentHeight = Math.ceil(current.getBoundingClientRect().height);
     const nextHeight = Math.ceil(next.getBoundingClientRect().height);
     const preferredGap = Math.max(6, Math.min(14, Math.round(lyricSize * .18)));
@@ -34,7 +73,7 @@ function updateLyricLayout() {
       lastRequestedHeight = requiredHeight;
       window.medo.fitLyricsWindowHeight(requiredHeight);
     }
-    const requiredWidth = Math.max(680, Math.max(measureTextWidth(current), measureTextWidth(next)) + horizontalPadding + 8);
+    const requiredWidth = Math.max(680, Math.max(naturalCurrentWidth, naturalNextWidth) + horizontalPadding + 8);
     if (requiredWidth !== lastRequestedWidth) {
       lastRequestedWidth = requiredWidth;
       window.medo.fitLyricsWindowWidth(requiredWidth);
@@ -62,7 +101,7 @@ function animateLyricChange() {
   next.animate(
     [
       { opacity: 0, filter: "blur(2px)", transform: "translateY(9px)" },
-      { opacity: .66, filter: "blur(0)", transform: "translateY(0)" }
+      { opacity: next.classList.contains("current-translation") ? 1 : .66, filter: "blur(0)", transform: "translateY(0)" }
     ],
     { duration: 460, easing: "cubic-bezier(.23,1,.32,1)" }
   );
@@ -109,8 +148,8 @@ function updateWordProgress(position) {
 
 applyLyricSize();
 window.medo.onLyricsWindowLine((payload = {}) => {
-  document.documentElement.style.setProperty("--lyric-primary", payload.primary || "#2864ff");
-  document.documentElement.style.setProperty("--lyric-secondary", payload.secondary || "#d934ff");
+  if (payload.primary) document.documentElement.style.setProperty("--lyric-primary", payload.primary);
+  if (payload.secondary) document.documentElement.style.setProperty("--lyric-secondary", payload.secondary);
   if (payload.colorsOnly) return;
   const nextCurrent = payload.current || payload.title || "暂无歌词";
   const nextLine = payload.currentTranslation
@@ -118,13 +157,15 @@ window.medo.onLyricsWindowLine((payload = {}) => {
     : payload.next || [payload.artist, payload.album].filter(Boolean).join(" · ") || "MedoMusic";
   const incomingWords = Array.isArray(payload.words) ? payload.words : [];
   const wordMode = incomingWords.length ? "word" : "line";
-  const lineChanged = current.dataset.text !== nextCurrent || next.textContent !== nextLine || current.dataset.wordMode !== wordMode;
+  const lineChanged = current.dataset.text !== nextCurrent || next.dataset.text !== nextLine || current.dataset.wordMode !== wordMode;
   if (lineChanged) {
     current.dataset.text = nextCurrent;
+    next.dataset.text = nextLine;
     current.dataset.wordMode = wordMode;
     activeWords = incomingWords;
     renderKaraokeText(current, nextCurrent, activeWords.length > 0);
     const translationKaraoke = Boolean(payload.currentTranslation && activeWords.length);
+    next.classList.toggle("current-translation", Boolean(payload.currentTranslation));
     next.classList.toggle("translation-karaoke", translationKaraoke);
     renderKaraokeText(next, nextLine, translationKaraoke);
     updateLyricLayout();

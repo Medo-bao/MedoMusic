@@ -18,6 +18,7 @@ async function run() {
   });
   page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {
+    window.__lyricRequests = [];
     HTMLMediaElement.prototype.load = function load() {
       queueMicrotask(() => this.dispatchEvent(new Event("canplay")));
     };
@@ -79,7 +80,10 @@ async function run() {
       getLyricsWindowState: async () => ({ locked: false, visible: false }),
       lockLyricsWindow: () => {},
       onLyricsWindowLockState: () => () => {},
-      readLyrics: async () => ({ text: "[00:00.00]Demo lyric", source: "sidecar" }),
+      readLyrics: async (options) => {
+        window.__lyricRequests.push({ ...options });
+        return { text: "[00:00.00]Demo lyric", source: options.ignoreLocal ? `${options.mode}-line` : "sidecar" };
+      },
       resetLyricsWindowPosition: () => {},
       resolveMediaSource: async () => "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=",
       setLyricsWindowSize: () => {},
@@ -159,9 +163,7 @@ async function run() {
   if (await page.locator("#about-version").innerText() !== "MedoMusic 0.1.8") throw new Error("App info mismatch");
   if (await page.locator(".page-header .header-actions").count() !== 0) throw new Error("Header actions remain");
   if (await page.locator(".theme-option").count() !== 3) throw new Error("Theme options mismatch");
-  if (await page.locator(".lyric-source-option").count() !== 3) throw new Error("Lyric source options mismatch");
-  await page.locator('[data-lyric-source="qq"]').click();
-  if (await page.evaluate(() => localStorage.getItem("medo.lyricSourceMode")) !== "qq") throw new Error("QQ Music lyric source was not saved");
+  if (await page.locator(".lyric-source-option").count() !== 0) throw new Error("Manual lyric source options remain in settings");
   if (await page.locator('[data-theme-value="system"]').innerText().then((text) => !text.includes("跟随系统"))) {
     throw new Error("System theme option missing");
   }
@@ -193,6 +195,17 @@ async function run() {
   }));
   if (queueRowsOverlap) throw new Error("Playback queue rows overlap");
   if (!await page.locator("#detail-refresh-lyrics").isVisible()) throw new Error("Queue lyric refresh is hidden");
+  if (!await page.evaluate(() => window.__lyricRequests.some((request) => request.mode === "auto" && request.ignoreLocal === false))) {
+    throw new Error("Normal lyric mode did not prefer local lyrics before NetEase fallback");
+  }
+  await page.locator('[data-word-lyrics-value="on"]').evaluate((element) => element.click());
+  await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "netease" && window.__lyricRequests.at(-1)?.ignoreLocal === true);
+  await page.locator('[data-word-lyrics-value="off"]').evaluate((element) => element.click());
+  await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "auto" && window.__lyricRequests.at(-1)?.ignoreLocal === false);
+  await page.locator("#detail-refresh-lyrics").click();
+  await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "netease" && window.__lyricRequests.at(-1)?.ignoreLocal === true);
+  await page.locator("#detail-refresh-lyrics").click();
+  await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "qq" && window.__lyricRequests.at(-1)?.ignoreLocal === true);
   await page.locator("#detail-queue-list").evaluate((element) => {
     element.scrollTop = 700 * 64;
     element.dispatchEvent(new Event("scroll"));
@@ -288,9 +301,15 @@ async function run() {
 
   const lyricPage = await browser.newPage({ viewport: { width: 1024, height: 150 } });
   await lyricPage.addInitScript(() => {
+    window.__lyricAnimationCount = 0;
+    const nativeAnimate = Element.prototype.animate;
+    Element.prototype.animate = function (...args) {
+      window.__lyricAnimationCount += 1;
+      return nativeAnimate.apply(this, args);
+    };
     window.medo = {
       fitLyricsWindowHeight: () => {},
-      fitLyricsWindowWidth: () => {},
+      fitLyricsWindowWidth: (width) => { window.__requestedLyricWidth = width; },
       moveLyricsWindow: () => {},
       onLyricsWindowLine: (callback) => { window.__lyricsLine = callback; },
       onLyricsWindowSize: () => {},
@@ -313,6 +332,52 @@ async function run() {
   });
   if (Math.abs(lyricLayers.baseX - lyricLayers.fillX) > .5 || Math.abs(lyricLayers.baseWidth - lyricLayers.fillWidth) > .5) {
     throw new Error(`Desktop lyric layers are misaligned: ${JSON.stringify(lyricLayers)}`);
+  }
+  await lyricPage.evaluate(() => window.__lyricsLine({
+    current: "Current lyric",
+    currentTranslation: "当前歌词翻译",
+    next: "Actual next lyric",
+    position: 2,
+    words: []
+  }));
+  await lyricPage.waitForTimeout(500);
+  const translatedLineStyle = await lyricPage.locator("#desktop-next-lyric").evaluate((element) => ({
+    isCurrentTranslation: element.classList.contains("current-translation"),
+    opacity: getComputedStyle(element).opacity,
+    text: element.textContent
+  }));
+  if (!translatedLineStyle.isCurrentTranslation || translatedLineStyle.opacity !== "1" || translatedLineStyle.text !== "当前歌词翻译") {
+    throw new Error(`Current lyric translation is visually faded: ${JSON.stringify(translatedLineStyle)}`);
+  }
+  const translatedWordPayload = {
+    current: "Current lyric",
+    currentTranslation: "当前歌词翻译",
+    next: "Actual next lyric",
+    position: 2,
+    words: [{ start: 0, end: 4, text: "Current lyric" }]
+  };
+  await lyricPage.evaluate((payload) => window.__lyricsLine(payload), translatedWordPayload);
+  const animationCount = await lyricPage.evaluate(() => window.__lyricAnimationCount);
+  await lyricPage.evaluate((payload) => window.__lyricsLine({ ...payload, position: 2.1 }), translatedWordPayload);
+  if (await lyricPage.evaluate(() => window.__lyricAnimationCount) !== animationCount) {
+    throw new Error("Word lyric translation restarted its animation without a line change");
+  }
+  await lyricPage.evaluate(() => window.__lyricsLine({
+    current: "Mon démon intérieur ne me laisse aucun répit et cette ligne volontairement très longue doit rester entièrement visible",
+    next: "罪恶烙印 永不能解",
+    position: 2,
+    words: []
+  }));
+  await lyricPage.waitForTimeout(250);
+  const longDesktopLyric = await lyricPage.locator("#desktop-lyric").evaluate((element) => ({
+    textOverflow: getComputedStyle(element).textOverflow,
+    scrollWidth: element.scrollWidth,
+    clientWidth: element.clientWidth,
+    fontSize: parseFloat(getComputedStyle(element).fontSize),
+    requestedWidth: window.__requestedLyricWidth
+  }));
+  if (longDesktopLyric.textOverflow === "ellipsis" || longDesktopLyric.scrollWidth > longDesktopLyric.clientWidth + 1 || longDesktopLyric.requestedWidth <= 1024) {
+    throw new Error(`Long desktop lyric is truncated: ${JSON.stringify(longDesktopLyric)}`);
   }
   await lyricPage.screenshot({ path: path.join(artifacts, "desktop-lyrics-karaoke.png"), omitBackground: true });
   await lyricPage.close();

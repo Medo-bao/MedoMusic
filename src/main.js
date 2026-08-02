@@ -758,17 +758,18 @@ app.whenReady().then(() => {
     if (typeof filePath !== "string") return { text: "", source: null };
     const lrcPath = path.join(path.dirname(filePath), `${path.basename(filePath, path.extname(filePath))}.lrc`);
     const onlineProvider = options?.mode === "qq" ? "qq" : options?.mode === "local" ? null : "netease";
+    const preferLocal = options?.mode === "auto";
     let localFallback = null;
-    if (!options?.force) {
+    if (!options?.force && !options?.ignoreLocal) {
       try {
         const text = decodeTextBuffer(await fs.readFile(lrcPath));
         const value = { text, source: "sidecar" };
-        if (!onlineProvider || hasNativeWordTiming(text)) return value;
+        if (!onlineProvider || preferLocal || hasNativeWordTiming(text)) return value;
         localFallback = value;
       } catch {}
     }
     let embeddedFallback = "";
-    if (!options?.force) {
+    if (!options?.force && !options?.ignoreLocal) {
       try {
         const { parseFile } = await import("music-metadata");
         const metadata = await parseFile(filePath, { duration: false, skipCovers: true });
@@ -778,7 +779,7 @@ app.whenReady().then(() => {
           : (typeof lyrics === "string" ? lyrics : "");
         if (text) {
           const value = { text, source: "embedded" };
-          if (!onlineProvider || hasNativeWordTiming(text)) return value;
+          if (!onlineProvider || preferLocal || hasNativeWordTiming(text)) return value;
           if (!localFallback) embeddedFallback = text;
         }
       } catch {}

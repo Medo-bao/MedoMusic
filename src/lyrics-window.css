@@ -21,12 +21,12 @@ body { margin: 0; overflow: hidden; background: transparent; font-family: "Segoe
   overflow: hidden;
   padding-bottom: .16em;
   margin-bottom: -.16em;
-  text-overflow: ellipsis;
+  text-overflow: clip;
   white-space: nowrap;
 }
 #desktop-lyric {
   line-height: 1.36;
-  font-size: var(--desktop-lyric-size, 34px);
+  font-size: var(--desktop-current-fit-size, var(--desktop-lyric-size, 34px));
   font-weight: 680;
   color: transparent;
   background: linear-gradient(90deg, #ff91b7 0%, var(--lyric-secondary, #d934ff) 46%, var(--lyric-primary, #2864ff) 100%);
@@ -71,12 +71,22 @@ body { margin: 0; overflow: hidden; background: transparent; font-family: "Segoe
   line-height: 1.42;
   color: transparent;
   opacity: .66;
-  font-size: var(--desktop-next-size, 16px);
+  font-size: var(--desktop-next-fit-size, var(--desktop-next-size, 16px));
   font-weight: 560;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, #ff91b7 58%, white) 0%,
+    color-mix(in srgb, var(--lyric-secondary, #d934ff) 58%, white) 46%,
+    color-mix(in srgb, var(--lyric-primary, #2864ff) 60%, white) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+#desktop-next-lyric.current-translation {
+  opacity: 1;
   background: linear-gradient(90deg, #ff91b7 0%, var(--lyric-secondary, #d934ff) 46%, var(--lyric-primary, #2864ff) 100%);
   -webkit-background-clip: text;
   background-clip: text;
 }
+#desktop-next-lyric.current-translation:has(.desktop-karaoke-base) { background: none; }
 .dragging .lyrics-island { cursor: grabbing; }
 .locked .lyrics-island { transition: opacity 300ms ease; }
 .locked.pointer-inside .lyrics-island { opacity: 0; }

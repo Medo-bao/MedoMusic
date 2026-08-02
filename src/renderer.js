@@ -35,8 +35,6 @@ let desktopLyricPrimaryColor = localStorage.getItem("medo.desktopLyricPrimaryCol
 let desktopLyricSecondaryColor = localStorage.getItem("medo.desktopLyricSecondaryColor") || "#d934ff";
 let displayMode = localStorage.getItem("medo.displayMode") || "thumbnail";
 let closeBehavior = localStorage.getItem("medo.closeBehavior") || "background";
-let lyricSourceMode = localStorage.getItem("medo.lyricSourceMode") || "netease";
-if (lyricSourceMode === "online") lyricSourceMode = "netease";
 let lyricTranslationEnabled = localStorage.getItem("medo.lyricTranslationEnabled") !== "false";
 const hasWordLyricsPreference = localStorage.getItem("medo.wordLyricsPreferenceSet") === "true";
 let wordLyricsEnabled = hasWordLyricsPreference && localStorage.getItem("medo.wordLyricsEnabled") === "true";
@@ -59,6 +57,7 @@ let metadataObserver = null;
 let searchTimer = null;
 const lyricsCache = new Map();
 const lyricsRequests = new Map();
+const lyricRefreshProviders = new Map();
 const lyricTranslations = new Map();
 const lyricTranslationRequests = new Map();
 const hiddenLyricTranslations = new Set();
@@ -332,14 +331,22 @@ function applyCloseBehavior(value) {
   });
 }
 
-function applyLyricSourceMode(value) {
-  lyricSourceMode = ["netease", "qq", "local"].includes(value) ? value : "netease";
-  localStorage.setItem("medo.lyricSourceMode", lyricSourceMode);
-  document.querySelectorAll(".lyric-source-option").forEach((button) => {
-    const active = button.dataset.lyricSource === lyricSourceMode;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-checked", String(active));
-  });
+function reloadCurrentLyrics({ networkProvider = null } = {}) {
+  const track = tracks[currentIndex];
+  if (!track) return Promise.resolve();
+  lyricsCache.delete(track.id);
+  lyricTranslations.delete(track.id);
+  const request = ensureLyrics(track, Boolean(networkProvider), networkProvider);
+  if (currentView === "player") renderLyrics(track);
+  return request;
+}
+
+function refreshCurrentLyricsFromNetwork() {
+  const track = tracks[currentIndex];
+  if (!track) return Promise.resolve();
+  const provider = lyricRefreshProviders.get(track.id) || "netease";
+  lyricRefreshProviders.set(track.id, provider === "netease" ? "qq" : "netease");
+  return reloadCurrentLyrics({ networkProvider: provider });
 }
 
 function applyLyricTranslationSetting(enabled) {
@@ -409,7 +416,8 @@ function applyWordLyricsSetting(enabled, userInitiated = false) {
     button.setAttribute("aria-checked", String(active));
   });
   const track = tracks[currentIndex];
-  if (track && currentView === "player") renderLyrics(track);
+  if (userInitiated && track) reloadCurrentLyrics({ networkProvider: wordLyricsEnabled ? "netease" : null });
+  else if (track && currentView === "player") renderLyrics(track);
   activeLyricIndex = -1;
   updateLyricsAtTime();
 }
@@ -496,7 +504,7 @@ function parseLyrics(text, duration = 0) {
   return { synced: hasTimeline, level, lines: timedLines };
 }
 
-async function ensureLyrics(track, force = false) {
+async function ensureLyrics(track, force = false, modeOverride = null) {
   if (!track || (!force && (lyricsCache.has(track.id) || lyricsRequests.has(track.id)))) return lyricsRequests.get(track?.id);
   if (force) {
     lyricsCache.delete(track.id);
@@ -505,7 +513,8 @@ async function ensureLyrics(track, force = false) {
   }
   let request;
   request = (async () => {
-    if (lyricSourceMode !== "local" && (!track.metadataLoaded || !track.duration)) {
+    const requestMode = modeOverride || (wordLyricsEnabled ? "netease" : "auto");
+    if (requestMode !== "local" && (!track.metadataLoaded || !track.duration)) {
       await loadMetadata(track);
     }
     return window.medo.readLyrics({
@@ -514,8 +523,9 @@ async function ensureLyrics(track, force = false) {
       artist: track.artist,
       album: track.album,
       duration: track.duration || audio.duration,
-      mode: lyricSourceMode,
-      force
+      mode: requestMode,
+      force,
+      ignoreLocal: wordLyricsEnabled || Boolean(modeOverride)
     });
   })()
     .then((result) => {
@@ -2999,7 +3009,7 @@ document.querySelector("#detail-refresh-lyrics").addEventListener("click", async
   if (!track || button.classList.contains("loading")) return;
   button.classList.add("loading");
   button.setAttribute("aria-busy", "true");
-  await ensureLyrics(track, true);
+  await refreshCurrentLyricsFromNetwork();
   button.classList.remove("loading");
   button.removeAttribute("aria-busy");
   animatePlayerToolButton(button);
@@ -3365,17 +3375,6 @@ document.querySelectorAll(".display-option").forEach((button) => {
 document.querySelectorAll(".close-behavior-option").forEach((button) => {
   button.addEventListener("click", () => applyCloseBehavior(button.dataset.closeValue));
 });
-document.querySelectorAll(".lyric-source-option").forEach((button) => {
-  button.addEventListener("click", () => {
-    applyLyricSourceMode(button.dataset.lyricSource);
-    lyricsCache.clear();
-    lyricsRequests.clear();
-    if (currentView === "player" && tracks[currentIndex]) {
-      renderLyrics(tracks[currentIndex]);
-      ensureLyrics(tracks[currentIndex]);
-    }
-  });
-});
 document.querySelectorAll(".lyric-translation-option").forEach((button) => {
   button.addEventListener("click", () => applyLyricTranslationSetting(button.dataset.translationValue === "on"));
 });
@@ -3602,7 +3601,6 @@ applyTheme(theme);
 applyThemeColors();
 applyDisplayMode(displayMode);
 applyCloseBehavior(closeBehavior);
-applyLyricSourceMode(lyricSourceMode);
 applyLyricTranslationSetting(lyricTranslationEnabled);
 applyWordLyricsSetting(wordLyricsEnabled);
 applyDesktopLyricSize(desktopLyricSize);

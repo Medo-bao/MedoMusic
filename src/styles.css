@@ -769,26 +769,24 @@ h1 { margin: 0; font-size: 34px; line-height: 1.08; font-weight: 350; letter-spa
 .display-setting h3 { margin: 0; font-size: 15px; font-weight: 500; }
 .display-setting p { margin: 4px 0 0; color: var(--secondary); font-size: 12px; }
 .segmented-control { display: flex; padding: 3px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
-.display-option, .close-behavior-option, .lyric-source-option, .lyric-translation-option, .word-lyrics-option, .desktop-lyric-lock-option {
+.display-option, .close-behavior-option, .lyric-translation-option, .word-lyrics-option, .desktop-lyric-lock-option {
   min-width: 88px;
   padding: 7px 12px;
   border-radius: 5px;
   color: var(--secondary);
   transition: color 160ms ease, background-color 180ms ease, box-shadow 220ms ease, transform 180ms var(--ease-out);
 }
-.display-option:hover, .close-behavior-option:hover, .lyric-source-option:hover, .lyric-translation-option:hover, .word-lyrics-option:hover, .desktop-lyric-lock-option:hover {
+.display-option:hover, .close-behavior-option:hover, .lyric-translation-option:hover, .word-lyrics-option:hover, .desktop-lyric-lock-option:hover {
   color: var(--text);
   background: var(--surface-hover);
 }
-.display-option:active, .close-behavior-option:active, .lyric-source-option:active, .lyric-translation-option:active, .word-lyrics-option:active, .desktop-lyric-lock-option:active { transform: scale(.97); }
-.display-option.active, .close-behavior-option.active, .lyric-source-option.active, .lyric-translation-option.active, .word-lyrics-option.active, .desktop-lyric-lock-option.active {
+.display-option:active, .close-behavior-option:active, .lyric-translation-option:active, .word-lyrics-option:active, .desktop-lyric-lock-option:active { transform: scale(.97); }
+.display-option.active, .close-behavior-option.active, .lyric-translation-option.active, .word-lyrics-option.active, .desktop-lyric-lock-option.active {
   color: white;
   background: var(--accent-gradient);
   box-shadow: 0 6px 18px rgba(89,89,205,.2);
 }
 .close-behavior-options { display: inline-flex; width: fit-content; }
-.lyric-source-options { display: inline-flex; width: fit-content; }
-.lyric-source-options .lyric-source-option { min-width: 108px; }
 .desktop-lyric-size-control { min-width: 230px; display: grid; grid-template-columns: minmax(150px, 1fr) 54px; align-items: center; gap: 12px; color: var(--secondary); font-size: 12px; }
 .desktop-lyric-size-control input { width: 100%; accent-color: var(--accent); }
 .desktop-lyric-size-control output { text-align: right; font-variant-numeric: tabular-nums; }
