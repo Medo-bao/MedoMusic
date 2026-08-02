@@ -7,6 +7,7 @@ const progress = document.querySelector("#progress");
 const volume = document.querySelector("#volume");
 const favoriteButton = document.querySelector("#favorite-button");
 const missingArt = "../Groove/Assets/MissingAlbumArt.jpg";
+const { completeWordTimings, resolveYrcWordStart } = window.MedoLyricsTiming;
 
 let tracks = loadJson("medo.tracks", []);
 let playlists = loadJson("medo.playlists", []);
@@ -34,7 +35,8 @@ let desktopLyricPrimaryColor = localStorage.getItem("medo.desktopLyricPrimaryCol
 let desktopLyricSecondaryColor = localStorage.getItem("medo.desktopLyricSecondaryColor") || "#d934ff";
 let displayMode = localStorage.getItem("medo.displayMode") || "thumbnail";
 let closeBehavior = localStorage.getItem("medo.closeBehavior") || "background";
-let lyricSourceMode = localStorage.getItem("medo.lyricSourceMode") || "online";
+let lyricSourceMode = localStorage.getItem("medo.lyricSourceMode") || "netease";
+if (lyricSourceMode === "online") lyricSourceMode = "netease";
 let lyricTranslationEnabled = localStorage.getItem("medo.lyricTranslationEnabled") !== "false";
 const hasWordLyricsPreference = localStorage.getItem("medo.wordLyricsPreferenceSet") === "true";
 let wordLyricsEnabled = hasWordLyricsPreference && localStorage.getItem("medo.wordLyricsEnabled") === "true";
@@ -331,7 +333,7 @@ function applyCloseBehavior(value) {
 }
 
 function applyLyricSourceMode(value) {
-  lyricSourceMode = value === "online" ? "online" : "local";
+  lyricSourceMode = ["netease", "qq", "local"].includes(value) ? value : "netease";
   localStorage.setItem("medo.lyricSourceMode", lyricSourceMode);
   document.querySelectorAll(".lyric-source-option").forEach((button) => {
     const active = button.dataset.lyricSource === lyricSourceMode;
@@ -417,6 +419,17 @@ function parseLyrics(text, duration = 0) {
   const lines = [];
   const metadataLine = /^\[(ar|ti|al|by|re|ve|length):/i;
   for (const rawLine of String(text || "").replace(/^\uFEFF/, "").split(/\r?\n/)) {
+    if (/^\s*\{"t":\d+,"c":\[/.test(rawLine)) {
+      try {
+        const information = JSON.parse(rawLine.trim());
+        const text = Array.isArray(information.c)
+          ? information.c.map((item) => String(item?.tx || "")).join("").trim()
+          : "";
+        const start = Number(information.t) / 1000 + offset / 1000;
+        if (text && Number.isFinite(start)) lines.push({ start, text, information: true });
+      } catch {}
+      continue;
+    }
     const offsetMatch = rawLine.match(/^\[offset:([+-]?\d+)\]/i);
     if (offsetMatch) {
       offset = Number(offsetMatch[1]) || 0;
@@ -425,12 +438,19 @@ function parseLyrics(text, duration = 0) {
     if (metadataLine.test(rawLine)) continue;
     const yrcLine = rawLine.match(/^\[(\d+),(\d+)\](.*)$/);
     if (yrcLine) {
-      const lineStart = Number(yrcLine[1]) / 1000;
-      const words = [...yrcLine[3].matchAll(/\((\d+),(\d+),\d+\)([^()]*)/g)].map((word) => {
+      const rawLineStart = Number(yrcLine[1]) / 1000;
+      const lineStart = rawLineStart + offset / 1000;
+      let words = [...yrcLine[3].matchAll(/\((\d+),(\d+),\d+\)([^()]*)/g)].map((word) => {
         const rawStart = Number(word[1]) / 1000;
-        const start = rawStart + .5 < lineStart ? lineStart + rawStart : rawStart;
+        const start = resolveYrcWordStart(rawLineStart, rawStart, offset);
         return { start, end: start + Number(word[2]) / 1000, text: word[3] };
       }).filter((word) => word.text);
+      if (!words.length) {
+        words = [...yrcLine[3].matchAll(/([^()]*)\((\d+),(\d+)\)/g)].map((word) => {
+          const start = Number(word[2]) / 1000 + offset / 1000;
+          return { start, end: start + Number(word[3]) / 1000, text: word[1] };
+        }).filter((word) => word.text);
+      }
       const lyric = words.map((word) => word.text).join("").trim();
       if (lyric) lines.push({ start: lineStart, text: lyric, words });
       continue;
@@ -471,8 +491,9 @@ function parseLyrics(text, duration = 0) {
   }
   const hasTimeline = lines.some((line) => line.start !== null);
   if (hasTimeline) lines.sort((a, b) => (a.start ?? Number.MAX_VALUE) - (b.start ?? Number.MAX_VALUE));
-  const level = lines.some((line) => line.words?.length) ? "word" : hasTimeline ? "line" : "plain";
-  return { synced: hasTimeline, level, lines };
+  const timedLines = hasTimeline ? completeWordTimings(lines, duration) : lines;
+  const level = timedLines.some((line) => line.words?.length) ? "word" : hasTimeline ? "line" : "plain";
+  return { synced: hasTimeline, level, lines: timedLines };
 }
 
 async function ensureLyrics(track, force = false) {
@@ -484,7 +505,7 @@ async function ensureLyrics(track, force = false) {
   }
   let request;
   request = (async () => {
-    if (lyricSourceMode === "online" && (!track.metadataLoaded || !track.duration)) {
+    if (lyricSourceMode !== "local" && (!track.metadataLoaded || !track.duration)) {
       await loadMetadata(track);
     }
     return window.medo.readLyrics({

@@ -211,14 +211,15 @@
             </div>
           </div>
           <div class="display-setting lyric-source-setting">
-            <div><h3>歌词来源</h3><p>优先读取本地歌词，歌词缺失时在线查找。</p></div>
+            <div><h3>歌词来源</h3><p>本地增强歌词始终优先；在线来源可选择网易云音乐或 QQ 音乐。</p></div>
             <div class="segmented-control lyric-source-options" role="radiogroup" aria-label="歌词来源">
-              <button class="lyric-source-option active" data-lyric-source="online" role="radio" aria-checked="true">在线补全</button>
+              <button class="lyric-source-option active" data-lyric-source="netease" role="radio" aria-checked="true">网易云音乐</button>
+              <button class="lyric-source-option" data-lyric-source="qq" role="radio" aria-checked="false">QQ 音乐</button>
               <button class="lyric-source-option" data-lyric-source="local" role="radio" aria-checked="false">仅本地</button>
             </div>
           </div>
           <div class="display-setting word-lyrics-setting">
-            <div><h3>逐字歌词（实验功能）</h3><p>按照歌词时间轴从左向右显示播放进度。</p></div>
+            <div><h3>逐字歌词（实验功能）</h3><p>按照歌词时间轴从左向右显示播放进度；逐字歌词使用播放器主题渐变色，不受桌面歌词颜色设置影响。</p></div>
             <div class="segmented-control word-lyrics-options" role="radiogroup" aria-label="逐字歌词">
               <button class="word-lyrics-option" data-word-lyrics-value="on" role="radio" aria-checked="false">开启</button>
               <button class="word-lyrics-option active" data-word-lyrics-value="off" role="radio" aria-checked="true">关闭</button>
@@ -361,6 +362,7 @@
     </footer>
   </div>
   <audio id="audio"></audio>
+  <script src="./lyrics-timing.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

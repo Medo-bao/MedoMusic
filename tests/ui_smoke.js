@@ -117,6 +117,16 @@ async function run() {
   });
 
   await page.goto(pathToFileURL(path.join(root, "src", "index.html")).href);
+  const parsedNativeLyrics = await page.evaluate(() => ({
+    yrc: parseLyrics('{"t":1000,"c":[{"tx":"作词: "},{"tx":"测试作者"}]}\n[2000,1000](2000,500,0)逐(2500,500,0)字', 5),
+    qrc: parseLyrics('[2000,1000]逐(2000,500)字(2500,500)', 5)
+  }));
+  if (parsedNativeLyrics.yrc.lines[0]?.text !== "作词: 测试作者" || parsedNativeLyrics.yrc.lines[0]?.start !== 1) {
+    throw new Error("YRC JSON credit line was not preserved");
+  }
+  if (parsedNativeLyrics.yrc.lines[1]?.words?.length !== 2 || parsedNativeLyrics.qrc.lines[0]?.words?.length !== 2) {
+    throw new Error("YRC or QRC word timing parsing failed");
+  }
   if (await page.locator("#volume-percent").textContent() !== "70%") throw new Error("Default volume percentage mismatch");
   await page.locator("#volume").hover();
   await page.waitForTimeout(220);
@@ -149,6 +159,9 @@ async function run() {
   if (await page.locator("#about-version").innerText() !== "MedoMusic 0.1.8") throw new Error("App info mismatch");
   if (await page.locator(".page-header .header-actions").count() !== 0) throw new Error("Header actions remain");
   if (await page.locator(".theme-option").count() !== 3) throw new Error("Theme options mismatch");
+  if (await page.locator(".lyric-source-option").count() !== 3) throw new Error("Lyric source options mismatch");
+  await page.locator('[data-lyric-source="qq"]').click();
+  if (await page.evaluate(() => localStorage.getItem("medo.lyricSourceMode")) !== "qq") throw new Error("QQ Music lyric source was not saved");
   if (await page.locator('[data-theme-value="system"]').innerText().then((text) => !text.includes("跟随系统"))) {
     throw new Error("System theme option missing");
   }
@@ -228,6 +241,81 @@ async function run() {
   await page.waitForTimeout(180);
   await page.screenshot({ path: path.join(artifacts, "settings-dark.png"), fullPage: true });
   if (errors.length) throw new Error(`Browser errors: ${errors.join(" | ")}`);
+
+  const inactiveLyricColors = await page.evaluate(() => {
+    const previousTheme = document.documentElement.dataset.theme;
+    document.documentElement.dataset.theme = "light";
+    const plain = document.createElement("span");
+    plain.className = "lyric-line near";
+    plain.textContent = "plain";
+    const karaoke = document.createElement("span");
+    karaoke.className = "lyric-line near";
+    karaoke.innerHTML = '<span class="lyric-karaoke"><span class="lyric-karaoke-base">karaoke</span></span>';
+    document.body.append(plain, karaoke);
+    const colors = {
+      plain: getComputedStyle(plain).color,
+      karaoke: getComputedStyle(karaoke.querySelector(".lyric-karaoke-base")).color
+    };
+    plain.remove();
+    karaoke.remove();
+    document.documentElement.dataset.theme = previousTheme;
+    return colors;
+  });
+  if (inactiveLyricColors.plain !== inactiveLyricColors.karaoke) {
+    throw new Error(`Inactive karaoke color changed: ${JSON.stringify(inactiveLyricColors)}`);
+  }
+  const longLyricLayers = await page.evaluate(() => {
+    const line = document.createElement("span");
+    line.className = "lyric-line active";
+    line.style.width = "260px";
+    const text = "这是一句很长很长并且需要在详情页自动换行但两层必须始终完全重合的测试歌词";
+    line.innerHTML = `<span class="lyric-karaoke"><span class="lyric-karaoke-base"></span><span class="lyric-karaoke-fill"></span></span>`;
+    line.querySelector(".lyric-karaoke-base").textContent = text;
+    line.querySelector(".lyric-karaoke-fill").textContent = text;
+    document.body.append(line);
+    const base = line.querySelector(".lyric-karaoke-base").getBoundingClientRect();
+    const fill = line.querySelector(".lyric-karaoke-fill").getBoundingClientRect();
+    const result = { baseX: base.x, fillX: fill.x, baseY: base.y, fillY: fill.y, baseWidth: base.width, fillWidth: fill.width, baseHeight: base.height, fillHeight: fill.height };
+    line.remove();
+    return result;
+  });
+  if (Math.abs(longLyricLayers.baseX - longLyricLayers.fillX) > .5 ||
+      Math.abs(longLyricLayers.baseY - longLyricLayers.fillY) > .5 ||
+      Math.abs(longLyricLayers.baseWidth - longLyricLayers.fillWidth) > .5 ||
+      Math.abs(longLyricLayers.baseHeight - longLyricLayers.fillHeight) > .5) {
+    throw new Error(`Long detail lyric layers are misaligned: ${JSON.stringify(longLyricLayers)}`);
+  }
+
+  const lyricPage = await browser.newPage({ viewport: { width: 1024, height: 150 } });
+  await lyricPage.addInitScript(() => {
+    window.medo = {
+      fitLyricsWindowHeight: () => {},
+      fitLyricsWindowWidth: () => {},
+      moveLyricsWindow: () => {},
+      onLyricsWindowLine: (callback) => { window.__lyricsLine = callback; },
+      onLyricsWindowSize: () => {},
+      onLyricsWindowLockState: () => {},
+      onLyricsWindowPointerInside: () => {}
+    };
+  });
+  await lyricPage.goto(pathToFileURL(path.join(root, "src", "lyrics.html")).href);
+  await lyricPage.evaluate(() => window.__lyricsLine({
+    current: "这段缘分没有人转身转身",
+    next: "下一句歌词",
+    position: 2,
+    words: [{ start: 0, end: 4, text: "这段缘分没有人转身转身" }]
+  }));
+  await lyricPage.waitForTimeout(250);
+  const lyricLayers = await lyricPage.evaluate(() => {
+    const base = document.querySelector(".desktop-karaoke-base").getBoundingClientRect();
+    const fill = document.querySelector(".desktop-karaoke-fill").getBoundingClientRect();
+    return { baseX: base.x, fillX: fill.x, baseWidth: base.width, fillWidth: fill.width };
+  });
+  if (Math.abs(lyricLayers.baseX - lyricLayers.fillX) > .5 || Math.abs(lyricLayers.baseWidth - lyricLayers.fillWidth) > .5) {
+    throw new Error(`Desktop lyric layers are misaligned: ${JSON.stringify(lyricLayers)}`);
+  }
+  await lyricPage.screenshot({ path: path.join(artifacts, "desktop-lyrics-karaoke.png"), omitBackground: true });
+  await lyricPage.close();
 
   console.log(
     `UI smoke passed; 1000-track library: ${timings.libraryMs.toFixed(1)}ms; ` +

@@ -33,9 +33,40 @@ body { margin: 0; overflow: hidden; background: transparent; font-family: "Segoe
   -webkit-background-clip: text;
   background-clip: text;
 }
-#desktop-lyric:has(.desktop-karaoke-base), #desktop-next-lyric:has(.desktop-karaoke-base) { position: relative; display: inline-block; background: none; -webkit-background-clip: border-box; background-clip: border-box; }
-.desktop-karaoke-base { color: color-mix(in srgb, var(--lyric-primary, #2864ff) 62%, rgba(222,226,244,.78)); text-shadow: 0 1px 5px rgba(0,0,0,.34); }
-.desktop-karaoke-fill { position: absolute; inset: 0 auto 0 0; width: var(--line-progress, 0%); overflow: hidden; color: transparent; white-space: nowrap; background: linear-gradient(90deg, #ff91b7 0%, var(--lyric-secondary, #d934ff) 46%, var(--lyric-primary, #2864ff) 100%); -webkit-background-clip: text; background-clip: text; transition: width 210ms linear; }
+#desktop-lyric:has(.desktop-karaoke-base), #desktop-next-lyric:has(.desktop-karaoke-base) {
+  position: relative;
+  display: inline-block;
+  justify-self: center;
+  width: max-content;
+  max-width: 100%;
+  background: none;
+  -webkit-background-clip: border-box;
+  background-clip: border-box;
+}
+.desktop-karaoke-base {
+  color: transparent;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, #ff91b7 58%, white) 0%,
+    color-mix(in srgb, var(--lyric-secondary, #d934ff) 58%, white) 46%,
+    color-mix(in srgb, var(--lyric-primary, #2864ff) 60%, white) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  filter: drop-shadow(0 1px 1px rgba(255,255,255,.18)) drop-shadow(0 1px 3px rgba(0,0,0,.5));
+}
+.desktop-karaoke-base, .desktop-karaoke-fill { display: block; }
+.desktop-karaoke-fill {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  overflow: hidden;
+  clip-path: inset(0 calc(100% - var(--line-progress, 0%)) 0 0);
+  color: transparent;
+  white-space: nowrap;
+  background: linear-gradient(90deg, #ff91b7 0%, var(--lyric-secondary, #d934ff) 46%, var(--lyric-primary, #2864ff) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  transition: clip-path 210ms linear;
+}
 #desktop-next-lyric {
   line-height: 1.42;
   color: transparent;

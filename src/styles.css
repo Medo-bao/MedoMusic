@@ -965,9 +965,18 @@ button.lyric-line { cursor: pointer; }
   background-clip: text;
 }
 .lyric-line.past:not(.near) { color: rgba(255,255,255,.25); opacity: .42; }
-.lyric-karaoke { position: relative; display: inline-block; color: color-mix(in srgb, var(--accent) 24%, rgba(255,255,255,.58)); }
+.lyric-karaoke { position: relative; display: inline-grid; max-width: 100%; color: inherit; vertical-align: top; }
+.lyric-karaoke-base, .lyric-karaoke-fill { grid-area: 1 / 1; min-width: 0; overflow-wrap: anywhere; }
 .lyric-karaoke-base { color: inherit; }
-.lyric-karaoke-fill { position: absolute; inset: 0 auto 0 0; width: var(--line-progress, 0%); overflow: hidden; color: transparent; white-space: nowrap; background: var(--accent-gradient); -webkit-background-clip: text; background-clip: text; transition: width 210ms linear; }
+.lyric-line.active .lyric-karaoke-base {
+  color: transparent;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--accent-secondary) 52%, white),
+    color-mix(in srgb, var(--accent) 56%, white));
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+.lyric-karaoke-fill { position: relative; width: 100%; overflow: hidden; clip-path: inset(0 calc(100% - var(--line-progress, 0%)) 0 0); color: transparent; white-space: normal; background: var(--accent-gradient); -webkit-background-clip: text; background-clip: text; transition: clip-path 210ms linear; }
 .lyrics-empty { display: grid; gap: 8px; margin: 0; color: rgba(255,255,255,.64); text-align: center; transform: translateY(-50%); }
 .lyrics-empty strong { color: #fff; font-size: 22px; }
 .lyrics-empty span { font-size: 13px; }
@@ -1548,7 +1557,7 @@ body.playback-detail-active #lyric-translation-toggle:not([hidden]) {
 [data-theme="light"] .lyric-line.active { color: transparent; }
 [data-theme="light"] .lyric-line.near { color: rgba(24,33,38,.62); }
 [data-theme="light"] .lyric-line.past:not(.near) { color: rgba(24,33,38,.22); }
-[data-theme="light"] .lyric-karaoke { color: color-mix(in srgb, var(--accent) 38%, rgba(24,33,38,.58)); }
+[data-theme="light"] .lyric-karaoke { color: inherit; }
 [data-theme="light"] .lyrics-empty { color: rgba(24,33,38,.6); }
 [data-theme="light"] .lyrics-empty strong { color: #111a20; }
 [data-theme="light"] .detail-queue {

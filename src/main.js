@@ -5,6 +5,9 @@ const fsSync = require("node:fs");
 const { pathToFileURL } = require("node:url");
 const { parseZpl } = require("./zpl");
 const { decodeTextBuffer } = require("./text-decoder");
+const { hasNativeWordTiming } = require("./lyrics-timing");
+const { fetchNeteaseNewLyrics } = require("./netease-eapi");
+const { fetchQqMusicLyrics } = require("./qq-music");
 
 const AUDIO_EXTENSIONS = new Set([
   ".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg", ".opus", ".wma"
@@ -42,7 +45,7 @@ let lyricsWindowPointerInside = false;
 let lyricsWindowTopTimer = null;
 let trayMuted = false;
 let trayLyricsSize = 34;
-const METADATA_COVER_VERSION = 3;
+const METADATA_COVER_VERSION = 7;
 
 function audioPathsFromArguments(args = []) {
   return [...new Set(args
@@ -263,12 +266,8 @@ async function getNeteaseWordLyrics(options) {
     return { song, score: titleScore * .58 + artistScore * .27 + durationScore * .15 };
   }).sort((left, right) => right.score - left.score);
   if (!ranked[0] || ranked[0].score < .62) return null;
-  const lyricResponse = await fetch(`https://music.163.com/api/song/lyric?id=${ranked[0].song.id}&lv=1&kv=1&tv=-1&yv=1`, {
-    headers,
-    signal: AbortSignal.timeout(6000)
-  });
-  if (!lyricResponse.ok) return null;
-  const payload = await lyricResponse.json();
+  const payload = await fetchNeteaseNewLyrics(ranked[0].song.id);
+  if (!payload) return null;
   const text = payload?.yrc?.lyric || payload?.lrc?.lyric || "";
   if (!text) return null;
   return {
@@ -758,9 +757,14 @@ app.whenReady().then(() => {
     const filePath = typeof options === "string" ? options : options?.filePath;
     if (typeof filePath !== "string") return { text: "", source: null };
     const lrcPath = path.join(path.dirname(filePath), `${path.basename(filePath, path.extname(filePath))}.lrc`);
+    const onlineProvider = options?.mode === "qq" ? "qq" : options?.mode === "local" ? null : "netease";
+    let localFallback = null;
     if (!options?.force) {
       try {
-        return { text: decodeTextBuffer(await fs.readFile(lrcPath)), source: "sidecar" };
+        const text = decodeTextBuffer(await fs.readFile(lrcPath));
+        const value = { text, source: "sidecar" };
+        if (!onlineProvider || hasNativeWordTiming(text)) return value;
+        localFallback = value;
       } catch {}
     }
     let embeddedFallback = "";
@@ -773,31 +777,39 @@ app.whenReady().then(() => {
           ? lyrics.map((item) => typeof item === "string" ? item : item?.text || "").filter(Boolean).join("\n")
           : (typeof lyrics === "string" ? lyrics : "");
         if (text) {
-          const hasTimeline = /\[\d{1,3}:\d{2}(?:[.:]\d{1,3})?\]|<\d{1,3}:\d{2}(?:[.:]\d{1,3})?>/.test(text);
-          if (options?.mode !== "online" || hasTimeline) return { text, source: "embedded" };
-          embeddedFallback = text;
+          const value = { text, source: "embedded" };
+          if (!onlineProvider || hasNativeWordTiming(text)) return value;
+          if (!localFallback) embeddedFallback = text;
         }
       } catch {}
     }
-    const fallbackResult = () => embeddedFallback
+    const fallbackResult = () => localFallback || (embeddedFallback
       ? { text: embeddedFallback, source: "embedded", confidence: null }
-      : { text: "", source: null };
-    if (options?.mode !== "online") return fallbackResult();
+      : { text: "", source: null });
+    const hasOrdinaryFallback = () => Boolean(localFallback || embeddedFallback);
+    if (!onlineProvider) return fallbackResult();
     const title = String(options.title || "").trim();
     const artist = String(options.artist || "").trim();
     const album = String(options.album || "").trim();
     const duration = Math.round(Number(options.duration) || 0);
     if (!title || !duration) return fallbackResult();
-    const cacheKey = JSON.stringify([title, artist, album, duration]);
+    const cacheKey = JSON.stringify([onlineProvider, title, artist, album, duration]);
     const cache = await getOnlineLyricsCache();
-    if (cache[cacheKey] && !options?.force) return cache[cacheKey];
+    if (cache[cacheKey] && !options?.force) {
+      if (/-(?:word)$/.test(cache[cacheKey].source || "") || !hasOrdinaryFallback()) return cache[cacheKey];
+      return fallbackResult();
+    }
     try {
-      const wordLyrics = await getNeteaseWordLyrics(options);
+      const wordLyrics = onlineProvider === "qq"
+        ? await fetchQqMusicLyrics(options)
+        : await getNeteaseWordLyrics(options);
       if (wordLyrics) {
         cache[cacheKey] = wordLyrics;
         scheduleOnlineLyricsCacheWrite();
-        return wordLyrics;
+        if (/-(?:word)$/.test(wordLyrics.source || "") || !hasOrdinaryFallback()) return wordLyrics;
+        return fallbackResult();
       }
+      if (hasOrdinaryFallback()) return fallbackResult();
       const requestJson = async (url) => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 5500);
@@ -1134,7 +1146,7 @@ app.whenReady().then(() => {
         const picture = selectCover(metadata.common.picture);
         const image = picture ? nativeImage.createFromBuffer(Buffer.from(picture.data)) : null;
         if (image && !image.isEmpty()) {
-          const jpeg = image.resize({ width: 320, height: 320, quality: "good" }).toJPEG(85);
+          const jpeg = image.resize({ width: 800, height: 800, quality: "good" }).toJPEG(100);
           cover = `data:image/jpeg;base64,${jpeg.toString("base64")}`;
         }
       } catch {
