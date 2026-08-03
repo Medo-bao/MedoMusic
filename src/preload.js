@@ -14,6 +14,12 @@ contextBridge.exposeInMainWorld("medo", {
   chooseFiles: () => ipcRenderer.invoke("music:choose-files"),
   chooseFolder: () => ipcRenderer.invoke("music:choose-folder"),
   scanFolder: (folder) => ipcRenderer.invoke("music:scan-folder", folder),
+  setWatchedMusicFolders: (folders) => ipcRenderer.send("music:set-watched-folders", folders),
+  onLibraryFolderChanged: (callback) => {
+    const listener = (_event, folder) => callback(folder);
+    ipcRenderer.on("music:library-folder-changed", listener);
+    return () => ipcRenderer.removeListener("music:library-folder-changed", listener);
+  },
   discoverDefaultLibrary: () => ipcRenderer.invoke("music:discover-default-library"),
   choosePlaylist: () => ipcRenderer.invoke("music:choose-playlist"),
   chooseCover: () => ipcRenderer.invoke("music:choose-cover"),

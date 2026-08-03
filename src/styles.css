@@ -974,6 +974,18 @@ button.lyric-line { cursor: pointer; }
   -webkit-background-clip: text;
   background-clip: text;
 }
+.lyric-translation.lyric-translation-karaoke {
+  display: grid;
+  width: fit-content;
+  max-width: 100%;
+  margin: 5px auto 0;
+}
+.lyric-line.active .lyric-translation-karaoke {
+  color: inherit;
+  background: none;
+  -webkit-background-clip: border-box;
+  background-clip: border-box;
+}
 .lyric-karaoke-fill { position: relative; width: 100%; overflow: hidden; clip-path: inset(0 calc(100% - var(--line-progress, 0%)) 0 0); color: transparent; white-space: normal; background: var(--accent-gradient); -webkit-background-clip: text; background-clip: text; transition: clip-path 210ms linear; }
 .lyrics-empty { display: grid; gap: 8px; margin: 0; color: rgba(255,255,255,.64); text-align: center; transform: translateY(-50%); }
 .lyrics-empty strong { color: #fff; font-size: 22px; }

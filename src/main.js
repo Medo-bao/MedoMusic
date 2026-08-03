@@ -2,12 +2,14 @@ const { app, BrowserWindow, dialog, ipcMain, nativeImage, nativeTheme, Tray, Men
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const fsSync = require("node:fs");
+const crypto = require("node:crypto");
 const { pathToFileURL } = require("node:url");
 const { parseZpl } = require("./zpl");
 const { decodeTextBuffer } = require("./text-decoder");
 const { hasNativeWordTiming } = require("./lyrics-timing");
 const { fetchNeteaseNewLyrics } = require("./netease-eapi");
 const { fetchQqMusicLyrics } = require("./qq-music");
+const { resolveOnlineLyricProviders, selectLocalLyrics } = require("./lyrics-source-priority");
 
 const AUDIO_EXTENSIONS = new Set([
   ".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg", ".opus", ".wma"
@@ -45,7 +47,59 @@ let lyricsWindowPointerInside = false;
 let lyricsWindowTopTimer = null;
 let trayMuted = false;
 let trayLyricsSize = 34;
-const METADATA_COVER_VERSION = 7;
+const musicFolderWatchers = new Map();
+const METADATA_COVER_VERSION = 8;
+
+function coverCacheDirectory() {
+  return path.join(app.getPath("userData"), "cover-cache");
+}
+
+function coverCachePath(filePath, stat) {
+  const key = crypto.createHash("sha1")
+    .update(`${path.resolve(filePath)}\0${stat.mtimeMs}\0${stat.size}\0${METADATA_COVER_VERSION}`)
+    .digest("hex");
+  return path.join(coverCacheDirectory(), `${key}.jpg`);
+}
+
+function closeMusicFolderWatchers() {
+  for (const entry of musicFolderWatchers.values()) {
+    clearTimeout(entry.timer);
+    entry.watcher.close();
+  }
+  musicFolderWatchers.clear();
+}
+
+function updateMusicFolderWatchers(folders = []) {
+  const requested = new Map(folders
+    .filter((folder) => typeof folder === "string" && folder.trim())
+    .map((folder) => [path.resolve(folder).toLowerCase(), path.resolve(folder)]));
+  for (const [key, entry] of musicFolderWatchers) {
+    if (requested.has(key)) continue;
+    clearTimeout(entry.timer);
+    entry.watcher.close();
+    musicFolderWatchers.delete(key);
+  }
+  for (const [key, folder] of requested) {
+    if (musicFolderWatchers.has(key)) continue;
+    try {
+      const entry = { watcher: null, timer: null };
+      entry.watcher = fsSync.watch(folder, { recursive: true }, () => {
+        clearTimeout(entry.timer);
+        entry.timer = setTimeout(() => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("music:library-folder-changed", folder);
+          }
+        }, 1200);
+      });
+      entry.watcher.on("error", () => {
+        clearTimeout(entry.timer);
+        entry.watcher.close();
+        musicFolderWatchers.delete(key);
+      });
+      musicFolderWatchers.set(key, entry);
+    } catch {}
+  }
+}
 
 function audioPathsFromArguments(args = []) {
   return [...new Set(args
@@ -600,6 +654,8 @@ async function toTrackWithFileTimes(filePath) {
   try {
     const stat = await fs.stat(filePath);
     track.createdAt = stat.birthtimeMs || stat.ctimeMs || stat.mtimeMs;
+    track.modifiedAt = stat.mtimeMs;
+    track.fileSize = stat.size;
   } catch {
     track.createdAt = Date.now();
   }
@@ -757,18 +813,10 @@ app.whenReady().then(() => {
     const filePath = typeof options === "string" ? options : options?.filePath;
     if (typeof filePath !== "string") return { text: "", source: null };
     const lrcPath = path.join(path.dirname(filePath), `${path.basename(filePath, path.extname(filePath))}.lrc`);
-    const onlineProvider = options?.mode === "qq" ? "qq" : options?.mode === "local" ? null : "netease";
+    const onlineProviders = resolveOnlineLyricProviders(options?.mode);
     const preferLocal = options?.mode === "auto";
     let localFallback = null;
-    if (!options?.force && !options?.ignoreLocal) {
-      try {
-        const text = decodeTextBuffer(await fs.readFile(lrcPath));
-        const value = { text, source: "sidecar" };
-        if (!onlineProvider || preferLocal || hasNativeWordTiming(text)) return value;
-        localFallback = value;
-      } catch {}
-    }
-    let embeddedFallback = "";
+    let embeddedFallback = null;
     if (!options?.force && !options?.ignoreLocal) {
       try {
         const { parseFile } = await import("music-metadata");
@@ -777,40 +825,41 @@ app.whenReady().then(() => {
         const text = Array.isArray(lyrics)
           ? lyrics.map((item) => typeof item === "string" ? item : item?.text || "").filter(Boolean).join("\n")
           : (typeof lyrics === "string" ? lyrics : "");
-        if (text) {
-          const value = { text, source: "embedded" };
-          if (!onlineProvider || preferLocal || hasNativeWordTiming(text)) return value;
-          if (!localFallback) embeddedFallback = text;
-        }
+        if (text) embeddedFallback = { text, source: "embedded", confidence: null };
+      } catch {}
+      try {
+        const text = decodeTextBuffer(await fs.readFile(lrcPath));
+        if (text) localFallback = { text, source: "sidecar", confidence: null };
       } catch {}
     }
-    const fallbackResult = () => localFallback || (embeddedFallback
-      ? { text: embeddedFallback, source: "embedded", confidence: null }
-      : { text: "", source: null });
+    const fallbackResult = () => selectLocalLyrics(embeddedFallback?.text, localFallback?.text);
     const hasOrdinaryFallback = () => Boolean(localFallback || embeddedFallback);
-    if (!onlineProvider) return fallbackResult();
+    if (!onlineProviders.length || (preferLocal && hasOrdinaryFallback())) return fallbackResult();
+    if (hasNativeWordTiming(embeddedFallback?.text) || hasNativeWordTiming(localFallback?.text)) return fallbackResult();
     const title = String(options.title || "").trim();
     const artist = String(options.artist || "").trim();
     const album = String(options.album || "").trim();
     const duration = Math.round(Number(options.duration) || 0);
     if (!title || !duration) return fallbackResult();
-    const cacheKey = JSON.stringify([onlineProvider, title, artist, album, duration]);
     const cache = await getOnlineLyricsCache();
-    if (cache[cacheKey] && !options?.force) {
-      if (/-(?:word)$/.test(cache[cacheKey].source || "") || !hasOrdinaryFallback()) return cache[cacheKey];
-      return fallbackResult();
-    }
     try {
-      const wordLyrics = onlineProvider === "qq"
-        ? await fetchQqMusicLyrics(options)
-        : await getNeteaseWordLyrics(options);
-      if (wordLyrics) {
-        cache[cacheKey] = wordLyrics;
+      for (const onlineProvider of onlineProviders) {
+        const providerCacheKey = JSON.stringify([onlineProvider, title, artist, album, duration]);
+        if (cache[providerCacheKey] && !options?.force) return cache[providerCacheKey];
+        let onlineLyrics = null;
+        try {
+          onlineLyrics = onlineProvider === "qq"
+            ? await fetchQqMusicLyrics(options)
+            : await getNeteaseWordLyrics(options);
+        } catch {}
+        if (!onlineLyrics) continue;
+        cache[providerCacheKey] = onlineLyrics;
         scheduleOnlineLyricsCacheWrite();
-        if (/-(?:word)$/.test(wordLyrics.source || "") || !hasOrdinaryFallback()) return wordLyrics;
-        return fallbackResult();
+        return onlineLyrics;
       }
       if (hasOrdinaryFallback()) return fallbackResult();
+      const publicCacheKey = JSON.stringify(["lrclib", title, artist, album, duration]);
+      if (cache[publicCacheKey] && !options?.force) return cache[publicCacheKey];
       const requestJson = async (url) => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 5500);
@@ -884,7 +933,7 @@ app.whenReady().then(() => {
           album: result.albumName
         }
       };
-      cache[cacheKey] = value;
+      cache[publicCacheKey] = value;
       scheduleOnlineLyricsCacheWrite();
       return value;
     } catch {
@@ -1136,7 +1185,13 @@ app.whenReady().then(() => {
       const stat = await fs.stat(filePath);
       const cache = await getMetadataCache();
       const cached = cache[filePath];
-      if (cached?.mtimeMs === stat.mtimeMs && cached?.size === stat.size && cached?.coverVersion === METADATA_COVER_VERSION) return cached.value;
+      const validCachedMetadata = cached?.mtimeMs === stat.mtimeMs && cached?.size === stat.size && cached?.coverVersion === METADATA_COVER_VERSION;
+      if (validCachedMetadata) {
+        try {
+          if (cached.coverPath) await fs.access(cached.coverPath);
+          return cached.value;
+        } catch {}
+      }
       const { parseFile, selectCover } = await import("music-metadata");
       const metadata = await parseFile(filePath, {
         duration: true,
@@ -1148,7 +1203,10 @@ app.whenReady().then(() => {
         const image = picture ? nativeImage.createFromBuffer(Buffer.from(picture.data)) : null;
         if (image && !image.isEmpty()) {
           const jpeg = image.resize({ width: 800, height: 800, quality: "good" }).toJPEG(100);
-          cover = `data:image/jpeg;base64,${jpeg.toString("base64")}`;
+          const cachedCoverPath = coverCachePath(filePath, stat);
+          await fs.mkdir(path.dirname(cachedCoverPath), { recursive: true });
+          await fs.writeFile(cachedCoverPath, jpeg);
+          cover = `medo-media://local/cover?path=${encodeURIComponent(cachedCoverPath)}`;
         }
       } catch {
         // Broken or unsupported embedded artwork must not discard valid audio metadata.
@@ -1163,7 +1221,8 @@ app.whenReady().then(() => {
         bitsPerSample: metadata.format.bitsPerSample || null,
         cover
       };
-      cache[filePath] = { mtimeMs: stat.mtimeMs, size: stat.size, coverVersion: METADATA_COVER_VERSION, value };
+      const cachedCoverPath = cover ? new URL(cover).searchParams.get("path") : null;
+      cache[filePath] = { mtimeMs: stat.mtimeMs, size: stat.size, coverVersion: METADATA_COVER_VERSION, coverPath: cachedCoverPath, value };
       scheduleMetadataCacheWrite();
       return value;
     } catch {
@@ -1200,6 +1259,9 @@ app.whenReady().then(() => {
     clearTimeout(metadataCacheWriteTimer);
     try {
       await fs.rm(path.join(app.getPath("userData"), "metadata-cache.json"), { force: true });
+    } catch {}
+    try {
+      await fs.rm(coverCacheDirectory(), { recursive: true, force: true });
     } catch {}
     return true;
   });
@@ -1247,6 +1309,10 @@ app.whenReady().then(() => {
     } catch {
       return null;
     }
+  });
+
+  ipcMain.on("music:set-watched-folders", (_event, folders) => {
+    updateMusicFolderWatchers(Array.isArray(folders) ? folders : []);
   });
 
   ipcMain.handle("music:choose-playlist", async () => {
@@ -1299,5 +1365,6 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  closeMusicFolderWatchers();
   persistLyricsVisibilitySync(Boolean(lyricsWindow && !lyricsWindow.isDestroyed() && lyricsWindow.isVisible()));
 });

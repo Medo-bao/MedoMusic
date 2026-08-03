@@ -19,10 +19,12 @@ async function run() {
   page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {
     window.__lyricRequests = [];
+    window.__mediaPlayCalls = 0;
+    window.__folderScanCalls = 0;
     HTMLMediaElement.prototype.load = function load() {
       queueMicrotask(() => this.dispatchEvent(new Event("canplay")));
     };
-    HTMLMediaElement.prototype.play = async function play() {};
+    HTMLMediaElement.prototype.play = async function play() { window.__mediaPlayCalls += 1; };
     HTMLMediaElement.prototype.pause = function pause() {};
     window.medo = {
       chooseFiles: async () => [],
@@ -41,7 +43,9 @@ async function run() {
           metadataLoaded: true
         }))
       }),
-      scanFolder: async (folder) => ({ folder, tracks: [] }),
+      scanFolder: async () => { window.__folderScanCalls += 1; return null; },
+      setWatchedMusicFolders: (folders) => { window.__watchedMusicFolders = [...folders]; },
+      onLibraryFolderChanged: (callback) => { window.__libraryFolderChanged = callback; return () => {}; },
       discoverDefaultLibrary: async () => ({ folder: null, tracks: [], playlists: [] }),
       choosePlaylist: async () => ({
         name: "夜间驾驶",
@@ -178,7 +182,25 @@ async function run() {
 
   await page.locator("#settings-add-folder").click();
   if (await page.locator(".folder-row").count() !== 1) throw new Error("Folder was not added");
+  if (!await page.evaluate(() => window.__watchedMusicFolders?.includes("E:\\Music"))) throw new Error("Managed music folder watcher was not registered");
+  await page.evaluate(() => window.__libraryFolderChanged("E:\\Music"));
+  await page.waitForFunction(() => window.__folderScanCalls > 0);
   await page.locator('[data-view="library"]').click();
+  await page.locator("#search-input").fill("Demo 99");
+  await page.waitForFunction(() => document.querySelectorAll(".track-row").length === 11);
+  if (await page.locator("#search-input").evaluate((element) => document.activeElement !== element)) throw new Error("Automatic search unexpectedly blurred the search field");
+  await page.locator("#search-input").fill("Demo 999");
+  await page.locator("#search-input").press("Enter");
+  if (await page.locator(".track-row").count() !== 1) throw new Error("Enter did not immediately finish the pending search");
+  if (await page.locator("#search-input").evaluate((element) => document.activeElement === element)) throw new Error("Enter did not leave the search field");
+  await page.locator("#search-input").fill("");
+  await page.locator("#search-input").press("Enter");
+  await page.waitForTimeout(150);
+  const restoredSearch = await page.evaluate(() => ({
+    value: document.querySelector("#search-input").value,
+    rows: document.querySelectorAll(".track-row").length
+  }));
+  if (restoredSearch.value !== "" || restoredSearch.rows !== 200) throw new Error(`Clearing search did not restore the library window: ${JSON.stringify(restoredSearch)}`);
   await page.locator(".track-row").first().click();
   await page.waitForTimeout(250);
   if (!await page.locator(".track-row").first().evaluate((element) => element.classList.contains("selected"))) {
@@ -199,13 +221,13 @@ async function run() {
     throw new Error("Normal lyric mode did not prefer local lyrics before NetEase fallback");
   }
   await page.locator('[data-word-lyrics-value="on"]').evaluate((element) => element.click());
-  await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "netease" && window.__lyricRequests.at(-1)?.ignoreLocal === true);
+  await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "network" && window.__lyricRequests.at(-1)?.ignoreLocal === true);
   await page.locator('[data-word-lyrics-value="off"]').evaluate((element) => element.click());
   await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "auto" && window.__lyricRequests.at(-1)?.ignoreLocal === false);
   await page.locator("#detail-refresh-lyrics").click();
-  await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "netease" && window.__lyricRequests.at(-1)?.ignoreLocal === true);
-  await page.locator("#detail-refresh-lyrics").click();
   await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "qq" && window.__lyricRequests.at(-1)?.ignoreLocal === true);
+  await page.locator("#detail-refresh-lyrics").click();
+  await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "netease" && window.__lyricRequests.at(-1)?.ignoreLocal === true);
   await page.locator("#detail-queue-list").evaluate((element) => {
     element.scrollTop = 700 * 64;
     element.dispatchEvent(new Event("scroll"));
@@ -216,8 +238,35 @@ async function run() {
   await page.locator("#next-button").click();
   await page.waitForFunction(() => Boolean(document.querySelector(".queue-item.active")) && document.querySelector("#detail-queue-list").scrollTop < 200);
   if (await page.locator("#detail-queue-count").innerText() !== "1000 首歌曲") throw new Error("Playback queue total mismatch");
-  await page.locator("#back-button").click();
+  await page.locator("body").press("Escape");
   await page.waitForFunction(() => !document.querySelector("main")?.classList.contains("playback-detail-open"));
+  const playCallsBeforeShortcut = await page.evaluate(() => window.__mediaPlayCalls);
+  await page.locator("body").press("Space");
+  if (await page.evaluate(() => window.__mediaPlayCalls) !== playCallsBeforeShortcut + 1) throw new Error("Space playback shortcut failed");
+  await page.locator("#search-input").focus();
+  await page.locator("#search-input").press("Space");
+  if (await page.evaluate(() => window.__mediaPlayCalls) !== playCallsBeforeShortcut + 1) throw new Error("Space shortcut intercepted text input");
+  await page.evaluate(() => {
+    document.body.tabIndex = -1;
+    document.body.focus();
+    const audio = document.querySelector("#audio");
+    Object.defineProperty(audio, "duration", { configurable: true, value: 120 });
+    let currentTime = 30;
+    Object.defineProperty(audio, "currentTime", {
+      configurable: true,
+      get: () => currentTime,
+      set: (value) => { currentTime = Number(value); }
+    });
+  });
+  await page.locator("body").press("ArrowRight");
+  if (await page.locator("#audio").evaluate((audio) => audio.currentTime) !== 35) throw new Error("Right arrow seek shortcut failed");
+  await page.locator("body").press("ArrowLeft");
+  if (await page.locator("#audio").evaluate((audio) => audio.currentTime) !== 30) throw new Error("Left arrow seek shortcut failed");
+  await page.locator("#volume").evaluate((control) => { control.value = "0.7"; control.dispatchEvent(new Event("input", { bubbles: true })); });
+  await page.locator("body").press("ArrowUp");
+  if (await page.locator("#volume").inputValue() !== "0.75") throw new Error("Up arrow volume shortcut failed");
+  await page.locator("body").press("ArrowDown");
+  if (await page.locator("#volume").inputValue() !== "0.7") throw new Error("Down arrow volume shortcut failed");
   await page.locator('[data-view="recent"]').click();
   if (!await page.locator(".play-count").first().isVisible()) throw new Error("Recent play count is hidden");
   await page.locator('[data-sort="artists"]').click();
@@ -297,6 +346,21 @@ async function run() {
       Math.abs(longLyricLayers.baseWidth - longLyricLayers.fillWidth) > .5 ||
       Math.abs(longLyricLayers.baseHeight - longLyricLayers.fillHeight) > .5) {
     throw new Error(`Long detail lyric layers are misaligned: ${JSON.stringify(longLyricLayers)}`);
+  }
+  const translatedKaraokeProgress = await page.evaluate(() => {
+    const line = document.createElement("span");
+    line.className = "lyric-line active";
+    line.style.setProperty("--line-progress", "42%");
+    line.innerHTML = `
+      <span class="lyric-karaoke"><span class="lyric-karaoke-base">Original</span><span class="lyric-karaoke-fill">Original</span></span>
+      <span class="lyric-translation lyric-karaoke lyric-translation-karaoke"><span class="lyric-karaoke-base">翻译</span><span class="lyric-karaoke-fill">翻译</span></span>`;
+    document.body.append(line);
+    const fills = [...line.querySelectorAll(".lyric-karaoke-fill")].map((element) => getComputedStyle(element).clipPath);
+    line.remove();
+    return fills;
+  });
+  if (translatedKaraokeProgress.length !== 2 || translatedKaraokeProgress[0] !== translatedKaraokeProgress[1] || translatedKaraokeProgress[0] === "none") {
+    throw new Error(`Detail translation does not share word progress: ${JSON.stringify(translatedKaraokeProgress)}`);
   }
 
   const lyricPage = await browser.newPage({ viewport: { width: 1024, height: 150 } });
