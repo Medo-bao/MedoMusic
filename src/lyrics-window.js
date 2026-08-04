@@ -148,6 +148,7 @@ function updateWordProgress(position) {
 
 applyLyricSize();
 window.medo.onLyricsWindowLine((payload = {}) => {
+  if (typeof payload.playing === "boolean") document.body.classList.toggle("paused", !payload.playing);
   if (payload.primary) document.documentElement.style.setProperty("--lyric-primary", payload.primary);
   if (payload.secondary) document.documentElement.style.setProperty("--lyric-secondary", payload.secondary);
   if (payload.colorsOnly) return;

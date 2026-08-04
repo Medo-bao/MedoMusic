@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, nativeImage, nativeTheme, Tray, Menu, protocol, screen, shell } = require("electron");
+const { app, BrowserWindow, dialog, globalShortcut, ipcMain, nativeImage, nativeTheme, Tray, Menu, protocol, screen, shell } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const fsSync = require("node:fs");
@@ -7,7 +7,7 @@ const { pathToFileURL } = require("node:url");
 const { parseZpl } = require("./zpl");
 const { decodeTextBuffer } = require("./text-decoder");
 const { hasNativeWordTiming } = require("./lyrics-timing");
-const { fetchNeteaseNewLyrics } = require("./netease-eapi");
+const { fetchNeteaseLyrics } = require("./netease-eapi");
 const { fetchQqMusicLyrics } = require("./qq-music");
 const { resolveOnlineLyricProviders, selectLocalLyrics } = require("./lyrics-source-priority");
 
@@ -297,41 +297,6 @@ async function getNeteaseLyricTranslation(options, lines) {
   });
 }
 
-async function getNeteaseWordLyrics(options) {
-  const title = String(options.title || "").trim();
-  const artist = String(options.artist || "").trim();
-  if (!title) return null;
-  const headers = {
-    Referer: "https://music.163.com/",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MedoMusic"
-  };
-  const query = new URLSearchParams({ s: `${title} ${artist}`.trim(), type: "1", offset: "0", total: "true", limit: "8" });
-  const response = await fetch(`https://music.163.com/api/search/get/web?${query}`, { headers, signal: AbortSignal.timeout(6000) });
-  if (!response.ok) return null;
-  const songs = (await response.json())?.result?.songs || [];
-  const normalize = (value) => String(value || "").toLowerCase().normalize("NFKC").replace(/[^\p{L}\p{N}]+/gu, "");
-  const expectedDuration = Number(options.duration) || 0;
-  const ranked = songs.map((song) => {
-    const songArtists = (song.artists || song.ar || []).map((item) => item.name).join(" ");
-    const titleScore = normalize(song.name) === normalize(title) ? 1 : normalize(song.name).includes(normalize(title)) ? .76 : 0;
-    const artistScore = !artist ? .5 : normalize(songArtists).includes(normalize(artist)) ? 1 : 0;
-    const duration = Number(song.duration || song.dt || 0) / 1000;
-    const durationScore = !expectedDuration ? .5 : Math.max(0, 1 - Math.abs(duration - expectedDuration) / 12);
-    return { song, score: titleScore * .58 + artistScore * .27 + durationScore * .15 };
-  }).sort((left, right) => right.score - left.score);
-  if (!ranked[0] || ranked[0].score < .62) return null;
-  const payload = await fetchNeteaseNewLyrics(ranked[0].song.id);
-  if (!payload) return null;
-  const text = payload?.yrc?.lyric || payload?.lrc?.lyric || "";
-  if (!text) return null;
-  return {
-    text,
-    source: payload?.yrc?.lyric ? "netease-word" : "netease-line",
-    confidence: Math.round(ranked[0].score * 100),
-    match: { title: ranked[0].song.name, artist: (ranked[0].song.artists || ranked[0].song.ar || []).map((item) => item.name).join(" ") }
-  };
-}
-
 function createWindow() {
   const startupBackground = nativeTheme.shouldUseDarkColors ? "#111416" : "#f4f6f7";
   const window = new BrowserWindow({
@@ -390,6 +355,15 @@ function showMainWindow() {
 function sendTrayCommand(command, value) {
   showMainWindow();
   mainWindow.webContents.send("tray:command", { command, value });
+}
+
+function sendGlobalPlaybackCommand(command) {
+  if (!mainWindow || mainWindow.isDestroyed()) mainWindow = createWindow();
+  const send = () => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("tray:command", { command });
+  };
+  if (mainWindow.webContents.isLoading()) mainWindow.webContents.once("did-finish-load", send);
+  else send();
 }
 
 function keepLyricsWindowOnTop(window = lyricsWindow) {
@@ -813,7 +787,7 @@ app.whenReady().then(() => {
     const filePath = typeof options === "string" ? options : options?.filePath;
     if (typeof filePath !== "string") return { text: "", source: null };
     const lrcPath = path.join(path.dirname(filePath), `${path.basename(filePath, path.extname(filePath))}.lrc`);
-    const onlineProviders = resolveOnlineLyricProviders(options?.mode);
+    const onlineProviders = resolveOnlineLyricProviders(options?.mode, options?.artist);
     const preferLocal = options?.mode === "auto";
     let localFallback = null;
     let embeddedFallback = null;
@@ -843,20 +817,27 @@ app.whenReady().then(() => {
     if (!title || !duration) return fallbackResult();
     const cache = await getOnlineLyricsCache();
     try {
+      let networkLineFallback = null;
       for (const onlineProvider of onlineProviders) {
         const providerCacheKey = JSON.stringify([onlineProvider, title, artist, album, duration]);
-        if (cache[providerCacheKey] && !options?.force) return cache[providerCacheKey];
-        let onlineLyrics = null;
-        try {
-          onlineLyrics = onlineProvider === "qq"
-            ? await fetchQqMusicLyrics(options)
-            : await getNeteaseWordLyrics(options);
-        } catch {}
+        let onlineLyrics = cache[providerCacheKey] && !options?.force ? cache[providerCacheKey] : null;
+        if (!onlineLyrics) {
+          try {
+            onlineLyrics = onlineProvider === "qq"
+              ? await fetchQqMusicLyrics(options)
+              : await fetchNeteaseLyrics(options);
+          } catch {}
+        }
         if (!onlineLyrics) continue;
         cache[providerCacheKey] = onlineLyrics;
         scheduleOnlineLyricsCacheWrite();
+        if (options?.mode === "network" && !hasNativeWordTiming(onlineLyrics.text)) {
+          networkLineFallback ||= onlineLyrics;
+          continue;
+        }
         return onlineLyrics;
       }
+      if (networkLineFallback) return networkLineFallback;
       if (hasOrdinaryFallback()) return fallbackResult();
       const publicCacheKey = JSON.stringify(["lrclib", title, artist, album, duration]);
       if (cache[publicCacheKey] && !options?.force) return cache[publicCacheKey];
@@ -1353,6 +1334,7 @@ app.whenReady().then(() => {
   queueExternalAudioFiles(process.argv.slice(1));
   createWindow();
   createTray();
+  globalShortcut.register("Alt+S", () => sendGlobalPlaybackCommand("toggle-play"));
   restoreLyricsWindowVisibility();
   app.on("activate", () => {
     showMainWindow();
@@ -1365,6 +1347,7 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  globalShortcut.unregisterAll();
   closeMusicFolderWatchers();
   persistLyricsVisibilitySync(Boolean(lyricsWindow && !lyricsWindow.isDestroyed() && lyricsWindow.isVisible()));
 });

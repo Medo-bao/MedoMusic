@@ -9,6 +9,13 @@ const favoriteButton = document.querySelector("#favorite-button");
 const missingArt = "../Groove/Assets/MissingAlbumArt.jpg";
 const { completeWordTimings, resolveYrcWordStart } = window.MedoLyricsTiming;
 
+function updatePlayButtonState(playing) {
+  const action = playing ? "暂停" : "播放";
+  playButton.innerHTML = playing ? "&#xE769;" : "&#xE768;";
+  playButton.title = `${action} Alt+S`;
+  playButton.setAttribute("aria-label", `${action} Alt+S`);
+}
+
 let tracks = loadJson("medo.tracks", []);
 let playlists = loadJson("medo.playlists", []);
 let musicFolders = loadJson("medo.musicFolders", []);
@@ -2228,7 +2235,7 @@ function recoverPlaybackFailure(track) {
   showPlaybackError(track, "队列中没有可播放的文件");
 }
 
-async function playTrack(index, preserveQueue = false) {
+async function playTrack(index, preserveQueue = false, preservePreviousNavigation = false) {
   if (!tracks[index]) return;
   ensureOutputGain();
   if (!preserveQueue) playbackFailedIds.clear();
@@ -2268,8 +2275,10 @@ async function playTrack(index, preserveQueue = false) {
   audio.pause();
   if (generation !== playbackGeneration) return;
   currentIndex = index;
-  lastPreviousRestartAt = 0;
-  lastPreviousRestartTrackId = null;
+  if (!preservePreviousNavigation) {
+    lastPreviousRestartAt = 0;
+    lastPreviousRestartTrackId = null;
+  }
   audio.src = track.url;
   applyOutputVolume();
   audio.load();
@@ -2622,7 +2631,7 @@ function clearCurrentPlayback() {
   currentIndex = -1;
   activeLyricIndex = -1;
   document.querySelectorAll(".track-row.active").forEach((row) => row.classList.remove("active"));
-  playButton.innerHTML = "&#xE768;";
+  updatePlayButtonState(false);
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
   progress.value = 0;
   updateRangeGradient(progress, 0);
@@ -2659,11 +2668,10 @@ function nextTrack(direction = 1) {
     }
   }
   if (!queue.length) return;
+  let continuingPreviousNavigation = false;
   if (direction < 0 && currentId && !audio.paused) {
     const now = Date.now();
-    const repeatedPrevious =
-      lastPreviousRestartTrackId === currentId &&
-      now - lastPreviousRestartAt <= 3000;
+    const repeatedPrevious = lastPreviousRestartAt > 0 && now - lastPreviousRestartAt <= 3000;
     if (!repeatedPrevious) {
       audio.currentTime = 0;
       progress.value = 0;
@@ -2674,9 +2682,14 @@ function nextTrack(direction = 1) {
       schedulePersist();
       return;
     }
+    continuingPreviousNavigation = true;
+    lastPreviousRestartAt = now;
+    lastPreviousRestartTrackId = currentId;
   }
-  lastPreviousRestartAt = 0;
-  lastPreviousRestartTrackId = null;
+  if (!continuingPreviousNavigation) {
+    lastPreviousRestartAt = 0;
+    lastPreviousRestartTrackId = null;
+  }
   if (playMode === "shuffle") {
     const queueIds = queue.map((track) => track.id);
     const signature = [...queueIds].sort().join("\u001f");
@@ -2700,7 +2713,7 @@ function nextTrack(direction = 1) {
     if (direction < 0 && shuffleHistoryIndex > 0) {
       shuffleHistoryIndex -= 1;
       const previousId = shuffleHistoryIds[shuffleHistoryIndex];
-      return playTrack(tracks.findIndex((track) => track.id === previousId), true);
+      return playTrack(tracks.findIndex((track) => track.id === previousId), true, continuingPreviousNavigation);
     }
     if (direction > 0 && shuffleHistoryIndex < shuffleHistoryIds.length - 1) {
       shuffleHistoryIndex += 1;
@@ -2728,7 +2741,11 @@ function nextTrack(direction = 1) {
   const nextIndex = queueIndex < 0
     ? (direction < 0 ? queue.length - 1 : 0)
     : (queueIndex + direction + queue.length) % queue.length;
-  playTrack(tracks.findIndex((track) => track.id === queue[nextIndex].id), true);
+  playTrack(
+    tracks.findIndex((track) => track.id === queue[nextIndex].id),
+    true,
+    direction < 0 && continuingPreviousNavigation
+  );
 }
 
 function toggleFavorite(id = tracks[currentIndex]?.id) {
@@ -3549,7 +3566,7 @@ document.addEventListener("keydown", (event) => {
 audio.addEventListener("play", () => {
   const completedTrackSwitch = switchingPlaybackGeneration !== 0;
   switchingPlaybackGeneration = 0;
-  playButton.innerHTML = "&#xE769;";
+  updatePlayButtonState(true);
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
   activeLyricIndex = -1;
   updateLyricsAtTime();
@@ -3565,7 +3582,7 @@ audio.addEventListener("play", () => {
 });
 audio.addEventListener("pause", () => {
   if (switchingPlaybackGeneration !== 0) return;
-  playButton.innerHTML = "&#xE768;";
+  updatePlayButtonState(false);
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
   activeLyricIndex = -1;
   updateLyricsAtTime();

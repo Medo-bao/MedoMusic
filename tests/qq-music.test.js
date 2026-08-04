@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
-const { decodeQqLyricJsonp, fetchQqMusicLyrics } = require("../src/qq-music");
+const { encryptQrc } = require("qrc-decoder");
+const { decodeQqLyricJsonp, extractQrcLyric, searchSongsFromPayload, fetchQqMusicLyrics } = require("../src/qq-music");
 
 const callback = "MusicJsonCallback_lrc";
 const lyric = "[00:01.00]测试歌词";
@@ -7,20 +8,35 @@ const payload = Buffer.from(lyric, "utf8").toString("base64");
 assert.equal(decodeQqLyricJsonp(`${callback}(${JSON.stringify({ code: 0, lyric: payload })})`, callback), lyric);
 assert.equal(decodeQqLyricJsonp("invalid", callback), null);
 
+const qrcText = "[1000,1000]逐(1000,500)字(1500,500)";
+const qrcXml = `<?xml version="1.0"?><QrcInfos><LyricInfo><Lyric_1 LyricType="1" LyricContent="${qrcText}"/></LyricInfo></QrcInfos>`;
+const qrcResponse = `<!--<lyric><content type="file"><![CDATA[${encryptQrc(qrcXml)}]]></content></lyric>-->`;
+assert.equal(extractQrcLyric(qrcResponse), qrcText);
+assert.equal(extractQrcLyric("<content><![CDATA[invalid]]></content>"), null);
+
+const song = { id: 1, mid: "demo-mid", name: "测试歌曲", interval: 180, singer: [{ name: "测试歌手" }] };
+const searchPayload = { "music.search.SearchCgiService": { data: { body: { song: { list: [song] } } } } };
+assert.deepEqual(searchSongsFromPayload(searchPayload), [song]);
+assert.deepEqual(searchSongsFromPayload({ req_1: { data: { body: { song: { list: [song] } } } } }), [song]);
+
 (async () => {
-  const searchPayload = {
-    req_1: { data: { body: { song: { list: [{ id: 1, mid: "demo-mid", name: "测试歌曲", interval: 180, singer: [{ name: "测试歌手" }] }] } } } }
-  };
-  const mockFetch = (timedText) => {
-    let calls = 0;
-    return async () => ++calls === 1
-      ? { ok: true, json: async () => searchPayload }
-      : { ok: true, text: async () => `${callback}(${JSON.stringify({ code: 0, lyric: Buffer.from(timedText).toString("base64") })})` };
-  };
-  const ordinary = await fetchQqMusicLyrics({ title: "测试歌曲", artist: "测试歌手", duration: 180 }, mockFetch("[00:01.00]普通歌词"));
-  assert.equal(ordinary.source, "qq-line");
-  const qrc = await fetchQqMusicLyrics({ title: "测试歌曲", artist: "测试歌手", duration: 180 }, mockFetch("[1000,1000]逐(1000,500)字(1500,500)"));
+  const qrcFetch = async (_url, options) => options?.headers?.["Content-Type"] === "application/json"
+    ? { ok: true, json: async () => searchPayload }
+    : { ok: true, text: async () => qrcResponse };
+  const qrc = await fetchQqMusicLyrics({ title: "测试歌曲", artist: "测试歌手", duration: 180 }, qrcFetch);
   assert.equal(qrc.source, "qq-word");
+  assert.equal(qrc.text, qrcText);
+
+  let calls = 0;
+  const ordinaryFetch = async () => {
+    calls += 1;
+    if (calls === 1) return { ok: true, json: async () => searchPayload };
+    if (calls === 2) return { ok: true, text: async () => "<lyric></lyric>" };
+    return { ok: true, text: async () => `${callback}(${JSON.stringify({ code: 0, lyric: Buffer.from(lyric).toString("base64") })})` };
+  };
+  const ordinary = await fetchQqMusicLyrics({ title: "测试歌曲", artist: "测试歌手", duration: 180 }, ordinaryFetch);
+  assert.equal(ordinary.source, "qq-line");
+  assert.equal(calls, 3);
   console.log("QQ Music tests passed");
 })().catch((error) => {
   console.error(error);

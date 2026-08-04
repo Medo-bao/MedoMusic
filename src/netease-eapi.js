@@ -55,4 +55,78 @@ async function fetchNeteaseNewLyrics(songId, fetchImplementation = fetch) {
   return await response.json();
 }
 
-module.exports = { createNeteaseEapiRequest, fetchNeteaseNewLyrics };
+function normalize(value) {
+  return String(value || "").toLowerCase().normalize("NFKC").replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function rankNeteaseSongs(songs, options) {
+  const title = String(options?.title || "").trim();
+  const artist = String(options?.artist || "").trim();
+  const expectedDuration = Number(options?.duration) || 0;
+  const normalizedTitle = normalize(title);
+  const normalizedArtist = normalize(artist);
+  return (Array.isArray(songs) ? songs : []).map((song) => {
+    const artistNames = (song.artists || song.ar || []).map((item) => String(item?.name || "").trim()).filter(Boolean);
+    const songArtists = artistNames.join(" ");
+    const candidateTitle = normalize(song.name);
+    const titleScore = candidateTitle === normalizedTitle ? 1 : candidateTitle.includes(normalizedTitle) ? .76 : 0;
+    const normalizedArtists = artistNames.map(normalize);
+    const exactArtist = !artist || normalizedArtists.includes(normalizedArtist);
+    const partialArtist = !artist || normalizedArtists.some((name) => {
+      if (!name || !normalizedArtist) return false;
+      const contains = name.includes(normalizedArtist) || normalizedArtist.includes(name);
+      const longer = Math.max(name.length, normalizedArtist.length);
+      const shorter = Math.max(1, Math.min(name.length, normalizedArtist.length));
+      return contains && longer <= shorter * 2;
+    });
+    const artistScore = !artist ? .5 : exactArtist ? 1 : partialArtist ? .68 : 0;
+    const duration = Number(song.duration || song.dt || 0) / 1000;
+    const durationDelta = expectedDuration && duration ? Math.abs(duration - expectedDuration) : 0;
+    const durationScore = !expectedDuration || !duration ? .5 : Math.max(0, 1 - durationDelta / 12);
+    const plausibleMatch = titleScore > 0 && (exactArtist || partialArtist) &&
+      (!expectedDuration || !duration || durationDelta <= (exactArtist ? 24 : 16));
+    return {
+      song,
+      artist: songArtists,
+      score: plausibleMatch ? titleScore * .58 + artistScore * .27 + durationScore * .15 : 0
+    };
+  }).sort((left, right) => right.score - left.score);
+}
+
+async function searchNeteaseSongs(options, fetchImplementation = fetch) {
+  const title = String(options?.title || "").trim();
+  const artist = String(options?.artist || "").trim();
+  if (!title) return [];
+  const query = new URLSearchParams({
+    s: `${title} ${artist}`.trim(), type: "1", offset: "0", total: "true", limit: "12"
+  });
+  const response = await fetchImplementation(`https://music.163.com/api/cloudsearch/pc?${query}`, {
+    headers: { Referer: "https://music.163.com/", "User-Agent": USER_AGENT },
+    signal: AbortSignal.timeout(6500)
+  });
+  if (!response.ok) return [];
+  return (await response.json())?.result?.songs || [];
+}
+
+async function fetchNeteaseLyrics(options, fetchImplementation = fetch) {
+  const ranked = rankNeteaseSongs(await searchNeteaseSongs(options, fetchImplementation), options);
+  const best = ranked[0];
+  if (!best || best.score < .62 || !best.song.id) return null;
+  const payload = await fetchNeteaseNewLyrics(best.song.id, fetchImplementation);
+  const text = payload?.yrc?.lyric || payload?.lrc?.lyric || "";
+  if (!text) return null;
+  return {
+    text,
+    source: payload?.yrc?.lyric ? "netease-word" : "netease-line",
+    confidence: Math.round(best.score * 100),
+    match: { title: best.song.name, artist: best.artist }
+  };
+}
+
+module.exports = {
+  createNeteaseEapiRequest,
+  fetchNeteaseNewLyrics,
+  rankNeteaseSongs,
+  searchNeteaseSongs,
+  fetchNeteaseLyrics
+};

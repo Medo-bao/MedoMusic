@@ -16,6 +16,7 @@ body { margin: 0; overflow: hidden; background: transparent; font-family: "Segoe
   background: transparent;
   cursor: grab;
   user-select: none;
+  transition: opacity 300ms ease;
 }
 #desktop-lyric, #desktop-next-lyric {
   overflow: hidden;
@@ -88,6 +89,6 @@ body { margin: 0; overflow: hidden; background: transparent; font-family: "Segoe
 }
 #desktop-next-lyric.current-translation:has(.desktop-karaoke-base) { background: none; }
 .dragging .lyrics-island { cursor: grabbing; }
-.locked .lyrics-island { transition: opacity 300ms ease; }
 .locked.pointer-inside .lyrics-island { opacity: 0; }
+.paused .lyrics-island { opacity: 0; }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
