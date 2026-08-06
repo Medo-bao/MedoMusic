@@ -21,6 +21,7 @@ async function run() {
     window.__lyricRequests = [];
     window.__mediaPlayCalls = 0;
     window.__folderScanCalls = 0;
+    window.__globalShortcutSettings = [];
     HTMLMediaElement.prototype.load = function load() {
       queueMicrotask(() => this.dispatchEvent(new Event("canplay")));
     };
@@ -100,6 +101,7 @@ async function run() {
       translateLyrics: async () => [],
       updateLyricsWindow: () => {},
       setCloseBehavior: () => {},
+      setGlobalShortcuts: (settings) => window.__globalShortcutSettings.push({ ...settings }),
       onLyricsWindowVisibility: () => () => {},
       onResolvedTheme: () => () => {},
       onOpenAudioFiles: () => () => {},
@@ -168,6 +170,18 @@ async function run() {
   if (await page.locator(".page-header .header-actions").count() !== 0) throw new Error("Header actions remain");
   if (await page.locator(".theme-option").count() !== 3) throw new Error("Theme options mismatch");
   if (await page.locator(".lyric-source-option").count() !== 0) throw new Error("Manual lyric source options remain in settings");
+  if (await page.locator(".global-play-shortcut-option").count() !== 2 ||
+      await page.locator(".global-lyrics-shortcut-option").count() !== 2 ||
+      await page.locator(".global-previous-shortcut-option").count() !== 2 ||
+      await page.locator(".global-next-shortcut-option").count() !== 2) {
+    throw new Error("Global shortcut settings are incomplete");
+  }
+  await page.locator('.global-lyrics-shortcut-option[data-enabled="false"]').click();
+  const shortcutSettings = await page.evaluate(() => window.__globalShortcutSettings.at(-1));
+  if (shortcutSettings?.playPause !== true || shortcutSettings?.lyricsRefresh !== false ||
+      shortcutSettings?.previous !== true || shortcutSettings?.next !== true) {
+    throw new Error(`Global shortcut setting did not persist: ${JSON.stringify(shortcutSettings)}`);
+  }
   if (await page.locator('[data-theme-value="system"]').innerText().then((text) => !text.includes("跟随系统"))) {
     throw new Error("System theme option missing");
   }
@@ -218,16 +232,16 @@ async function run() {
   if (queueRowsOverlap) throw new Error("Playback queue rows overlap");
   if (!await page.locator("#detail-refresh-lyrics").isVisible()) throw new Error("Queue lyric refresh is hidden");
   if (!await page.evaluate(() => window.__lyricRequests.some((request) => request.mode === "auto" && request.ignoreLocal === false))) {
-    throw new Error("Normal lyric mode did not prefer local lyrics before NetEase fallback");
+    throw new Error("Normal lyric mode did not prefer local lyrics before QQ Music fallback");
   }
   await page.locator('[data-word-lyrics-value="on"]').evaluate((element) => element.click());
   await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "network" && window.__lyricRequests.at(-1)?.ignoreLocal === true);
   await page.locator('[data-word-lyrics-value="off"]').evaluate((element) => element.click());
   await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "auto" && window.__lyricRequests.at(-1)?.ignoreLocal === false);
   await page.locator("#detail-refresh-lyrics").click();
-  await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "qq" && window.__lyricRequests.at(-1)?.ignoreLocal === true);
-  await page.locator("#detail-refresh-lyrics").click();
   await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "netease" && window.__lyricRequests.at(-1)?.ignoreLocal === true);
+  await page.locator("#detail-refresh-lyrics").click();
+  await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "qq" && window.__lyricRequests.at(-1)?.ignoreLocal === true);
   await page.locator("#detail-queue-list").evaluate((element) => {
     element.scrollTop = 700 * 64;
     element.dispatchEvent(new Event("scroll"));

@@ -253,6 +253,43 @@
           </div>
         </div>
 
+        <div class="settings-group global-shortcuts-group">
+          <div class="settings-heading">
+            <div>
+              <h2>全局快捷键</h2>
+              <p>即使 MedoMusic 不在前台，也可以控制播放和刷新歌词。</p>
+            </div>
+          </div>
+          <div class="display-setting global-play-shortcut-setting">
+            <div><h3>启用全局暂停快捷键</h3><p>启用全局暂停快捷键：Alt+S</p></div>
+            <div class="segmented-control global-play-shortcut-options" role="radiogroup" aria-label="启用全局暂停快捷键">
+              <button class="global-play-shortcut-option active" data-enabled="true" role="radio" aria-checked="true">启用</button>
+              <button class="global-play-shortcut-option" data-enabled="false" role="radio" aria-checked="false">关闭</button>
+            </div>
+          </div>
+          <div class="display-setting global-lyrics-shortcut-setting">
+            <div><h3>启用全局歌词刷新快捷键</h3><p>启用全局歌词刷新快捷键：Alt+D</p></div>
+            <div class="segmented-control global-lyrics-shortcut-options" role="radiogroup" aria-label="启用全局歌词刷新快捷键">
+              <button class="global-lyrics-shortcut-option active" data-enabled="true" role="radio" aria-checked="true">启用</button>
+              <button class="global-lyrics-shortcut-option" data-enabled="false" role="radio" aria-checked="false">关闭</button>
+            </div>
+          </div>
+          <div class="display-setting global-previous-shortcut-setting">
+            <div><h3>启用全局上一首歌快捷键</h3><p>启用全局上一首歌快捷键：Alt+Q</p></div>
+            <div class="segmented-control global-previous-shortcut-options" role="radiogroup" aria-label="启用全局上一首歌快捷键">
+              <button class="global-previous-shortcut-option active" data-enabled="true" role="radio" aria-checked="true">启用</button>
+              <button class="global-previous-shortcut-option" data-enabled="false" role="radio" aria-checked="false">关闭</button>
+            </div>
+          </div>
+          <div class="display-setting global-next-shortcut-setting">
+            <div><h3>启用全局下一首歌快捷键</h3><p>启用全局下一首歌快捷键：Alt+E</p></div>
+            <div class="segmented-control global-next-shortcut-options" role="radiogroup" aria-label="启用全局下一首歌快捷键">
+              <button class="global-next-shortcut-option active" data-enabled="true" role="radio" aria-checked="true">启用</button>
+              <button class="global-next-shortcut-option" data-enabled="false" role="radio" aria-checked="false">关闭</button>
+            </div>
+          </div>
+        </div>
+
         <div class="settings-group">
           <div class="settings-heading">
             <div>
@@ -302,7 +339,7 @@
                 <span>正在播放</span>
                 <span class="detail-queue-meta">
                   <strong id="detail-queue-count">0 首歌曲</strong>
-                  <button id="detail-refresh-lyrics" class="glyph" title="从网络刷新当前歌词" aria-label="从网络刷新当前歌词">&#xE72C;</button>
+                  <button id="detail-refresh-lyrics" class="glyph" title="从网络重新获取歌词" aria-label="从网络重新获取歌词">&#xE72C;</button>
                   <button id="detail-clear-queue" class="glyph" title="清空播放队列" aria-label="清空播放队列">&#xE74D;</button>
                 </span>
               </div>
@@ -329,7 +366,7 @@
         <div class="controls">
           <button id="play-mode-button" class="glyph play-mode-button" data-mode="sequence" title="列表循环">&#xE8EE;</button>
           <button id="previous-button" class="glyph" title="上一首">&#xE892;</button>
-          <button id="play-button" class="glyph play-button" title="播放 Alt+S" aria-label="播放 Alt+S">&#xE768;</button>
+          <button id="play-button" class="glyph play-button" title="播放" aria-label="播放">&#xE768;</button>
           <button id="next-button" class="glyph" title="下一首">&#xE893;</button>
           <button id="favorite-button" class="heart-button" title="收藏">♡</button>
         </div>

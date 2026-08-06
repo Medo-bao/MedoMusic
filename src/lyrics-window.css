@@ -91,4 +91,5 @@ body { margin: 0; overflow: hidden; background: transparent; font-family: "Segoe
 .dragging .lyrics-island { cursor: grabbing; }
 .locked.pointer-inside .lyrics-island { opacity: 0; }
 .paused .lyrics-island { opacity: 0; }
+.no-lyrics .lyrics-island { opacity: 0; }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }

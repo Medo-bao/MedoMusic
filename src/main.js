@@ -47,6 +47,10 @@ let lyricsWindowPointerInside = false;
 let lyricsWindowTopTimer = null;
 let trayMuted = false;
 let trayLyricsSize = 34;
+let globalPlayPauseShortcutEnabled = true;
+let globalLyricsRefreshShortcutEnabled = true;
+let globalPreviousShortcutEnabled = true;
+let globalNextShortcutEnabled = true;
 const musicFolderWatchers = new Map();
 const METADATA_COVER_VERSION = 8;
 
@@ -364,6 +368,29 @@ function sendGlobalPlaybackCommand(command) {
   };
   if (mainWindow.webContents.isLoading()) mainWindow.webContents.once("did-finish-load", send);
   else send();
+}
+
+function applyGlobalShortcutSettings(settings = {}) {
+  globalPlayPauseShortcutEnabled = settings.playPause !== false;
+  globalLyricsRefreshShortcutEnabled = settings.lyricsRefresh !== false;
+  globalPreviousShortcutEnabled = settings.previous !== false;
+  globalNextShortcutEnabled = settings.next !== false;
+  globalShortcut.unregister("Alt+S");
+  globalShortcut.unregister("Alt+D");
+  globalShortcut.unregister("Alt+Q");
+  globalShortcut.unregister("Alt+E");
+  if (globalPlayPauseShortcutEnabled) {
+    globalShortcut.register("Alt+S", () => sendGlobalPlaybackCommand("toggle-play"));
+  }
+  if (globalLyricsRefreshShortcutEnabled) {
+    globalShortcut.register("Alt+D", () => sendGlobalPlaybackCommand("refresh-lyrics"));
+  }
+  if (globalPreviousShortcutEnabled) {
+    globalShortcut.register("Alt+Q", () => sendGlobalPlaybackCommand("previous"));
+  }
+  if (globalNextShortcutEnabled) {
+    globalShortcut.register("Alt+E", () => sendGlobalPlaybackCommand("next"));
+  }
 }
 
 function keepLyricsWindowOnTop(window = lyricsWindow) {
@@ -781,6 +808,10 @@ app.whenReady().then(() => {
 
   ipcMain.on("app:set-close-behavior", (_event, value) => {
     closeBehavior = value === "quit" ? "quit" : "background";
+  });
+
+  ipcMain.on("app:set-global-shortcuts", (_event, settings) => {
+    applyGlobalShortcutSettings(settings);
   });
 
   ipcMain.handle("music:lyrics", async (_event, options) => {
@@ -1334,7 +1365,7 @@ app.whenReady().then(() => {
   queueExternalAudioFiles(process.argv.slice(1));
   createWindow();
   createTray();
-  globalShortcut.register("Alt+S", () => sendGlobalPlaybackCommand("toggle-play"));
+  applyGlobalShortcutSettings();
   restoreLyricsWindowVisibility();
   app.on("activate", () => {
     showMainWindow();

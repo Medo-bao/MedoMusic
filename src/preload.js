@@ -62,6 +62,7 @@ contextBridge.exposeInMainWorld("medo", {
   toggleMaximizeWindow: () => ipcRenderer.send("window:toggle-maximize"),
   closeWindow: () => ipcRenderer.send("window:close"),
   setCloseBehavior: (value) => ipcRenderer.send("app:set-close-behavior", value),
+  setGlobalShortcuts: (settings) => ipcRenderer.send("app:set-global-shortcuts", settings),
   onTrayCommand: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("tray:command", listener);

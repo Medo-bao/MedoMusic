@@ -1,13 +1,6 @@
-function isJayChouArtist(artist) {
-  const normalized = String(artist || "").toLowerCase().normalize("NFKC").replace(/[^\p{L}\p{N}]+/gu, "");
-  return normalized.includes("周杰伦") || normalized.includes("jaychou");
-}
-
-function resolveOnlineLyricProviders(mode, artist = "") {
+function resolveOnlineLyricProviders(mode) {
   if (mode === "local") return [];
-  if (mode === "auto" || mode === "network" || !mode) {
-    return isJayChouArtist(artist) ? ["qq", "netease"] : ["netease", "qq"];
-  }
+  if (mode === "auto" || mode === "network" || !mode) return ["qq", "netease"];
   return [mode === "netease" ? "netease" : "qq"];
 }
 
@@ -17,4 +10,4 @@ function selectLocalLyrics(embeddedText, sidecarText) {
   return { text: "", source: null };
 }
 
-module.exports = { isJayChouArtist, resolveOnlineLyricProviders, selectLocalLyrics };
+module.exports = { resolveOnlineLyricProviders, selectLocalLyrics };

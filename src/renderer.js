@@ -12,8 +12,8 @@ const { completeWordTimings, resolveYrcWordStart } = window.MedoLyricsTiming;
 function updatePlayButtonState(playing) {
   const action = playing ? "暂停" : "播放";
   playButton.innerHTML = playing ? "&#xE769;" : "&#xE768;";
-  playButton.title = `${action} Alt+S`;
-  playButton.setAttribute("aria-label", `${action} Alt+S`);
+  playButton.title = action;
+  playButton.setAttribute("aria-label", action);
 }
 
 let tracks = loadJson("medo.tracks", []);
@@ -42,6 +42,10 @@ let desktopLyricPrimaryColor = localStorage.getItem("medo.desktopLyricPrimaryCol
 let desktopLyricSecondaryColor = localStorage.getItem("medo.desktopLyricSecondaryColor") || "#d934ff";
 let displayMode = localStorage.getItem("medo.displayMode") || "thumbnail";
 let closeBehavior = localStorage.getItem("medo.closeBehavior") || "background";
+let globalPlayPauseShortcutEnabled = localStorage.getItem("medo.globalPlayPauseShortcutEnabled") !== "false";
+let globalLyricsRefreshShortcutEnabled = localStorage.getItem("medo.globalLyricsRefreshShortcutEnabled") !== "false";
+let globalPreviousShortcutEnabled = localStorage.getItem("medo.globalPreviousShortcutEnabled") !== "false";
+let globalNextShortcutEnabled = localStorage.getItem("medo.globalNextShortcutEnabled") !== "false";
 let lyricTranslationEnabled = localStorage.getItem("medo.lyricTranslationEnabled") !== "false";
 const hasWordLyricsPreference = localStorage.getItem("medo.wordLyricsPreferenceSet") === "true";
 let wordLyricsEnabled = hasWordLyricsPreference && localStorage.getItem("medo.wordLyricsEnabled") === "true";
@@ -349,10 +353,52 @@ function reloadCurrentLyrics({ networkProvider = null } = {}) {
   return request;
 }
 
+function applyGlobalShortcutSettings(type, enabled) {
+  if (type === "playPause") {
+    globalPlayPauseShortcutEnabled = Boolean(enabled);
+    localStorage.setItem("medo.globalPlayPauseShortcutEnabled", String(globalPlayPauseShortcutEnabled));
+  } else if (type === "lyricsRefresh") {
+    globalLyricsRefreshShortcutEnabled = Boolean(enabled);
+    localStorage.setItem("medo.globalLyricsRefreshShortcutEnabled", String(globalLyricsRefreshShortcutEnabled));
+  } else if (type === "previous") {
+    globalPreviousShortcutEnabled = Boolean(enabled);
+    localStorage.setItem("medo.globalPreviousShortcutEnabled", String(globalPreviousShortcutEnabled));
+  } else if (type === "next") {
+    globalNextShortcutEnabled = Boolean(enabled);
+    localStorage.setItem("medo.globalNextShortcutEnabled", String(globalNextShortcutEnabled));
+  }
+  document.querySelectorAll(".global-play-shortcut-option").forEach((button) => {
+    const active = (button.dataset.enabled === "true") === globalPlayPauseShortcutEnabled;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  document.querySelectorAll(".global-lyrics-shortcut-option").forEach((button) => {
+    const active = (button.dataset.enabled === "true") === globalLyricsRefreshShortcutEnabled;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  document.querySelectorAll(".global-previous-shortcut-option").forEach((button) => {
+    const active = (button.dataset.enabled === "true") === globalPreviousShortcutEnabled;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  document.querySelectorAll(".global-next-shortcut-option").forEach((button) => {
+    const active = (button.dataset.enabled === "true") === globalNextShortcutEnabled;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  window.medo.setGlobalShortcuts({
+    playPause: globalPlayPauseShortcutEnabled,
+    lyricsRefresh: globalLyricsRefreshShortcutEnabled,
+    previous: globalPreviousShortcutEnabled,
+    next: globalNextShortcutEnabled
+  });
+}
+
 function refreshCurrentLyricsFromNetwork() {
   const track = tracks[currentIndex];
   if (!track) return Promise.resolve();
-  const provider = lyricRefreshProviders.get(track.id) || "qq";
+  const provider = lyricRefreshProviders.get(track.id) || "netease";
   lyricRefreshProviders.set(track.id, provider === "qq" ? "netease" : "qq");
   return reloadCurrentLyrics({ networkProvider: provider });
 }
@@ -561,6 +607,14 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
       if (lyricsRequests.get(track.id) !== request) return;
       lyricsRequests.delete(track.id);
       if (tracks[currentIndex]?.id !== track.id) return;
+      const loadedLyrics = lyricsCache.get(track.id);
+      window.medo.updateLyricsWindow({
+        title: track.title,
+        artist: track.artist,
+        album: track.album,
+        noLyrics: !loadedLyrics?.lines?.length,
+        playing: !audio.paused
+      });
       if (currentView === "player") renderLyrics(track);
       else {
         activeLyricIndex = -1;
@@ -627,7 +681,13 @@ function renderLyrics(track) {
   if (!lyrics.lines.length) {
     translationButton.hidden = true;
     container.innerHTML = '<p class="lyrics-empty"><strong>未找到歌词</strong><span>可将同名 .lrc 文件放在歌曲旁边</span></p>';
-    window.medo.updateLyricsWindow({ title: track.title, artist: track.artist, album: track.album });
+    window.medo.updateLyricsWindow({
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      noLyrics: true,
+      playing: !audio.paused
+    });
     return;
   }
   const translationAvailable = lyricsNeedChineseTranslation(lyrics.lines);
@@ -710,6 +770,7 @@ function updateDesktopLyrics(track, lyrics, index) {
     album: track.album,
     primary: desktopLyricPrimaryColor,
     secondary: desktopLyricSecondaryColor,
+    noLyrics: false,
     playing: !audio.paused
   });
 }
@@ -2245,6 +2306,7 @@ async function playTrack(index, preserveQueue = false, preservePreviousNavigatio
   }
   if (!playbackQueueIds.length) playbackQueueIds = [tracks[index].id];
   const track = tracks[index];
+  window.medo.updateLyricsWindow({ noLyrics: false, playing: true });
   const resolvedSource = await window.medo.resolveMediaSource(track.path);
   if (generation !== playbackGeneration) return;
   if (!resolvedSource) {
@@ -2261,6 +2323,7 @@ async function playTrack(index, preserveQueue = false, preservePreviousNavigatio
     album: track.album,
     primary: desktopLyricPrimaryColor,
     secondary: desktopLyricSecondaryColor,
+    noLyrics: false,
     playing: true
   });
   if (!track.transient) {
@@ -3463,6 +3526,18 @@ document.querySelectorAll(".display-option").forEach((button) => {
 document.querySelectorAll(".close-behavior-option").forEach((button) => {
   button.addEventListener("click", () => applyCloseBehavior(button.dataset.closeValue));
 });
+document.querySelectorAll(".global-play-shortcut-option").forEach((button) => {
+  button.addEventListener("click", () => applyGlobalShortcutSettings("playPause", button.dataset.enabled === "true"));
+});
+document.querySelectorAll(".global-lyrics-shortcut-option").forEach((button) => {
+  button.addEventListener("click", () => applyGlobalShortcutSettings("lyricsRefresh", button.dataset.enabled === "true"));
+});
+document.querySelectorAll(".global-previous-shortcut-option").forEach((button) => {
+  button.addEventListener("click", () => applyGlobalShortcutSettings("previous", button.dataset.enabled === "true"));
+});
+document.querySelectorAll(".global-next-shortcut-option").forEach((button) => {
+  button.addEventListener("click", () => applyGlobalShortcutSettings("next", button.dataset.enabled === "true"));
+});
 document.querySelectorAll(".lyric-translation-option").forEach((button) => {
   button.addEventListener("click", () => applyLyricTranslationSetting(button.dataset.translationValue === "on"));
 });
@@ -3723,6 +3798,7 @@ applyTheme(theme);
 applyThemeColors();
 applyDisplayMode(displayMode);
 applyCloseBehavior(closeBehavior);
+applyGlobalShortcutSettings();
 applyLyricTranslationSetting(lyricTranslationEnabled);
 applyWordLyricsSetting(wordLyricsEnabled);
 applyDesktopLyricSize(desktopLyricSize);
@@ -3776,6 +3852,7 @@ window.medo.onTrayCommand(({ command, value }) => {
   } else if (command === "previous") nextTrack(-1);
   else if (command === "next") nextTrack(1);
   else if (command === "toggle-play") togglePlayback();
+  else if (command === "refresh-lyrics") refreshCurrentLyricsFromNetwork();
   else if (command === "open-settings" || command === "open-desktop-lyric-settings") {
     selectedTrackIds.clear();
     multiSelectionMode = false;
