@@ -69,5 +69,11 @@ contextBridge.exposeInMainWorld("medo", {
     return () => ipcRenderer.removeListener("tray:command", listener);
   },
   getAppInfo: () => ipcRenderer.invoke("app:get-info"),
-  checkForUpdates: () => ipcRenderer.invoke("app:check-update")
+  checkForUpdates: () => ipcRenderer.invoke("app:check-update"),
+  onMyFireflyCommand: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("myfirefly-extension:command", listener);
+    return () => ipcRenderer.removeListener("myfirefly-extension:command", listener);
+  },
+  respondToMyFirefly: (payload) => ipcRenderer.send("myfirefly-extension:response", payload)
 });

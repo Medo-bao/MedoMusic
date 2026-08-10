@@ -10,6 +10,7 @@ const { hasNativeWordTiming } = require("./lyrics-timing");
 const { fetchNeteaseLyrics } = require("./netease-eapi");
 const { fetchQqMusicLyrics } = require("./qq-music");
 const { resolveOnlineLyricProviders, selectLocalLyrics } = require("./lyrics-source-priority");
+const { startMyFireflyExtension } = require("./myfirefly-extension");
 
 const AUDIO_EXTENSIONS = new Set([
   ".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg", ".opus", ".wma"
@@ -31,6 +32,8 @@ if (!hasSingleInstanceLock) {
 let mainWindow = null;
 let pendingExternalAudioFiles = [];
 let tray = null;
+let myFireflyExtension = null;
+const myFireflyPending = new Map();
 let closeBehavior = "background";
 let isQuitting = false;
 let metadataCache = null;
@@ -370,6 +373,34 @@ function sendGlobalPlaybackCommand(command) {
   else send();
 }
 
+function sendMyFireflyCommand(payload) {
+  if (!mainWindow || mainWindow.isDestroyed()) mainWindow = createWindow();
+  return new Promise((resolve, reject) => {
+    const id = crypto.randomUUID();
+    const timer = setTimeout(() => {
+      myFireflyPending.delete(id);
+      reject(new Error("renderer-timeout"));
+    }, 8000);
+    myFireflyPending.set(id, { resolve, reject, timer });
+    const send = () => mainWindow.webContents.send("myfirefly-extension:command", { id, ...payload });
+    if (mainWindow.webContents.isLoading()) mainWindow.webContents.once("did-finish-load", send);
+    else send();
+  });
+}
+
+async function controlWindowFromMyFirefly(action) {
+  if (action === "show" || action === "open") {
+    showMainWindow();
+  } else if (action === "hide") {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+  } else if (action === "minimize") {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.minimize();
+  } else {
+    throw new Error("unsupported-native-action");
+  }
+  return { action, visible: Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) };
+}
+
 function applyGlobalShortcutSettings(settings = {}) {
   globalPlayPauseShortcutEnabled = settings.playPause !== false;
   globalLyricsRefreshShortcutEnabled = settings.lyricsRefresh !== false;
@@ -664,6 +695,14 @@ async function toTrackWithFileTimes(filePath) {
 }
 
 app.whenReady().then(() => {
+  ipcMain.on("myfirefly-extension:response", (_event, payload = {}) => {
+    const pending = myFireflyPending.get(payload.id);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    myFireflyPending.delete(payload.id);
+    if (payload.ok) pending.resolve(payload.result);
+    else pending.reject(new Error(payload.error || "renderer-command-failed"));
+  });
   protocol.handle("medo-media", async (request) => {
     try {
       const filePath = new URL(request.url).searchParams.get("path");
@@ -1364,6 +1403,16 @@ app.whenReady().then(() => {
 
   queueExternalAudioFiles(process.argv.slice(1));
   createWindow();
+  startMyFireflyExtension({
+    app,
+    dispatch: sendMyFireflyCommand,
+    nativeControl: controlWindowFromMyFirefly
+  }).then((bridge) => {
+    myFireflyExtension = bridge;
+    console.log(`[MyFirefly] MedoMusic extension ready at ${bridge.endpoint}`);
+  }).catch((error) => {
+    console.error("[MyFirefly] Failed to start MedoMusic extension:", error);
+  });
   createTray();
   applyGlobalShortcutSettings();
   restoreLyricsWindowVisibility();
@@ -1380,5 +1429,11 @@ app.on("before-quit", () => {
   isQuitting = true;
   globalShortcut.unregisterAll();
   closeMusicFolderWatchers();
+  for (const pending of myFireflyPending.values()) {
+    clearTimeout(pending.timer);
+    pending.reject(new Error("app-quitting"));
+  }
+  myFireflyPending.clear();
+  myFireflyExtension?.stop().catch(() => {});
   persistLyricsVisibilitySync(Boolean(lyricsWindow && !lyricsWindow.isDestroyed() && lyricsWindow.isVisible()));
 });

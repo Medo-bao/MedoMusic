@@ -2832,6 +2832,183 @@ function updateFavoriteButton() {
   favoriteButton.textContent = active ? "♥" : "♡";
 }
 
+function extensionTrack(track) {
+  if (!track) return null;
+  return {
+    id: track.id,
+    path: track.path,
+    title: track.title,
+    artist: track.artist || null,
+    album: track.album || null,
+    format: track.format || null,
+    duration: Number(track.duration) || 0,
+    playCount: mergedPlayCount(track),
+    playlists: [...(track.playlists || [])],
+    favorite: favorites.has(track.id),
+    addedAt: Number(track.addedAt) || null,
+    sourceDirectory: track.sourceDirectory || null
+  };
+}
+
+function extensionPlaybackState() {
+  return {
+    currentTrack: extensionTrack(tracks[currentIndex]),
+    playing: Boolean(audio.src && !audio.paused),
+    currentTime: Number(audio.currentTime) || 0,
+    duration: Number(audio.duration) || 0,
+    volume: desiredVolume,
+    muted: audio.muted,
+    playMode,
+    queue: [...playbackQueueIds],
+    libraryCount: tracks.filter((track) => !track.transient).length,
+    playlistCount: playlists.length
+  };
+}
+
+function setFavoriteFromExtension(trackId, favorite) {
+  const track = tracks.find((item) => item.id === trackId);
+  if (!track) throw new Error("track-not-found");
+  const shouldFavorite = favorite !== false;
+  if (shouldFavorite) favorites.add(trackId);
+  else favorites.delete(trackId);
+  persist();
+  updateFavoriteButton();
+  renderPlaylists();
+  return extensionTrack(track);
+}
+
+function validTrackIds(values) {
+  const known = new Set(tracks.filter((track) => !track.transient).map((track) => track.id));
+  return [...new Set((Array.isArray(values) ? values : []).filter((id) => known.has(id)))];
+}
+
+function createPlaylistFromExtension(name, trackIds = []) {
+  const normalized = String(name || "").trim();
+  if (!normalized || normalized.length > 100) throw new Error("invalid-playlist-name");
+  if (playlists.some((playlist) => playlist.name.toLocaleLowerCase() === normalized.toLocaleLowerCase())) {
+    throw new Error("playlist-already-exists");
+  }
+  const ids = validTrackIds(trackIds);
+  playlists.push({ name: normalized, path: null, trackIds: ids });
+  tracks.forEach((track) => {
+    if (ids.includes(track.id)) track.playlists = [...new Set([...(track.playlists || []), normalized])];
+  });
+  persist();
+  render();
+  return playlists.at(-1);
+}
+
+function updatePlaylistFromExtension(currentName, changes = {}) {
+  const playlist = playlists.find((item) => item.name === currentName);
+  if (!playlist) throw new Error("playlist-not-found");
+  const nextName = changes.newName === undefined ? currentName : String(changes.newName || "").trim();
+  if (!nextName || nextName.length > 100) throw new Error("invalid-playlist-name");
+  if (nextName !== currentName && playlists.some((item) => item !== playlist && item.name.toLocaleLowerCase() === nextName.toLocaleLowerCase())) {
+    throw new Error("playlist-already-exists");
+  }
+  const nextIds = changes.trackIds === undefined ? [...(playlist.trackIds || [])] : validTrackIds(changes.trackIds);
+  tracks.forEach((track) => {
+    const names = new Set(track.playlists || []);
+    names.delete(currentName);
+    if (nextIds.includes(track.id)) names.add(nextName);
+    track.playlists = [...names];
+  });
+  playlist.name = nextName;
+  playlist.trackIds = nextIds;
+  if (currentPlaylist === currentName) currentPlaylist = nextName;
+  persist();
+  render();
+  return playlist;
+}
+
+function deletePlaylistFromExtension(name) {
+  const playlist = playlists.find((item) => item.name === name);
+  if (!playlist) throw new Error("playlist-not-found");
+  playlists = playlists.filter((item) => item !== playlist);
+  tracks.forEach((track) => {
+    track.playlists = (track.playlists || []).filter((value) => value !== name);
+  });
+  if (currentPlaylist === name) currentPlaylist = null;
+  persist();
+  render();
+  return { deleted: name };
+}
+
+async function handleMyFireflyCommand(payload = {}) {
+  switch (payload.command) {
+    case "get-state":
+      return extensionPlaybackState();
+    case "get-library":
+      return {
+        tracks: tracks.filter((track) => !track.transient).map(extensionTrack),
+        playlists: playlists.map((playlist) => ({ ...playlist, trackIds: [...(playlist.trackIds || [])] })),
+        favorites: [...favorites],
+        musicFolders: [...musicFolders]
+      };
+    case "add-tracks": {
+      const paths = [...new Set((Array.isArray(payload.paths) ? payload.paths : [])
+        .filter((value) => typeof value === "string" && value.trim()).slice(0, 200))];
+      if (!paths.length) throw new Error("no-track-paths");
+      const incoming = await window.medo.getExternalTracks(paths);
+      incoming.forEach((track) => { track.transient = false; });
+      mergeTracks(incoming);
+      return { added: incoming.map(extensionTrack) };
+    }
+    case "create-playlist":
+      return createPlaylistFromExtension(payload.name, payload.trackIds);
+    case "update-playlist":
+      return updatePlaylistFromExtension(payload.name, payload);
+    case "delete-playlist":
+      return deletePlaylistFromExtension(payload.name);
+    case "set-favorite":
+      return setFavoriteFromExtension(payload.trackId, payload.favorite);
+    case "control": {
+      const action = String(payload.action || "");
+      if (action === "play") {
+        if (!audio.src || audio.paused) togglePlayback();
+      } else if (action === "pause") {
+        audio.pause();
+      } else if (action === "toggle") {
+        togglePlayback();
+      } else if (action === "next") {
+        nextTrack(1);
+      } else if (action === "previous") {
+        nextTrack(-1);
+      } else if (action === "set-volume") {
+        const nextVolume = Number(payload.value);
+        if (!Number.isFinite(nextVolume)) throw new Error("invalid-volume");
+        desiredVolume = Math.min(1, Math.max(0, nextVolume));
+        volume.value = desiredVolume;
+        ensureOutputGain();
+        applyOutputVolume();
+        updateVolumeDisplay();
+      } else if (action === "set-muted") {
+        audio.muted = Boolean(payload.value);
+        updateMuteButton();
+        window.medo.setTrayMuted(audio.muted);
+      } else if (action === "seek") {
+        const seconds = Number(payload.value);
+        if (!Number.isFinite(seconds) || !audio.src) throw new Error("invalid-seek");
+        audio.currentTime = Math.min(Math.max(0, seconds), Number(audio.duration) || seconds);
+      } else if (action === "play-track") {
+        const index = tracks.findIndex((track) => track.id === payload.trackId && !track.transient);
+        if (index < 0) throw new Error("track-not-found");
+        await playTrack(index, false);
+      } else if (action === "set-mode") {
+        if (!["list-once", "sequence", "shuffle", "repeat-one"].includes(payload.value)) throw new Error("invalid-play-mode");
+        playMode = payload.value;
+        updatePlayModeButton();
+      } else {
+        throw new Error("unsupported-control-action");
+      }
+      persist();
+      return extensionPlaybackState();
+    }
+    default:
+      throw new Error("unsupported-extension-command");
+  }
+}
+
 function updateMuteButton() {
   const button = document.querySelector("#volume-button");
   const muted = audio.muted;
@@ -3825,6 +4002,19 @@ window.medo.onOpenAudioFiles((filePaths) => {
 window.medo.onLibraryFolderChanged(scheduleAutomaticFolderScan);
 syncMusicFolderWatchers();
 setInterval(() => scanManagedFoldersIncrementally().catch(() => {}), 120000);
+
+window.medo.onMyFireflyCommand(async (payload) => {
+  try {
+    const result = await handleMyFireflyCommand(payload);
+    window.medo.respondToMyFirefly({ id: payload.id, ok: true, result });
+  } catch (error) {
+    window.medo.respondToMyFirefly({
+      id: payload.id,
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
 
 window.medo.onTrayCommand(({ command, value }) => {
   if (command === "volume-up" || command === "volume-down") {
