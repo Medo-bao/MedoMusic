@@ -3,13 +3,6 @@
 一个神秘的本地桌面音乐播放器，旨在完善重置Groove播放器
 采用 Electron 技术栈独立实现。
 
-## 开发运行
-
-```powershell
-npm install
-npm start
-```
-
 ## Agent 通用控制（MCP）
 
 MedoMusic 启动后会在本机提供符合 Model Context Protocol（MCP）的
