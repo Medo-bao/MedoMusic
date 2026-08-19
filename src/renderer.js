@@ -86,7 +86,9 @@ let lyricFollowAnimation = null;
 let detailTrackVisible = true;
 let detailQueueVisible = true;
 let desktopLyricsLocked = false;
-let renderedTrackLimit = 200;
+const INITIAL_TRACK_RENDER_LIMIT = 48;
+const TRACK_RENDER_BATCH = 160;
+let renderedTrackLimit = INITIAL_TRACK_RENDER_LIMIT;
 let listLoadObserver = null;
 let backgroundMode = document.hidden;
 let lastBackgroundUiUpdate = 0;
@@ -1540,7 +1542,7 @@ function render() {
       const button = document.createElement("button");
       button.className = "playlist-overview-item";
       if (item.firstTrackId) button.dataset.trackId = item.firstTrackId;
-      button.innerHTML = '<img class="playlist-overview-cover" alt=""><strong></strong><small></small>';
+    button.innerHTML = '<img class="playlist-overview-cover" alt="" loading="lazy" decoding="async"><strong></strong><small></small>';
       button.querySelector("img").src = item.cover;
       button.querySelector("strong").textContent = item.name;
       button.querySelector("small").textContent = `${item.count} 首歌曲`;
@@ -1565,13 +1567,14 @@ function render() {
     return;
   }
 
-  visible.slice(0, renderedTrackLimit).forEach((track, visibleIndex) => {
-    const actualIndex = tracks.findIndex((item) => item.id === track.id);
+  const trackIndexes = new Map(tracks.map((track, index) => [track.id, index]));
+  visible.slice(0, renderedTrackLimit).forEach((track) => {
+    const actualIndex = trackIndexes.get(track.id) ?? -1;
     const row = document.createElement("div");
     row.className = `track-row${actualIndex === currentIndex ? " active" : ""}${selectedTrackIds.has(track.id) ? " selected" : ""}`;
     row.dataset.trackId = track.id;
     row.innerHTML = `
-      <span class="row-leading"><img class="row-cover" src="${track.cover || missingArt}" alt=""><span class="selection-check glyph">&#xE73E;</span></span>
+      <span class="row-leading"><img class="row-cover" src="${track.cover || missingArt}" alt="" loading="lazy" decoding="async"><span class="selection-check glyph">&#xE73E;</span></span>
       <div class="track-copy">
         <div class="track-title-line">
           <span class="now-playing-indicator" aria-hidden="true"><i></i><i></i><i></i></span>
@@ -1835,18 +1838,17 @@ function render() {
     });
     trackList.append(row);
     observeMetadataRow(row, track);
-    if (visibleIndex < 60 && !track.metadataLoaded) loadMetadata(track).catch(() => {});
   });
   listLoadObserver?.disconnect();
   if (visible.length > renderedTrackLimit) {
     const sentinel = document.createElement("div");
     sentinel.className = "list-load-sentinel";
-    sentinel.textContent = `继续加载 ${Math.min(200, visible.length - renderedTrackLimit)} 首歌曲`;
+    sentinel.textContent = `继续加载 ${Math.min(TRACK_RENDER_BATCH, visible.length - renderedTrackLimit)} 首歌曲`;
     trackList.append(sentinel);
     listLoadObserver = new IntersectionObserver((entries) => {
       if (!entries[0]?.isIntersecting) return;
       listLoadObserver.disconnect();
-      renderedTrackLimit += 200;
+      renderedTrackLimit += TRACK_RENDER_BATCH;
       render();
     }, { root: document.querySelector("main"), rootMargin: "320px" });
     listLoadObserver.observe(sentinel);
@@ -2830,6 +2832,19 @@ function updateFavoriteButton() {
   const active = favorites.has(tracks[currentIndex]?.id);
   favoriteButton.classList.toggle("active", active);
   favoriteButton.textContent = active ? "♥" : "♡";
+}
+
+function scheduleStartupMaintenance() {
+  const run = () => {
+    migratePlaylistOrder();
+    initializeDefaultLibrary();
+    renderAppInfo();
+  };
+  if (typeof window.requestIdleCallback === "function") {
+    window.requestIdleCallback(run, { timeout: 2000 });
+  } else {
+    setTimeout(run, 300);
+  }
 }
 
 function extensionTrack(track) {
@@ -3992,9 +4007,7 @@ updatePlayModeButton();
 document.querySelector(".app-shell").classList.toggle("sidebar-collapsed", sidebarCollapsed);
 document.documentElement.style.setProperty("--sidebar-width", `${sidebarWidth}px`);
 render();
-migratePlaylistOrder();
-initializeDefaultLibrary();
-renderAppInfo();
+scheduleStartupMaintenance();
 restorePlaybackState();
 window.medo.onOpenAudioFiles((filePaths) => {
   openExternalAudioFiles(filePaths).catch(() => {});

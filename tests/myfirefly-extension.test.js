@@ -16,7 +16,7 @@ async function request(endpoint, path, token, options = {}) {
   const received = [];
   const server = createExtensionServer({
     token: "test-token",
-    version: "1.5.0",
+    version: "1.5.1",
     dispatch: async (payload) => {
       received.push(payload);
       return payload;
@@ -31,7 +31,7 @@ async function request(endpoint, path, token, options = {}) {
 
     const health = await request(endpoint, "/v1/health", "test-token");
     assert.equal(health.status, 200);
-    assert.equal((await health.json()).version, "1.5.0");
+    assert.equal((await health.json()).version, "1.5.1");
 
     const control = await request(endpoint, "/v1/control", "test-token", {
       method: "POST",
@@ -52,6 +52,28 @@ async function request(endpoint, path, token, options = {}) {
       body: JSON.stringify({ action: "show" })
     });
     assert.deepEqual((await native.json()).result, { action: "show" });
+
+    const initialize = await request(endpoint, "/mcp", "test-token", {
+      method: "POST",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "test", version: "1" } } })
+    });
+    assert.equal(initialize.status, 200);
+    assert.equal((await initialize.json()).result.serverInfo.name, "medomusic");
+
+    const tools = await request(endpoint, "/mcp", "test-token", {
+      method: "POST",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })
+    });
+    assert.ok((await tools.json()).result.tools.some((tool) => tool.name === "medomusic_control"));
+
+    const toolCall = await request(endpoint, "/mcp", "test-token", {
+      method: "POST",
+      body: JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "medomusic_control", arguments: { action: "pause" } } })
+    });
+    const toolResult = await toolCall.json();
+    assert.equal(toolResult.result.isError, undefined);
+    assert.equal(received.at(-1).command, "control");
+    assert.equal(received.at(-1).action, "pause");
     console.log("myfirefly-extension tests passed");
   } finally {
     await new Promise((resolve) => server.close(resolve));

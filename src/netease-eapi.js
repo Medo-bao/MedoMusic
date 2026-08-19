@@ -1,4 +1,5 @@
 const crypto = require("node:crypto");
+const { removeLiveQualifier } = require("./lyrics-source-priority");
 
 const EAPI_URL = "https://interface3.music.163.com/eapi/song/lyric/v1";
 const EAPI_PATH = "/api/song/lyric/v1";
@@ -108,7 +109,7 @@ async function searchNeteaseSongs(options, fetchImplementation = fetch) {
   return (await response.json())?.result?.songs || [];
 }
 
-async function fetchNeteaseLyrics(options, fetchImplementation = fetch) {
+async function fetchNeteaseLyricsOnce(options, fetchImplementation) {
   const ranked = rankNeteaseSongs(await searchNeteaseSongs(options, fetchImplementation), options);
   const best = ranked[0];
   if (!best || best.score < .62 || !best.song.id) return null;
@@ -121,6 +122,14 @@ async function fetchNeteaseLyrics(options, fetchImplementation = fetch) {
     confidence: Math.round(best.score * 100),
     match: { title: best.song.name, artist: best.artist }
   };
+}
+
+async function fetchNeteaseLyrics(options, fetchImplementation = fetch) {
+  const result = await fetchNeteaseLyricsOnce(options, fetchImplementation);
+  if (result) return result;
+  const retryTitle = removeLiveQualifier(options?.title);
+  if (!retryTitle) return null;
+  return fetchNeteaseLyricsOnce({ ...options, title: retryTitle }, fetchImplementation);
 }
 
 module.exports = {

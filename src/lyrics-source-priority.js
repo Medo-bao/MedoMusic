@@ -10,4 +10,19 @@ function selectLocalLyrics(embeddedText, sidecarText) {
   return { text: "", source: null };
 }
 
-module.exports = { resolveOnlineLyricProviders, selectLocalLyrics };
+function removeLiveQualifier(title) {
+  const original = String(title || "").trim();
+  if (!original) return null;
+  const withoutBracketedLive = original.replace(
+    /[\[(（【][^)\]）】]*\blive\b[^)\]）】]*[\])）】]/giu,
+    " "
+  );
+  const cleaned = withoutBracketedLive
+    .replace(/\s*(?:[-–—_·]\s*)?\blive\b(?:\s*(?:version|ver\.?|版))?\s*$/iu, " ")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s*[-–—_·]+\s*$/u, "")
+    .trim();
+  return cleaned && cleaned !== original ? cleaned : null;
+}
+
+module.exports = { resolveOnlineLyricProviders, selectLocalLyrics, removeLiveQualifier };

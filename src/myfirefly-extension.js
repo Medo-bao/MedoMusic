@@ -4,7 +4,20 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 
 const API_VERSION = 1;
+const MCP_PROTOCOL_VERSION = "2025-03-26";
 const MAX_BODY_BYTES = 1024 * 1024;
+
+const MCP_TOOLS = [
+  { name: "medomusic_get_state", description: "Get the current MedoMusic playback and window state.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+  { name: "medomusic_get_library", description: "Get tracks, playlists and favorites from the MedoMusic library.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
+  { name: "medomusic_control", description: "Control playback. Supported actions include play, pause, toggle, next, previous, set-volume, mute, seek, play-track and set-playback-mode.", inputSchema: { type: "object", required: ["action"], properties: { action: { type: "string" }, value: {}, trackId: { type: "string" }, mode: { type: "string" } }, additionalProperties: true } },
+  { name: "medomusic_add_tracks", description: "Add local audio tracks to the MedoMusic library.", inputSchema: { type: "object", properties: { paths: { type: "array", items: { type: "string" } }, tracks: { type: "array", items: { type: "object" } } }, additionalProperties: true } },
+  { name: "medomusic_create_playlist", description: "Create a playlist.", inputSchema: { type: "object", required: ["name"], properties: { name: { type: "string" }, trackIds: { type: "array", items: { type: "string" } } }, additionalProperties: true } },
+  { name: "medomusic_update_playlist", description: "Rename a playlist or update its tracks.", inputSchema: { type: "object", required: ["name"], properties: { name: { type: "string" }, newName: { type: "string" }, trackIds: { type: "array", items: { type: "string" } } }, additionalProperties: true } },
+  { name: "medomusic_delete_playlist", description: "Delete a playlist.", inputSchema: { type: "object", required: ["name"], properties: { name: { type: "string" } }, additionalProperties: false } },
+  { name: "medomusic_set_favorite", description: "Add or remove a track from favorites.", inputSchema: { type: "object", required: ["trackId", "favorite"], properties: { trackId: { type: "string" }, favorite: { type: "boolean" } }, additionalProperties: false } },
+  { name: "medomusic_window", description: "Control the native MedoMusic window.", inputSchema: { type: "object", required: ["action"], properties: { action: { type: "string", enum: ["show", "hide", "minimize"] } }, additionalProperties: false } }
+];
 
 function sendJson(response, status, payload) {
   const body = JSON.stringify(payload);
@@ -52,12 +65,77 @@ function routeFor(method, pathname) {
   return null;
 }
 
+function mcpResult(result) {
+  return {
+    content: [{ type: "text", text: JSON.stringify(result) }],
+    structuredContent: result
+  };
+}
+
+async function callMcpTool(name, args, dispatch, nativeControl) {
+  const input = args && typeof args === "object" && !Array.isArray(args) ? args : {};
+  const commands = {
+    medomusic_get_state: "get-state",
+    medomusic_get_library: "get-library",
+    medomusic_control: "control",
+    medomusic_add_tracks: "add-tracks",
+    medomusic_create_playlist: "create-playlist",
+    medomusic_update_playlist: "update-playlist",
+    medomusic_delete_playlist: "delete-playlist",
+    medomusic_set_favorite: "set-favorite"
+  };
+  if (name === "medomusic_window") return nativeControl(String(input.action || "show"));
+  const command = commands[name];
+  if (!command) throw new Error(`unknown-tool:${name}`);
+  return dispatch({ ...input, command });
+}
+
+async function handleMcpRequest(body, { version, dispatch, nativeControl }) {
+  const id = body?.id ?? null;
+  const success = (result) => ({ jsonrpc: "2.0", id, result });
+  if (!body || body.jsonrpc !== "2.0" || typeof body.method !== "string") {
+    return { status: 400, payload: { jsonrpc: "2.0", id, error: { code: -32600, message: "Invalid Request" } } };
+  }
+  if (body.method === "initialize") {
+    return { status: 200, payload: success({
+      protocolVersion: MCP_PROTOCOL_VERSION,
+      capabilities: { tools: { listChanged: false } },
+      serverInfo: { name: "medomusic", title: "MedoMusic", version }
+    }) };
+  }
+  if (body.method === "notifications/initialized") return { status: 202, payload: null };
+  if (body.method === "ping") return { status: 200, payload: success({}) };
+  if (body.method === "tools/list") return { status: 200, payload: success({ tools: MCP_TOOLS }) };
+  if (body.method === "tools/call") {
+    try {
+      const result = await callMcpTool(body.params?.name, body.params?.arguments, dispatch, nativeControl);
+      return { status: 200, payload: success(mcpResult(result)) };
+    } catch (error) {
+      return { status: 200, payload: success({
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+        isError: true
+      }) };
+    }
+  }
+  return { status: 404, payload: { jsonrpc: "2.0", id, error: { code: -32601, message: "Method not found" } } };
+}
+
 function createExtensionServer({ token, version, dispatch, nativeControl }) {
   return http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url, "http://127.0.0.1");
       if (!authorized(request, token)) {
         sendJson(response, 401, { ok: false, error: "unauthorized" });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/mcp") {
+        const result = await handleMcpRequest(await readJson(request), { version, dispatch, nativeControl });
+        if (result.payload === null) {
+          response.writeHead(result.status, { "Cache-Control": "no-store" });
+          response.end();
+        } else {
+          sendJson(response, result.status, result.payload);
+        }
         return;
       }
       const route = routeFor(request.method, url.pathname);
@@ -108,6 +186,10 @@ async function startMyFireflyExtension({ app, dispatch, nativeControl }) {
     name: "MedoMusic",
     version: app.getVersion(),
     apiVersion: API_VERSION,
+    protocols: {
+      mcp: { transport: "streamable-http", endpoint: `${endpoint}/mcp`, protocolVersion: MCP_PROTOCOL_VERSION },
+      rest: { endpoint: `${endpoint}/v1`, apiVersion: API_VERSION, deprecated: true }
+    },
     endpoint,
     token,
     pid: process.pid,
@@ -129,4 +211,4 @@ async function startMyFireflyExtension({ app, dispatch, nativeControl }) {
   };
 }
 
-module.exports = { API_VERSION, createExtensionServer, startMyFireflyExtension };
+module.exports = { API_VERSION, MCP_PROTOCOL_VERSION, MCP_TOOLS, createExtensionServer, startMyFireflyExtension };

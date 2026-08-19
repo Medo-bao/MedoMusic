@@ -9,7 +9,7 @@ const { decodeTextBuffer } = require("./text-decoder");
 const { hasNativeWordTiming } = require("./lyrics-timing");
 const { fetchNeteaseLyrics } = require("./netease-eapi");
 const { fetchQqMusicLyrics } = require("./qq-music");
-const { resolveOnlineLyricProviders, selectLocalLyrics } = require("./lyrics-source-priority");
+const { resolveOnlineLyricProviders, selectLocalLyrics, removeLiveQualifier } = require("./lyrics-source-priority");
 const { startMyFireflyExtension } = require("./myfirefly-extension");
 
 const AUDIO_EXTENSIONS = new Set([
@@ -909,6 +909,8 @@ app.whenReady().then(() => {
       }
       if (networkLineFallback) return networkLineFallback;
       if (hasOrdinaryFallback()) return fallbackResult();
+      const retryTitle = removeLiveQualifier(title);
+      const publicTitles = retryTitle ? [title, retryTitle] : [title];
       const publicCacheKey = JSON.stringify(["lrclib", title, artist, album, duration]);
       if (cache[publicCacheKey] && !options?.force) return cache[publicCacheKey];
       const requestJson = async (url) => {
@@ -940,36 +942,43 @@ app.whenReady().then(() => {
         const overlap = otherPairs.filter((pair) => pairs.has(pair)).length;
         return (2 * overlap) / Math.max(1, pairs.size + otherPairs.length);
       };
-      const scoreResult = (result) => {
+      const scoreResult = (result, searchTitle) => {
         const durationScore = Math.max(0, 1 - Math.abs(Number(result.duration || 0) - duration) / Math.max(8, duration * .08));
-        return similarity(title, result.trackName) * .48 +
+        return similarity(searchTitle, result.trackName) * .48 +
           similarity(artist, result.artistName) * .28 +
           similarity(album, result.albumName) * .14 +
           durationScore * .1;
       };
-      const exactQuery = new URLSearchParams({
-        track_name: title,
-        artist_name: artist,
-        album_name: album,
-        duration: String(duration)
-      });
-      let result = await requestJson(`https://lrclib.net/api/get?${exactQuery}`);
-      let confidence = result ? scoreResult(result) : 0;
-      if (!result || confidence < .62) {
-        const searchQuery = new URLSearchParams({ track_name: title, artist_name: artist });
-        let candidates = await requestJson(`https://lrclib.net/api/search?${searchQuery}`);
-        if (!Array.isArray(candidates) || !candidates.length) {
-          const titleOnlyQuery = new URLSearchParams({ track_name: title });
-          candidates = await requestJson(`https://lrclib.net/api/search?${titleOnlyQuery}`);
-        }
-        if (Array.isArray(candidates) && candidates.length) {
-          const ranked = candidates.map((item) => ({ item, score: scoreResult(item) }))
-            .sort((left, right) => right.score - left.score);
-          if (ranked[0].score >= .56) {
-            result = ranked[0].item;
-            confidence = ranked[0].score;
+      let result = null;
+      let confidence = 0;
+      for (const searchTitle of publicTitles) {
+        const exactQuery = new URLSearchParams({
+          track_name: searchTitle,
+          artist_name: artist,
+          album_name: album,
+          duration: String(duration)
+        });
+        result = await requestJson(`https://lrclib.net/api/get?${exactQuery}`);
+        confidence = result ? scoreResult(result, searchTitle) : 0;
+        if (!result || confidence < .62) {
+          const searchQuery = new URLSearchParams({ track_name: searchTitle, artist_name: artist });
+          let candidates = await requestJson(`https://lrclib.net/api/search?${searchQuery}`);
+          if (!Array.isArray(candidates) || !candidates.length) {
+            const titleOnlyQuery = new URLSearchParams({ track_name: searchTitle });
+            candidates = await requestJson(`https://lrclib.net/api/search?${titleOnlyQuery}`);
+          }
+          if (Array.isArray(candidates) && candidates.length) {
+            const ranked = candidates.map((item) => ({ item, score: scoreResult(item, searchTitle) }))
+              .sort((left, right) => right.score - left.score);
+            if (ranked[0].score >= .56) {
+              result = ranked[0].item;
+              confidence = ranked[0].score;
+            }
           }
         }
+        if (result && confidence >= .56) break;
+        result = null;
+        confidence = 0;
       }
       if (!result || confidence < .56) return fallbackResult();
       const text = result.syncedLyrics || result.plainLyrics || "";

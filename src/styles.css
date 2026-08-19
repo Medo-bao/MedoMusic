@@ -193,26 +193,6 @@ button:focus-visible, input:focus-visible {
 .side-top { height: 48px; display: flex; align-items: center; padding-right: 10px; }
 .menu-button { width: 44px; height: 50px; flex: 0 0 auto; }
 .menu-button:hover, .playlist-title button:hover { color: var(--accent); }
-.app-name { position: fixed; top: 0; left: 56px; z-index: 111; height: 38px; min-width: 0; display: none; align-items: center; gap: 7px; font-size: 14px; font-weight: 500; letter-spacing: -.01em; opacity: .72; -webkit-app-region: drag; }
-.settings-view .app-name { display: flex; }
-.app-name strong { font-weight: 500; }
-.groove-logo {
-  width: 20px;
-  height: 20px;
-  border: 2px solid var(--text);
-  border-radius: 50%;
-  position: relative;
-}
-.groove-logo::after {
-  content: "";
-  position: absolute;
-  width: 5px;
-  height: 5px;
-  left: 5px;
-  top: 5px;
-  border: 2px solid var(--text);
-  border-radius: 50%;
-}
 
 .side-search {
   display: flex;
@@ -370,7 +350,6 @@ nav { display: grid; }
 .settings:hover { background: var(--surface-raised); }
 .settings.active { border-color: color-mix(in srgb, var(--accent) 32%, var(--line)); }
 .sidebar-collapsed .sidebar { width: 72px; }
-.sidebar-collapsed .app-name,
 .sidebar-collapsed .nav-item > span:not(.glyph),
 .sidebar-collapsed .playlist-title-label,
 .sidebar-collapsed .playlist-title-arrow,
@@ -1594,8 +1573,6 @@ body.playback-detail-active #lyric-translation-toggle:not([hidden]) {
 [data-theme="light"] .queue-item:hover,
 [data-theme="light"] .queue-item.active { color: #111a20; }
 [data-theme="light"] .sidebar { box-shadow: 18px 0 48px rgba(25, 40, 44, 0.08); }
-[data-theme="light"] .groove-logo,
-[data-theme="light"] .groove-logo::after { border-color: var(--text); }
 .song-info { min-width: 0; display: flex; align-items: center; gap: 13px; }
 .mini-cover-button { flex: 0 0 auto; padding: 0; border-radius: 6px; }
 .song-info img {

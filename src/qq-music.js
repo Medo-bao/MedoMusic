@@ -1,5 +1,6 @@
 const { decryptQrc } = require("qrc-decoder");
 const { hasNativeWordTiming } = require("./lyrics-timing");
+const { removeLiveQualifier } = require("./lyrics-source-priority");
 
 const HEADERS = {
   Referer: "https://c.y.qq.com/",
@@ -101,7 +102,7 @@ async function fetchLineLyric(songMid, fetchImplementation) {
   return response.ok ? decodeQqLyricJsonp(await response.text(), callback) : null;
 }
 
-async function fetchQqMusicLyrics(options, fetchImplementation = fetch) {
+async function fetchQqMusicLyricsOnce(options, fetchImplementation) {
   const title = String(options?.title || "").trim();
   const artist = String(options?.artist || "").trim();
   const expectedDuration = Number(options?.duration) || 0;
@@ -129,6 +130,14 @@ async function fetchQqMusicLyrics(options, fetchImplementation = fetch) {
     confidence: Math.round(best.score * 100),
     match: { title: best.song.name || best.song.title || best.song.songname, artist: best.artist }
   };
+}
+
+async function fetchQqMusicLyrics(options, fetchImplementation = fetch) {
+  const result = await fetchQqMusicLyricsOnce(options, fetchImplementation);
+  if (result) return result;
+  const retryTitle = removeLiveQualifier(options?.title);
+  if (!retryTitle) return null;
+  return fetchQqMusicLyricsOnce({ ...options, title: retryTitle }, fetchImplementation);
 }
 
 module.exports = {

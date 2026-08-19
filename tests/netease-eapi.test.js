@@ -28,6 +28,25 @@ assert.equal(rankNeteaseSongs([misleadingArtist], { title: "测试歌曲", artis
   assert.equal(result.source, "netease-word");
   assert.equal(result.match.artist, "测试歌手");
   assert.equal(calls, 2);
+
+  const liveQueries = [];
+  const liveFallbackFetch = async (url, options) => {
+    if (options?.method === "POST") {
+      return { ok: true, json: async () => ({ code: 200, lrc: { lyric: "[00:01.00]测试歌词" } }) };
+    }
+    const query = new URL(url).searchParams.get("s");
+    liveQueries.push(query);
+    return {
+      ok: true,
+      json: async () => ({ result: { songs: query.includes("Live") ? [] : [official] } })
+    };
+  };
+  const liveFallback = await fetchNeteaseLyrics(
+    { title: "测试歌曲 - Live Version", artist: "测试歌手", duration: 180 },
+    liveFallbackFetch
+  );
+  assert.equal(liveFallback.source, "netease-line");
+  assert.deepEqual(liveQueries, ["测试歌曲 - Live Version 测试歌手", "测试歌曲 测试歌手"]);
   console.log("Netease EAPI tests passed");
 })().catch((error) => {
   console.error(error);

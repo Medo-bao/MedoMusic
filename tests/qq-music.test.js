@@ -37,6 +37,27 @@ assert.deepEqual(searchSongsFromPayload({ req_1: { data: { body: { song: { list:
   const ordinary = await fetchQqMusicLyrics({ title: "测试歌曲", artist: "测试歌手", duration: 180 }, ordinaryFetch);
   assert.equal(ordinary.source, "qq-line");
   assert.equal(calls, 3);
+
+  const liveQueries = [];
+  const liveFallbackFetch = async (_url, options) => {
+    if (options?.headers?.["Content-Type"] === "application/json") {
+      const query = JSON.parse(options.body)["music.search.SearchCgiService"].param.query;
+      liveQueries.push(query);
+      return {
+        ok: true,
+        json: async () => query.includes("Live")
+          ? { "music.search.SearchCgiService": { data: { body: { song: { list: [] } } } } }
+          : searchPayload
+      };
+    }
+    return { ok: true, text: async () => qrcResponse };
+  };
+  const liveFallback = await fetchQqMusicLyrics(
+    { title: "测试歌曲 (Live)", artist: "测试歌手", duration: 180 },
+    liveFallbackFetch
+  );
+  assert.equal(liveFallback.source, "qq-word");
+  assert.deepEqual(liveQueries, ["测试歌曲 (Live) 测试歌手", "测试歌曲 测试歌手"]);
   console.log("QQ Music tests passed");
 })().catch((error) => {
   console.error(error);

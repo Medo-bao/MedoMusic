@@ -6,6 +6,7 @@ const { chromium } = require("playwright");
 async function run() {
   const root = path.resolve(__dirname, "..");
   const artifacts = path.join(__dirname, "artifacts");
+  const startupOnly = process.env.MEDO_STARTUP_ONLY === "1";
   fs.mkdirSync(artifacts, { recursive: true });
   const browser = await chromium.launch({
     headless: true,
@@ -105,6 +106,8 @@ async function run() {
       onLyricsWindowVisibility: () => () => {},
       onResolvedTheme: () => () => {},
       onOpenAudioFiles: () => () => {},
+      onMyFireflyCommand: () => () => {},
+      respondToMyFirefly: () => {},
       onTrayCommand: () => () => {},
       loadPlaylist: async () => null,
       readMetadata: async () => null,
@@ -126,7 +129,50 @@ async function run() {
     };
   });
 
+  if (startupOnly) {
+    await page.addInitScript(() => {
+      const tracks = Array.from({ length: 1000 }, (_, index) => ({
+        id: `E:\\Music\\Startup-${index}.mp3`,
+        path: `E:\\Music\\Startup-${index}.mp3`,
+        title: `Startup ${index}`,
+        album: "Startup Album",
+        artist: "Startup Artist",
+        format: "MP3",
+        playlists: [],
+        sourceDirectory: "E:\\Music",
+        metadataLoaded: true
+      }));
+      localStorage.setItem("medo.tracks", JSON.stringify(tracks));
+      localStorage.setItem("medo.musicFolders", JSON.stringify(["E:\\Music"]));
+      localStorage.setItem("medo.initialScanComplete", "true");
+      localStorage.setItem("medo.indexSchema", "2");
+    });
+  }
+
+  const navigationStarted = Date.now();
   await page.goto(pathToFileURL(path.join(root, "src", "index.html")).href);
+  if (startupOnly) {
+    const snapshot = await page.evaluate(() => ({
+      rows: document.querySelectorAll(".track-row").length,
+      covers: [...document.querySelectorAll(".row-cover")].map((image) => ({
+        loading: image.loading,
+        decoding: image.decoding,
+        naturalWidth: image.naturalWidth
+      })),
+      total: document.querySelector("#track-count")?.textContent,
+      errors: window.__folderScanCalls
+    }));
+    if (snapshot.rows !== 48 || snapshot.total !== "1000 首歌曲") {
+      throw new Error(`Startup library was not segmented: ${JSON.stringify(snapshot)}`);
+    }
+    if (snapshot.covers.some((cover) => cover.loading !== "lazy" || cover.decoding !== "async")) {
+      throw new Error(`Startup covers are not lazily decoded at full source quality: ${JSON.stringify(snapshot.covers[0])}`);
+    }
+    if (errors.length) throw new Error(`Startup browser errors: ${errors.join(" | ")}`);
+    console.log(`Startup UI smoke passed; 1000-track navigation: ${Date.now() - navigationStarted}ms; initial rows: ${snapshot.rows}`);
+    await browser.close();
+    return;
+  }
   const parsedNativeLyrics = await page.evaluate(() => ({
     yrc: parseLyrics('{"t":1000,"c":[{"tx":"作词: "},{"tx":"测试作者"}]}\n[2000,1000](2000,500,0)逐(2500,500,0)字', 5),
     qrc: parseLyrics('[2000,1000]逐(2000,500)字(2500,500)', 5)
@@ -214,7 +260,14 @@ async function run() {
     value: document.querySelector("#search-input").value,
     rows: document.querySelectorAll(".track-row").length
   }));
-  if (restoredSearch.value !== "" || restoredSearch.rows !== 200) throw new Error(`Clearing search did not restore the library window: ${JSON.stringify(restoredSearch)}`);
+  if (restoredSearch.value !== "" || restoredSearch.rows !== 48) throw new Error(`Clearing search did not restore the initial library window: ${JSON.stringify(restoredSearch)}`);
+  const initialCoverLoading = await page.locator(".row-cover").first().evaluate((image) => ({
+    loading: image.loading,
+    decoding: image.decoding
+  }));
+  if (initialCoverLoading.loading !== "lazy" || initialCoverLoading.decoding !== "async") {
+    throw new Error(`Track covers are not deferred without changing quality: ${JSON.stringify(initialCoverLoading)}`);
+  }
   await page.locator(".track-row").first().click();
   await page.waitForTimeout(250);
   if (!await page.locator(".track-row").first().evaluate((element) => element.classList.contains("selected"))) {
