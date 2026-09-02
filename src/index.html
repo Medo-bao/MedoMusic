@@ -297,8 +297,15 @@
             </div>
           </div>
           <div class="segmented-control close-behavior-options" role="radiogroup" aria-label="关闭行为">
-            <button class="close-behavior-option active" data-close-value="background" role="radio" aria-checked="true">最小化到后台</button>
+            <button class="close-behavior-option active" data-close-value="background" role="radio" aria-checked="true">最小化到托盘</button>
             <button class="close-behavior-option" data-close-value="quit" role="radio" aria-checked="false">直接退出软件</button>
+          </div>
+          <div id="tray-setting" class="display-setting">
+            <div><h3>显示系统托盘</h3><p>关闭后不再显示系统托盘图标。</p></div>
+            <div class="segmented-control tray-options" role="radiogroup" aria-label="显示系统托盘">
+              <button class="tray-option" data-tray-value="true" role="radio" aria-checked="false">启用</button>
+              <button class="tray-option active" data-tray-value="false" role="radio" aria-checked="true">关闭</button>
+            </div>
           </div>
         </div>
 

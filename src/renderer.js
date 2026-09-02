@@ -42,6 +42,7 @@ let desktopLyricPrimaryColor = localStorage.getItem("medo.desktopLyricPrimaryCol
 let desktopLyricSecondaryColor = localStorage.getItem("medo.desktopLyricSecondaryColor") || "#d934ff";
 let displayMode = localStorage.getItem("medo.displayMode") || "thumbnail";
 let closeBehavior = localStorage.getItem("medo.closeBehavior") || "background";
+let trayEnabled = localStorage.getItem("medo.trayEnabled") === "true";
 let globalPlayPauseShortcutEnabled = localStorage.getItem("medo.globalPlayPauseShortcutEnabled") !== "false";
 let globalLyricsRefreshShortcutEnabled = localStorage.getItem("medo.globalLyricsRefreshShortcutEnabled") !== "false";
 let globalPreviousShortcutEnabled = localStorage.getItem("medo.globalPreviousShortcutEnabled") !== "false";
@@ -343,6 +344,9 @@ function applyCloseBehavior(value) {
     button.classList.toggle("active", active);
     button.setAttribute("aria-checked", String(active));
   });
+  const traySetting = document.querySelector("#tray-setting");
+  if (traySetting) traySetting.hidden = closeBehavior !== "quit";
+  if (closeBehavior !== "quit" && !trayEnabled) applyTrayEnabled(true);
 }
 
 function reloadCurrentLyrics({ networkProvider = null } = {}) {
@@ -588,7 +592,8 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
       duration: track.duration || audio.duration,
       mode: requestMode,
       force,
-      ignoreLocal: wordLyricsEnabled || Boolean(modeOverride)
+      ignoreLocal: wordLyricsEnabled || Boolean(modeOverride),
+      requireWordTiming: wordLyricsEnabled
     });
   })()
     .then((result) => {
@@ -2834,6 +2839,17 @@ function updateFavoriteButton() {
   favoriteButton.textContent = active ? "♥" : "♡";
 }
 
+function applyTrayEnabled(enabled) {
+  trayEnabled = Boolean(enabled);
+  localStorage.setItem("medo.trayEnabled", String(trayEnabled));
+  document.querySelectorAll(".tray-option").forEach((button) => {
+    const active = (button.dataset.trayValue === "true") === trayEnabled;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  window.medo.setTrayEnabled(trayEnabled);
+}
+
 function scheduleStartupMaintenance() {
   const run = () => {
     migratePlaylistOrder();
@@ -3428,6 +3444,12 @@ sidebarResizer.addEventListener("pointerdown", (event) => {
 });
 document.querySelector("#window-minimize").addEventListener("click", window.medo.minimizeWindow);
 document.querySelector("#window-maximize").addEventListener("click", window.medo.toggleMaximizeWindow);
+window.medo.onWindowMaximized((maximized) => {
+  const button = document.querySelector("#window-maximize");
+  button.classList.toggle("is-maximized", maximized);
+  button.title = maximized ? "还原" : "最大化";
+  button.setAttribute("aria-label", button.title);
+});
 document.querySelector("#window-close").addEventListener("click", window.medo.closeWindow);
 document.querySelector("#collection-back").addEventListener("click", () => {
   currentCollection = null;
@@ -3536,8 +3558,18 @@ function scheduleLyricFollowRestore() {
     updateLyricsAtTime();
   }, 5000);
 }
+function clampLyricInspectionOffset(offset) {
+  const lines = [...lyricsLines.querySelectorAll(".lyric-line[data-start]")];
+  if (!lines.length) return offset;
+  const firstLine = lines[0];
+  const lastLine = lines.at(-1);
+  const maximum = -(firstLine.offsetTop + firstLine.offsetHeight / 2);
+  const minimum = -(lastLine.offsetTop + lastLine.offsetHeight / 2);
+  return Math.max(minimum, Math.min(maximum, offset));
+}
 lyricsStage.addEventListener("pointerdown", (event) => {
   if (event.button !== 0 || !lyricsCache.get(tracks[currentIndex]?.id)?.synced) return;
+  lyricFollowAnimation?.cancel();
   lyricDragPointerId = event.pointerId;
   lyricDragStartY = event.clientY;
   lyricDraggedDistance = 0;
@@ -3555,7 +3587,7 @@ lyricsStage.addEventListener("pointermove", (event) => {
     lyricsStage.classList.add("inspecting");
     lyricsStage.setPointerCapture(event.pointerId);
   }
-  lyricInspectionOffset = lyricDragStartOffset + event.clientY - lyricDragStartY;
+  lyricInspectionOffset = clampLyricInspectionOffset(lyricDragStartOffset + event.clientY - lyricDragStartY);
   lyricsLines.style.transform = `translateY(${lyricInspectionOffset}px)`;
 });
 lyricsStage.addEventListener("click", (event) => {
@@ -3595,13 +3627,14 @@ lyricsStage.addEventListener("click", (event) => {
 lyricsStage.addEventListener("wheel", (event) => {
   if (!lyricsCache.get(tracks[currentIndex]?.id)?.synced) return;
   event.preventDefault();
+  lyricFollowAnimation?.cancel();
   if (!lyricInspectionActive) {
     const transform = getComputedStyle(lyricsLines).transform;
     lyricInspectionOffset = transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m42;
   }
   lyricInspectionActive = true;
   lyricsStage.classList.add("inspecting");
-  lyricInspectionOffset -= event.deltaY * .72;
+  lyricInspectionOffset = clampLyricInspectionOffset(lyricInspectionOffset - event.deltaY * .72);
   lyricsLines.style.transform = `translateY(${lyricInspectionOffset}px)`;
   scheduleLyricFollowRestore();
 }, { passive: false });
@@ -3717,6 +3750,9 @@ document.querySelectorAll(".display-option").forEach((button) => {
 });
 document.querySelectorAll(".close-behavior-option").forEach((button) => {
   button.addEventListener("click", () => applyCloseBehavior(button.dataset.closeValue));
+});
+document.querySelectorAll(".tray-option").forEach((button) => {
+  button.addEventListener("click", () => applyTrayEnabled(button.dataset.trayValue === "true"));
 });
 document.querySelectorAll(".global-play-shortcut-option").forEach((button) => {
   button.addEventListener("click", () => applyGlobalShortcutSettings("playPause", button.dataset.enabled === "true"));
@@ -3990,6 +4026,7 @@ applyTheme(theme);
 applyThemeColors();
 applyDisplayMode(displayMode);
 applyCloseBehavior(closeBehavior);
+applyTrayEnabled(trayEnabled);
 applyGlobalShortcutSettings();
 applyLyricTranslationSetting(lyricTranslationEnabled);
 applyWordLyricsSetting(wordLyricsEnabled);

@@ -60,8 +60,14 @@ contextBridge.exposeInMainWorld("medo", {
   onResolvedTheme: (callback) => ipcRenderer.on("theme:resolved", (_event, theme) => callback(theme)),
   minimizeWindow: () => ipcRenderer.send("window:minimize"),
   toggleMaximizeWindow: () => ipcRenderer.send("window:toggle-maximize"),
+  onWindowMaximized: (callback) => {
+    const listener = (_event, maximized) => callback(maximized);
+    ipcRenderer.on("window:maximized", listener);
+    return () => ipcRenderer.removeListener("window:maximized", listener);
+  },
   closeWindow: () => ipcRenderer.send("window:close"),
   setCloseBehavior: (value) => ipcRenderer.send("app:set-close-behavior", value),
+  setTrayEnabled: (enabled) => ipcRenderer.send("app:set-tray-enabled", Boolean(enabled)),
   setGlobalShortcuts: (settings) => ipcRenderer.send("app:set-global-shortcuts", settings),
   onTrayCommand: (callback) => {
     const listener = (_event, payload) => callback(payload);
