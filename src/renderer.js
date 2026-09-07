@@ -84,6 +84,8 @@ let lyricDragStartY = 0;
 let lyricDragStartOffset = 0;
 let lyricDraggedDistance = 0;
 let lyricFollowAnimation = null;
+let renderedLyricsState = null;
+let lyricPointerInside = false;
 let detailTrackVisible = true;
 let detailQueueVisible = true;
 let desktopLyricsLocked = false;
@@ -673,9 +675,31 @@ async function ensureLyricTranslation(track) {
 
 function renderLyrics(track) {
   const container = document.querySelector("#lyrics-lines");
+  const lyrics = lyricsCache.get(track.id);
+  const state = [track.id, lyrics, lyricTranslations.get(track.id), lyricTranslationEnabled,
+    hiddenLyricTranslations.has(track.id), wordLyricsEnabled];
+  if (renderedLyricsState?.every((value, index) => value === state[index])) {
+    updateLyricsAtTime();
+    return;
+  }
+  const preserveInspection = renderedLyricsState?.[0] === track.id && lyricInspectionActive && lyrics?.synced;
+  const selectedStart = selectedLyricElement?.dataset.start;
+  const oldLines = [...container.querySelectorAll(".lyric-line[data-start]")];
+  const oldOffset = freezeLyricFollow();
+  const anchor = preserveInspection && oldLines.reduce((nearest, line) =>
+    !nearest || Math.abs(line.offsetTop + line.offsetHeight / 2 + oldOffset) <
+      Math.abs(nearest.offsetTop + nearest.offsetHeight / 2 + oldOffset) ? line : nearest, null);
+  const anchorPosition = anchor ? anchor.offsetTop + anchor.offsetHeight / 2 + oldOffset : 0;
+  renderedLyricsState = state;
+  if (!preserveInspection) {
+    clearTimeout(lyricInspectionRestoreTimer);
+    lyricInspectionActive = false;
+    lyricInspectionOffset = 0;
+    lyricDragPointerId = null;
+    lyricsStage.classList.remove("inspecting");
+  }
   selectedLyricElement?.classList.remove("selected");
   selectedLyricElement = null;
-  const lyrics = lyricsCache.get(track.id);
   const translationButton = document.querySelector("#lyric-translation-toggle");
   activeLyricIndex = -1;
   container.style.transform = "translateY(0)";
@@ -738,6 +762,15 @@ function renderLyrics(track) {
     }
     container.append(item);
   });
+  if (preserveInspection) {
+    const lines = [...container.querySelectorAll(".lyric-line[data-start]")];
+    const nextAnchor = lines.find((line) => line.dataset.start === anchor?.dataset.start);
+    lyricInspectionOffset = clampLyricInspectionOffset(nextAnchor
+      ? anchorPosition - nextAnchor.offsetTop - nextAnchor.offsetHeight / 2 : oldOffset);
+    container.style.transform = `translateY(${lyricInspectionOffset}px)`;
+    selectedLyricElement = lines.find((line) => line.dataset.start === selectedStart) || null;
+    selectedLyricElement?.classList.add("selected");
+  }
   updateLyricsAtTime();
 }
 
@@ -784,12 +817,12 @@ function updateDesktopLyrics(track, lyrics, index) {
 
 function animateLyricFollow(container, active) {
   const target = `translateY(${-active.offsetTop - active.offsetHeight / 2}px)`;
+  const liveTransform = getComputedStyle(container).transform;
+  lyricFollowAnimation?.cancel();
   if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
     container.style.transform = target;
     return;
   }
-  const liveTransform = getComputedStyle(container).transform;
-  lyricFollowAnimation?.cancel();
   container.style.transform = target;
   lyricFollowAnimation = container.animate(
     [
@@ -1435,6 +1468,7 @@ function showTrackPropertiesDialog(track, properties) {
 
 function reorderTrack(draggedId, targetId) {
   if (!draggedId || draggedId === targetId) return;
+  const currentId = tracks[currentIndex]?.id;
   const moveBefore = (ids) => {
     const next = ids.filter((id) => id !== draggedId);
     const targetIndex = next.indexOf(targetId);
@@ -1456,6 +1490,7 @@ function reorderTrack(draggedId, targetId) {
     tracks.forEach((track, index) => { track.addedAt = stamp - index; });
     librarySort = "added";
   }
+  reconcileCurrentTrack(currentId);
   persist();
   render();
 }
@@ -1789,6 +1824,7 @@ function render() {
         render();
       } else if (result.action === "remove-from-library") {
         if (!window.confirm(`从 MedoMusic 音乐库中删除“${track.title}”？\n不会删除本地音频文件。`)) return;
+        const currentId = tracks[currentIndex]?.id;
         tracks = tracks.filter((item) => item.id !== track.id);
         playbackQueueIds = playbackQueueIds.filter((id) => id !== track.id);
         recent = recent.filter((id) => id !== track.id);
@@ -1796,13 +1832,7 @@ function render() {
         playlists.forEach((playlist) => {
           playlist.trackIds = (playlist.trackIds || []).filter((id) => id !== track.id);
         });
-        if (currentIndex === actualIndex) {
-          audio.pause();
-          audio.removeAttribute("src");
-          currentIndex = -1;
-        } else if (currentIndex > actualIndex) {
-          currentIndex -= 1;
-        }
+        reconcileCurrentTrack(currentId);
         persist();
         render();
       } else if (result.action === "show-album") {
@@ -1931,7 +1961,9 @@ async function openExternalAudioFiles(filePaths) {
   // Temporary files from an earlier shell-open session never leak into the
   // next queue. Files under a managed folder are promoted into the library
   // immediately, even when that folder has not indexed them yet.
+  const currentId = tracks[currentIndex]?.id;
   tracks = tracks.filter((track) => !track.transient);
+  reconcileCurrentTrack(currentId);
   const queueIds = [];
   for (const incoming of incomingTracks) {
     let existing = tracks.find((track) => tracksReferToSameFile(track, incoming));
@@ -2007,8 +2039,19 @@ async function chooseFiles() {
   mergeTracks(await window.medo.chooseFiles());
 }
 
+function reconcileCurrentTrack(currentId) {
+  const validIds = new Set(tracks.map((track) => track.id));
+  playbackQueueIds = playbackQueueIds.filter((id) => validIds.has(id));
+  currentIndex = tracks.findIndex((track) => track.id === currentId);
+  if (currentId && currentIndex < 0) {
+    clearCurrentPlayback();
+    if (currentView === "player") closePlaybackDetail();
+  }
+}
+
 function applyFolderScan(result, commit = true) {
   if (!result?.folder || !Array.isArray(result.tracks)) return;
+  const currentId = tracks[currentIndex]?.id;
   const folderKey = result.folder.toLowerCase();
   tracks = tracks.filter((track) => {
     const fromFolder = track.sourceDirectory?.toLowerCase() === folderKey;
@@ -2020,6 +2063,7 @@ function applyFolderScan(result, commit = true) {
     syncMusicFolderWatchers();
   }
   mergeTracks(result.tracks, false);
+  reconcileCurrentTrack(currentId);
   if (commit) {
     persist();
     render();
@@ -2081,7 +2125,9 @@ async function rebuildMusicLibraryIndex() {
     const manualTracks = tracks.filter((track) =>
       !track.sourceDirectory || !managedFolders.includes(track.sourceDirectory.toLowerCase())
     ).map((track) => ({ ...track, metadataLoaded: false, cover: null }));
+    const currentId = tracks[currentIndex]?.id;
     tracks = [...new Map([...rebuilt, ...manualTracks].map((track) => [track.id, track])).values()];
+    reconcileCurrentTrack(currentId);
     metadataRequests.clear();
     lyricsCache.clear();
     lyricsRequests.clear();
@@ -2094,6 +2140,7 @@ async function rebuildMusicLibraryIndex() {
 }
 
 function removeFolder(folder) {
+  const currentId = tracks[currentIndex]?.id;
   const folderKey = folder.toLowerCase();
   musicFolders = musicFolders.filter((item) => item.toLowerCase() !== folderKey);
   syncMusicFolderWatchers();
@@ -2104,7 +2151,7 @@ function removeFolder(folder) {
   const validIds = new Set(tracks.map((track) => track.id));
   favorites = new Set([...favorites].filter((id) => validIds.has(id)));
   recent = recent.filter((id) => validIds.has(id));
-  if (!tracks[currentIndex]) currentIndex = -1;
+  reconcileCurrentTrack(currentId);
   persist();
   render();
 }
@@ -2314,8 +2361,10 @@ async function playTrack(index, preserveQueue = false, preservePreviousNavigatio
   if (!playbackQueueIds.length) playbackQueueIds = [tracks[index].id];
   const track = tracks[index];
   window.medo.updateLyricsWindow({ noLyrics: false, playing: true });
-  const resolvedSource = await window.medo.resolveMediaSource(track.path);
+  const resolvedSource = await window.medo.resolveMediaSource(track.path).catch(() => null);
   if (generation !== playbackGeneration) return;
+  index = tracks.findIndex((candidate) => candidate.id === track.id);
+  if (index < 0) return;
   if (!resolvedSource) {
     recoverPlaybackFailure(track);
     return;
@@ -2378,8 +2427,10 @@ async function playTrack(index, preserveQueue = false, preservePreviousNavigatio
     return;
   }
   audio.play().then(() => {
+    if (generation !== playbackGeneration) return;
     playbackFailedIds.delete(track.id);
-  }).catch(() => {
+  }).catch((error) => {
+    if (generation !== playbackGeneration || error?.name === "AbortError") return;
     switchingPlaybackGeneration = 0;
     recoverPlaybackFailure(track);
   });
@@ -2599,7 +2650,6 @@ function renderPlaybackDetail() {
     document.querySelector("#toggle-detail-track"),
     document.querySelector("#toggle-detail-queue")
   ].forEach((button) => {
-    button.getAnimations().forEach((animation) => animation.cancel());
     button.style.removeProperty("opacity");
     button.style.removeProperty("transform");
     button.style.removeProperty("visibility");
@@ -2686,7 +2736,11 @@ function togglePlayback() {
   } else if (audio.paused) {
     ensureOutputGain();
     applyOutputVolume();
-    audio.play().catch(() => recoverPlaybackFailure(tracks[currentIndex]));
+    const generation = playbackGeneration;
+    const track = tracks[currentIndex];
+    audio.play().catch((error) => {
+      if (generation === playbackGeneration && error?.name !== "AbortError") recoverPlaybackFailure(track);
+    });
   } else {
     audio.pause();
   }
@@ -2700,6 +2754,11 @@ function clearCurrentPlayback() {
   audio.load();
   currentIndex = -1;
   activeLyricIndex = -1;
+  renderedLyricsState = null;
+  clearTimeout(lyricInspectionRestoreTimer);
+  lyricInspectionActive = false;
+  lyricFollowAnimation?.cancel();
+  lyricsStage.classList.remove("inspecting");
   document.querySelectorAll(".track-row.active").forEach((row) => row.classList.remove("active"));
   updatePlayButtonState(false);
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
@@ -2761,6 +2820,9 @@ function nextTrack(direction = 1) {
     lastPreviousRestartTrackId = null;
   }
   if (playMode === "shuffle") {
+    if (queue.length === 1) {
+      return playTrack(tracks.findIndex((track) => track.id === queue[0].id), true, continuingPreviousNavigation);
+    }
     const queueIds = queue.map((track) => track.id);
     const signature = [...queueIds].sort().join("\u001f");
     if (shuffleQueueSignature !== signature) {
@@ -3171,16 +3233,24 @@ function animatePlaybackDetail(entering) {
   const backdrop = surface?.querySelector(".detail-backdrop");
   if (!surface || !layout || !backdrop) return Promise.resolve();
   const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const surfaceStyle = getComputedStyle(surface);
-  const layoutStyle = getComputedStyle(layout);
+  const snapshot = (element) => {
+    const style = getComputedStyle(element);
+    return { opacity: style.opacity, transform: style.transform };
+  };
+  const surfaceStyle = snapshot(surface);
+  const layoutStyle = snapshot(layout);
+  const backdropStyle = snapshot(backdrop);
+  const interrupted = surface.getAnimations().some((animation) => animation.playState === "running");
   [surface, layout, backdrop].forEach((element) => element.getAnimations().forEach((animation) => animation.cancel()));
   const duration = reduced ? 80 : entering ? 220 : 210;
   const easing = "cubic-bezier(0.23, 1, 0.32, 1)";
   const animations = [
     surface.animate(
-      entering
-        ? [{ opacity: 0.35, transform: "scale(1.006)" }, { opacity: 1, transform: "scale(1)" }]
-        : [{ opacity: surfaceStyle.opacity, transform: "scale(1)" }, { opacity: 0, transform: "translateY(7px) scale(.996)" }],
+      reduced
+        ? [{ opacity: entering && !interrupted ? .35 : surfaceStyle.opacity }, { opacity: entering ? 1 : 0 }]
+        : entering
+          ? [interrupted ? surfaceStyle : { opacity: .35, transform: "translateY(12px) scale(1.012)" }, { opacity: 1, transform: "translateY(0) scale(1)" }]
+          : [surfaceStyle, { opacity: 0, transform: "translateY(7px) scale(.996)" }],
       { duration, easing, fill: "forwards" }
     )
   ];
@@ -3188,13 +3258,13 @@ function animatePlaybackDetail(entering) {
     animations.push(
       layout.animate(
         entering
-          ? [{ opacity: 0.58, transform: "scale(0.985)" }, { opacity: 1, transform: "scale(1)" }]
+          ? [interrupted ? layoutStyle : { opacity: 0.58, transform: "translateY(9px) scale(0.975)" }, { opacity: 1, transform: "translateY(0) scale(1)" }]
           : [{ opacity: layoutStyle.opacity, transform: layoutStyle.transform }, { opacity: 0.45, transform: "scale(0.992)" }],
-        { duration: entering ? 250 : 150, easing, fill: "forwards" }
+        { duration: entering ? 340 : 180, easing, fill: "forwards" }
       ),
       ...(entering ? [backdrop.animate(
-        [{ opacity: 0 }, { opacity: 0.52 }],
-        { duration: 240, easing, fill: "forwards" }
+        [{ opacity: interrupted ? backdropStyle.opacity : 0 }, { opacity: 0.52 }],
+        { duration: 380, easing, fill: "forwards" }
       )] : [])
     );
   }
@@ -3203,9 +3273,13 @@ function animatePlaybackDetail(entering) {
 
 function openPlaybackDetail() {
   if (!tracks[currentIndex]) return;
+  if (currentView === "player") return;
   const transitionId = ++playbackTransitionId;
   viewBeforePlayer = currentView;
   currentView = "player";
+  if (!lyricInspectionActive) activeLyricIndex = -1;
+  document.querySelector("main").classList.remove("playback-detail-closing");
+  document.body.classList.remove("playback-detail-exiting");
   render();
   requestAnimationFrame(() => {
     if (currentView === "player" && transitionId === playbackTransitionId) animatePlaybackDetail(true);
@@ -3243,6 +3317,7 @@ async function closePlaybackDetail() {
   document.body.classList.remove("playback-detail-active");
   document.body.classList.remove("playback-detail-exiting");
   persistentTools.forEach((element) => {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     const before = previousRects.get(element);
     const after = element.getBoundingClientRect();
     const deltaX = before.left - after.left;
@@ -3486,42 +3561,78 @@ document.querySelector("#playlists-overview").addEventListener("click", () => {
 });
 function animatePlayerToolButton(button) {
   if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const liveTransform = getComputedStyle(button).transform;
   button.getAnimations().forEach((animation) => animation.cancel());
   button.animate(
     [
-      { transform: "scale(.82) rotate(-7deg)" },
-      { transform: "scale(1.08) rotate(2deg)", offset: .58 },
+      { transform: liveTransform },
+      { transform: "scale(.88) rotate(-5deg)", offset: .16 },
+      { transform: "scale(1.09) rotate(2deg)", offset: .54 },
       { transform: "scale(1) rotate(0)" }
     ],
     { duration: 320, easing: "cubic-bezier(.22,1,.36,1)" }
   );
+  let ring = button.querySelector(".tool-feedback-ring");
+  if (!ring) {
+    ring = document.createElement("span");
+    ring.className = "tool-feedback-ring";
+    ring.setAttribute("aria-hidden", "true");
+    button.append(ring);
+  }
+  const running = ring.getAnimations().length > 0;
+  const ringStyle = getComputedStyle(ring);
+  const start = { opacity: running ? ringStyle.opacity : .8, transform: running ? ringStyle.transform : "scale(.65)" };
+  ring.getAnimations().forEach((animation) => animation.cancel());
+  ring.animate([start, { opacity: 0, transform: "scale(1.65)" }],
+    { duration: 480, easing: "cubic-bezier(.22,1,.36,1)" });
 }
 
-function animateDetailPanelToggle(button, panel, visible) {
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+function animateDetailPanelToggle(button, panel, visible, hiddenClass) {
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const surfaces = [...document.querySelector(".detail-layout").children];
+  const before = new Map(surfaces.map((element) => [element, {
+    rect: element.getBoundingClientRect(), opacity: getComputedStyle(element).opacity
+  }]));
+  surfaces.forEach((element) => {
+    element.getAnimations().forEach((animation) => animation.cancel());
+    element.style.removeProperty("width");
+  });
+  document.body.classList.toggle(hiddenClass, !visible);
+  button.classList.toggle("active", visible);
+  button.setAttribute("aria-pressed", String(visible));
+  if (reduced) return;
   animatePlayerToolButton(button);
-  panel.getAnimations().forEach((animation) => animation.cancel());
-  panel.animate(
-    visible
-      ? [{ opacity: 0, transform: "translateX(24px) scale(.97)" }, { opacity: 1, transform: "translateX(0) scale(1)" }]
-      : [{ filter: "brightness(1.08)" }, { filter: "brightness(1)" }],
-    { duration: visible ? 360 : 220, easing: "cubic-bezier(.22,1,.36,1)" }
-  );
+  if (!visible) panel.style.width = `${before.get(panel).rect.width}px`;
+  surfaces.forEach((element) => {
+    const previous = before.get(element);
+    const after = element.getBoundingClientRect();
+    const isPanel = element === panel;
+    if (!isPanel && getComputedStyle(element).visibility === "hidden") return;
+    const deltaX = previous.rect.left - after.left +
+      (element.classList.contains("lyrics-stage") ? (previous.rect.width - after.width) / 2 : 0);
+    const deltaY = previous.rect.top - after.top;
+    const direction = element.classList.contains("detail-track") ? -1 : 1;
+    const animation = element.animate([
+      { transform: `translate(${deltaX}px, ${deltaY}px) scale(${isPanel && visible && Number(previous.opacity) === 0 ? .94 : 1})`,
+        opacity: previous.opacity, visibility: "visible" },
+      { transform: isPanel && !visible ? `translateX(${direction * 28}px) scale(.95)` : "translate(0, 0) scale(1)",
+        opacity: isPanel && !visible ? 0 : 1, visibility: "visible" }
+    ], { duration: isPanel && !visible ? 240 : 380, easing: "cubic-bezier(.22,1,.36,1)" });
+    animation.finished.then(() => {
+      if (isPanel && !visible) panel.style.removeProperty("width");
+    }).catch(() => {});
+  });
 }
 
 document.querySelector("#toggle-detail-track").addEventListener("click", () => {
   detailTrackVisible = !detailTrackVisible;
   const button = document.querySelector("#toggle-detail-track");
-  document.body.classList.toggle("detail-track-hidden", !detailTrackVisible);
-  button.classList.toggle("active", detailTrackVisible);
-  animateDetailPanelToggle(button, document.querySelector(".detail-track"), detailTrackVisible);
+  animateDetailPanelToggle(button, document.querySelector(".detail-track"), detailTrackVisible, "detail-track-hidden");
 });
 document.querySelector("#toggle-detail-queue").addEventListener("click", () => {
   detailQueueVisible = !detailQueueVisible;
   const button = document.querySelector("#toggle-detail-queue");
-  document.body.classList.toggle("detail-queue-hidden", !detailQueueVisible);
-  button.classList.toggle("active", detailQueueVisible);
-  animateDetailPanelToggle(button, document.querySelector(".detail-queue"), detailQueueVisible);
+  animateDetailPanelToggle(button, document.querySelector(".detail-queue"), detailQueueVisible, "detail-queue-hidden");
 });
 document.querySelector("#desktop-lyrics-button").addEventListener("click", () => {
   animatePlayerToolButton(document.querySelector("#desktop-lyrics-button"));
@@ -3546,18 +3657,41 @@ window.medo.onLyricsWindowLockState((locked) => {
 
 const lyricsStage = document.querySelector(".lyrics-stage");
 const lyricsLines = document.querySelector("#lyrics-lines");
+function freezeLyricFollow() {
+  const transform = getComputedStyle(lyricsLines).transform;
+  const offset = transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m42;
+  lyricFollowAnimation?.cancel();
+  lyricFollowAnimation = null;
+  lyricsLines.style.transform = `translateY(${offset}px)`;
+  return offset;
+}
+
+function restoreLyricFollow() {
+  clearTimeout(lyricInspectionRestoreTimer);
+  selectedLyricElement?.classList.remove("selected");
+  selectedLyricElement = null;
+  lyricInspectionActive = false;
+  lyricInspectionOffset = 0;
+  activeLyricIndex = -1;
+  lyricsStage.classList.remove("inspecting");
+  updateLyricsAtTime();
+}
+
 function scheduleLyricFollowRestore() {
   clearTimeout(lyricInspectionRestoreTimer);
-  lyricInspectionRestoreTimer = setTimeout(() => {
-    selectedLyricElement?.classList.remove("selected");
-    selectedLyricElement = null;
-    lyricInspectionActive = false;
-    lyricInspectionOffset = 0;
-    activeLyricIndex = -1;
-    lyricsStage.classList.remove("inspecting");
-    updateLyricsAtTime();
-  }, 5000);
+  if (lyricPointerInside || lyricDragPointerId !== null) return;
+  lyricInspectionRestoreTimer = setTimeout(restoreLyricFollow, 5000);
 }
+lyricsStage.addEventListener("pointerenter", (event) => {
+  if (event.pointerType === "touch") return;
+  lyricPointerInside = true;
+  clearTimeout(lyricInspectionRestoreTimer);
+});
+lyricsStage.addEventListener("pointerleave", () => {
+  lyricPointerInside = false;
+  if (lyricInspectionActive) scheduleLyricFollowRestore();
+});
+document.querySelector("#restore-lyric-follow").addEventListener("click", restoreLyricFollow);
 function clampLyricInspectionOffset(offset) {
   const lines = [...lyricsLines.querySelectorAll(".lyric-line[data-start]")];
   if (!lines.length) return offset;
@@ -3568,13 +3702,12 @@ function clampLyricInspectionOffset(offset) {
   return Math.max(minimum, Math.min(maximum, offset));
 }
 lyricsStage.addEventListener("pointerdown", (event) => {
-  if (event.button !== 0 || !lyricsCache.get(tracks[currentIndex]?.id)?.synced) return;
-  lyricFollowAnimation?.cancel();
+  if (event.target.closest("#restore-lyric-follow") || lyricDragPointerId !== null ||
+      event.button !== 0 || !lyricsCache.get(tracks[currentIndex]?.id)?.synced) return;
+  lyricDragStartOffset = freezeLyricFollow();
   lyricDragPointerId = event.pointerId;
   lyricDragStartY = event.clientY;
   lyricDraggedDistance = 0;
-  const transform = getComputedStyle(lyricsLines).transform;
-  lyricDragStartOffset = transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m42;
   clearTimeout(lyricInspectionRestoreTimer);
 });
 lyricsStage.addEventListener("pointermove", (event) => {
@@ -3585,12 +3718,13 @@ lyricsStage.addEventListener("pointermove", (event) => {
   if (!lyricInspectionActive) {
     lyricInspectionActive = true;
     lyricsStage.classList.add("inspecting");
-    lyricsStage.setPointerCapture(event.pointerId);
   }
+  if (!lyricsStage.hasPointerCapture(event.pointerId)) lyricsStage.setPointerCapture(event.pointerId);
   lyricInspectionOffset = clampLyricInspectionOffset(lyricDragStartOffset + event.clientY - lyricDragStartY);
   lyricsLines.style.transform = `translateY(${lyricInspectionOffset}px)`;
 });
 lyricsStage.addEventListener("click", (event) => {
+  if (event.target.closest("#restore-lyric-follow")) return;
   if (lyricDraggedDistance > 6) {
     event.preventDefault();
     event.stopPropagation();
@@ -3617,7 +3751,7 @@ lyricsStage.addEventListener("click", (event) => {
   lyricsStage.classList.remove("inspecting");
   updateLyricsAtTime();
 }, true);
-["pointerup", "pointercancel"].forEach((eventName) => {
+["pointerup", "pointercancel", "lostpointercapture"].forEach((eventName) => {
   lyricsStage.addEventListener(eventName, (event) => {
     if (event.pointerId !== lyricDragPointerId) return;
     lyricDragPointerId = null;
@@ -3627,10 +3761,9 @@ lyricsStage.addEventListener("click", (event) => {
 lyricsStage.addEventListener("wheel", (event) => {
   if (!lyricsCache.get(tracks[currentIndex]?.id)?.synced) return;
   event.preventDefault();
-  lyricFollowAnimation?.cancel();
+  const liveOffset = freezeLyricFollow();
   if (!lyricInspectionActive) {
-    const transform = getComputedStyle(lyricsLines).transform;
-    lyricInspectionOffset = transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m42;
+    lyricInspectionOffset = liveOffset;
   }
   lyricInspectionActive = true;
   lyricsStage.classList.add("inspecting");
@@ -3978,14 +4111,18 @@ async function restorePlaybackState() {
   updateMuteButton();
   const index = tracks.findIndex((track) => track.id === restoredPlaybackState.trackId);
   if (index < 0) return;
-  currentIndex = index;
   const track = tracks[index];
-  const source = await window.medo.resolveMediaSource(track.path);
-  if (!source) return;
+  const generation = ++playbackGeneration;
+  const source = await window.medo.resolveMediaSource(track.path).catch(() => null);
+  if (!source || generation !== playbackGeneration) return;
+  const restoredIndex = tracks.findIndex((candidate) => candidate.id === track.id);
+  if (restoredIndex < 0) return;
+  currentIndex = restoredIndex;
   track.url = source;
   audio.src = source;
   audio.load();
   audio.addEventListener("loadedmetadata", () => {
+    if (generation !== playbackGeneration) return;
     audio.currentTime = Math.min(Number(restoredPlaybackState.currentTime) || 0, Math.max(0, audio.duration - .1));
   }, { once: true });
   updateNowPlaying(track);

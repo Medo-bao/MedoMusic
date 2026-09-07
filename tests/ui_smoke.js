@@ -617,6 +617,8 @@ async function run() {
   await lyricPage.screenshot({ path: path.join(artifacts, "desktop-lyrics-karaoke.png"), omitBackground: true });
   await lyricPage.close();
 
+  await require("./playback-experience")(page);
+
   console.log(
     `UI smoke passed; 1000-track library: ${timings.libraryMs.toFixed(1)}ms; ` +
     `settings entry: ${timings.settingsMs.toFixed(1)}ms`
