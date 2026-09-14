@@ -142,6 +142,27 @@ module.exports = async function checkPlaybackExperience(page) {
   assert.equal(motion.closingClass, false);
   assert.equal(motion.exitingClass, false);
 
+  const immediateReopen = await page.evaluate(async () => {
+    const exit = closePlaybackDetail();
+    openPlaybackDetail();
+    await exit;
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    return { view: currentView, opacity: getComputedStyle(document.querySelector("#playback-detail")).opacity,
+      expanded: document.querySelector("#open-playback-detail").getAttribute("aria-expanded") };
+  });
+  assert.deepEqual(immediateReopen, { view: "player", opacity: "1", expanded: "true" }, "Same-frame reopen must not run a stale exit animation");
+  await page.evaluate(() => closePlaybackDetail());
+  const cover = page.locator("#open-playback-detail");
+  await cover.hover();
+  await page.waitForTimeout(350);
+  assert.equal(await cover.locator(".mini-cover-overlay").evaluate((element) => getComputedStyle(element).opacity), "1");
+  await cover.focus();
+  await page.keyboard.press("Enter");
+  assert.equal(await cover.getAttribute("aria-expanded"), "true");
+  assert.equal(await cover.getAttribute("aria-label"), "返回上一页");
+  await page.waitForTimeout(450);
+  await page.screenshot({ path: require("node:path").join(__dirname, "artifacts", "cover-hover.png") });
+
   await page.evaluate(() => {
     lyricsStage.dispatchEvent(new WheelEvent("wheel", { deltaY: 200, cancelable: true }));
     animatePlayerToolButton(document.querySelector("#volume-button"));

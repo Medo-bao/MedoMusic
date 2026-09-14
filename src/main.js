@@ -59,6 +59,7 @@ let lyricsWindowTopTimer = null;
 let trayMuted = false;
 let trayLyricsSize = 34;
 let globalPlayPauseShortcutEnabled = true;
+let globalDesktopLyricsShortcutEnabled = true;
 let globalLyricsRefreshShortcutEnabled = true;
 let globalPreviousShortcutEnabled = true;
 let globalNextShortcutEnabled = true;
@@ -424,15 +425,20 @@ async function controlWindowFromMyFirefly(action) {
 
 function applyGlobalShortcutSettings(settings = {}) {
   globalPlayPauseShortcutEnabled = settings.playPause !== false;
+  globalDesktopLyricsShortcutEnabled = settings.desktopLyrics !== false;
   globalLyricsRefreshShortcutEnabled = settings.lyricsRefresh !== false;
   globalPreviousShortcutEnabled = settings.previous !== false;
   globalNextShortcutEnabled = settings.next !== false;
   globalShortcut.unregister("Alt+S");
+  globalShortcut.unregister("Alt+W");
   globalShortcut.unregister("Alt+D");
   globalShortcut.unregister("Alt+Q");
   globalShortcut.unregister("Alt+E");
   if (globalPlayPauseShortcutEnabled) {
     globalShortcut.register("Alt+S", () => sendGlobalPlaybackCommand("toggle-play"));
+  }
+  if (globalDesktopLyricsShortcutEnabled) {
+    globalShortcut.register("Alt+W", () => sendGlobalPlaybackCommand("toggle-desktop-lyrics"));
   }
   if (globalLyricsRefreshShortcutEnabled) {
     globalShortcut.register("Alt+D", () => sendGlobalPlaybackCommand("refresh-lyrics"));

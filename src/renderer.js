@@ -44,6 +44,7 @@ let displayMode = localStorage.getItem("medo.displayMode") || "thumbnail";
 let closeBehavior = localStorage.getItem("medo.closeBehavior") || "background";
 let trayEnabled = localStorage.getItem("medo.trayEnabled") === "true";
 let globalPlayPauseShortcutEnabled = localStorage.getItem("medo.globalPlayPauseShortcutEnabled") !== "false";
+let globalDesktopLyricsShortcutEnabled = localStorage.getItem("medo.globalDesktopLyricsShortcutEnabled") !== "false";
 let globalLyricsRefreshShortcutEnabled = localStorage.getItem("medo.globalLyricsRefreshShortcutEnabled") !== "false";
 let globalPreviousShortcutEnabled = localStorage.getItem("medo.globalPreviousShortcutEnabled") !== "false";
 let globalNextShortcutEnabled = localStorage.getItem("medo.globalNextShortcutEnabled") !== "false";
@@ -90,9 +91,7 @@ let detailTrackVisible = true;
 let detailQueueVisible = true;
 let desktopLyricsLocked = false;
 const INITIAL_TRACK_RENDER_LIMIT = 48;
-const TRACK_RENDER_BATCH = 160;
-let renderedTrackLimit = INITIAL_TRACK_RENDER_LIMIT;
-let listLoadObserver = null;
+let disposeTrackWindow = () => {};
 let backgroundMode = document.hidden;
 let lastBackgroundUiUpdate = 0;
 let lastMediaSessionUpdate = 0;
@@ -365,6 +364,9 @@ function applyGlobalShortcutSettings(type, enabled) {
   if (type === "playPause") {
     globalPlayPauseShortcutEnabled = Boolean(enabled);
     localStorage.setItem("medo.globalPlayPauseShortcutEnabled", String(globalPlayPauseShortcutEnabled));
+  } else if (type === "desktopLyrics") {
+    globalDesktopLyricsShortcutEnabled = Boolean(enabled);
+    localStorage.setItem("medo.globalDesktopLyricsShortcutEnabled", String(globalDesktopLyricsShortcutEnabled));
   } else if (type === "lyricsRefresh") {
     globalLyricsRefreshShortcutEnabled = Boolean(enabled);
     localStorage.setItem("medo.globalLyricsRefreshShortcutEnabled", String(globalLyricsRefreshShortcutEnabled));
@@ -395,7 +397,13 @@ function applyGlobalShortcutSettings(type, enabled) {
     button.classList.toggle("active", active);
     button.setAttribute("aria-checked", String(active));
   });
+  document.querySelectorAll(".global-desktop-lyrics-shortcut-option").forEach((button) => {
+    const active = (button.dataset.enabled === "true") === globalDesktopLyricsShortcutEnabled;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
   window.medo.setGlobalShortcuts({
+    desktopLyrics: globalDesktopLyricsShortcutEnabled,
     playPause: globalPlayPauseShortcutEnabled,
     lyricsRefresh: globalLyricsRefreshShortcutEnabled,
     previous: globalPreviousShortcutEnabled,
@@ -1496,6 +1504,7 @@ function reorderTrack(draggedId, targetId) {
 }
 
 function applyViewShellState({ preservePlaybackDetailActive = false } = {}) {
+  updateMiniCoverState();
   const settingsOpen = currentView === "settings";
   const playbackDetailOpen = currentView === "player";
   const main = document.querySelector("main");
@@ -1512,6 +1521,7 @@ function applyViewShellState({ preservePlaybackDetailActive = false } = {}) {
 }
 
 function render() {
+  const savedScrollTop = document.querySelector("main").scrollTop;
   const { main, settingsOpen, playbackDetailOpen } = applyViewShellState();
   if (playbackDetailOpen) {
     document.querySelector("#back-button").disabled = false;
@@ -1546,6 +1556,8 @@ function render() {
     return;
   }
 
+  disposeTrackWindow();
+  disposeTrackWindow = () => {};
   const visible = visibleTracks();
   renderPlaylistHero(visible);
   metadataObserver?.disconnect();
@@ -1564,6 +1576,7 @@ function render() {
   emptyState.classList.toggle("hidden", visible.length > 0);
   trackList.innerHTML = "";
   trackList.className = "track-list";
+  trackList.style.removeProperty("height");
 
   if (currentView === "playlists") {
     trackList.className = "track-list playlist-overview-list";
@@ -1608,7 +1621,7 @@ function render() {
   }
 
   const trackIndexes = new Map(tracks.map((track, index) => [track.id, index]));
-  visible.slice(0, renderedTrackLimit).forEach((track) => {
+  const createTrackRow = (track) => {
     const actualIndex = trackIndexes.get(track.id) ?? -1;
     const row = document.createElement("div");
     row.className = `track-row${actualIndex === currentIndex ? " active" : ""}${selectedTrackIds.has(track.id) ? " selected" : ""}`;
@@ -1635,7 +1648,7 @@ function render() {
     row.querySelector(".row-album-name").textContent = track.album || "未知专辑";
     const playCount = row.querySelector(".play-count");
     playCount.hidden = currentView !== "recent";
-    playCount.textContent = `${mergedPlayCount(track)} 次播放`;
+    playCount.textContent = playCount.hidden ? "" : `${mergedPlayCount(track)} 次播放`;
     let longPressTimer = null;
     let pointerId = null;
     let dropTargetId = null;
@@ -1871,23 +1884,56 @@ function render() {
         syncSelectionState();
       }
     });
-    trackList.append(row);
-    observeMetadataRow(row, track);
-  });
-  listLoadObserver?.disconnect();
-  if (visible.length > renderedTrackLimit) {
-    const sentinel = document.createElement("div");
-    sentinel.className = "list-load-sentinel";
-    sentinel.textContent = `继续加载 ${Math.min(TRACK_RENDER_BATCH, visible.length - renderedTrackLimit)} 首歌曲`;
-    trackList.append(sentinel);
-    listLoadObserver = new IntersectionObserver((entries) => {
-      if (!entries[0]?.isIntersecting) return;
-      listLoadObserver.disconnect();
-      renderedTrackLimit += TRACK_RENDER_BATCH;
-      render();
-    }, { root: document.querySelector("main"), rootMargin: "320px" });
-    listLoadObserver.observe(sentinel);
-  }
+    return row;
+  };
+  const rowHeight = displayMode === "compact" ? 48 : 66;
+  const stride = rowHeight + 2;
+  const rows = new Map();
+  let frame = null;
+  trackList.classList.add("virtual-track-list");
+  trackList.style.height = `${14 + Math.max(0, visible.length * stride - 2)}px`;
+  main.scrollTop = savedScrollTop;
+  const renderWindow = () => {
+    frame = null;
+    if (!trackList.getClientRects().length) return;
+    const listTop = trackList.getBoundingClientRect().top - main.getBoundingClientRect().top - main.clientTop + main.scrollTop;
+    const windowSize = Math.max(INITIAL_TRACK_RENDER_LIMIT, Math.ceil(main.clientHeight / stride) + 16);
+    const start = Math.max(0, Math.min(
+      Math.floor((Math.floor((main.scrollTop - listTop) / stride) - 8) / 8) * 8,
+      Math.max(0, visible.length - windowSize)
+    ));
+    const end = Math.min(visible.length, start + windowSize);
+    for (const [index, row] of rows) {
+      if (index >= start && index < end) continue;
+      // Keep pointer capture and keyboard focus when their row leaves the viewport.
+      if (row.dataset.trackId === draggedTrackId || row.contains(document.activeElement) || row.matches(":active")) continue;
+      metadataObserver.unobserve(row);
+      row.remove();
+      rows.delete(index);
+    }
+    for (let index = start; index < end; index += 1) {
+      if (rows.has(index)) continue;
+      const track = visible[index];
+      const row = createTrackRow(track);
+      row.style.top = `${14 + index * stride}px`;
+      row.style.height = `${rowHeight}px`;
+      const next = [...rows.keys()].filter((key) => key > index).sort((a, b) => a - b)[0];
+      trackList.insertBefore(row, rows.get(next) || null);
+      rows.set(index, row);
+      observeMetadataRow(row, track);
+    }
+  };
+  const scheduleWindow = () => { if (frame === null) frame = requestAnimationFrame(renderWindow); };
+  main.addEventListener("scroll", scheduleWindow, { passive: true });
+  const resizeObserver = new ResizeObserver(scheduleWindow);
+  resizeObserver.observe(main);
+  resizeObserver.observe(trackList);
+  renderWindow();
+  disposeTrackWindow = () => {
+    main.removeEventListener("scroll", scheduleWindow);
+    resizeObserver.disconnect();
+    if (frame !== null) cancelAnimationFrame(frame);
+  };
 }
 
 function trackFileKey(track) {
@@ -2467,7 +2513,17 @@ async function playTrack(index, preserveQueue = false, preservePreviousNavigatio
   }
 }
 
+function updateMiniCoverState() {
+  const button = document.querySelector("#open-playback-detail");
+  const available = Boolean(tracks[currentIndex]);
+  const expanded = currentView === "player";
+  button.disabled = !available;
+  button.setAttribute("aria-label", available ? (expanded ? "返回上一页" : "打开歌词页") : "请先选择歌曲");
+  button.setAttribute("aria-expanded", String(expanded));
+}
+
 function updateNowPlaying(track) {
+  updateMiniCoverState();
   document.querySelector("#now-title").textContent = track.title;
   document.querySelector("#now-album").textContent = track.artist || "未知艺术家";
   const cover = document.querySelector("#mini-cover");
@@ -2619,6 +2675,9 @@ function attachQueueDrag(button, trackId) {
       queueDragFrame = requestAnimationFrame(autoScroll);
     }
   });
+  button.addEventListener("pointerleave", () => {
+    if (draggedQueueTrackId !== trackId) clearTimeout(longPressTimer);
+  });
   ["pointerup", "pointercancel"].forEach((eventName) => {
     button.addEventListener(eventName, (event) => {
       clearTimeout(longPressTimer);
@@ -2671,6 +2730,7 @@ function renderPlaybackDetail() {
   const queue = playbackQueueIds.map((id) => tracksById.get(id)).filter(Boolean);
   document.querySelector("#detail-queue-count").textContent = `${queue.length} 首歌曲`;
   const container = document.querySelector("#detail-queue-list");
+  const savedQueueScrollTop = container.scrollTop;
   cancelAnimationFrame(detailQueueRenderFrame);
   detailQueueRenderFrame = null;
   delete container.dataset.windowStart;
@@ -2681,13 +2741,21 @@ function renderPlaybackDetail() {
   queueCanvas.className = "queue-virtual-content";
   queueCanvas.style.height = `${queue.length * queueRowHeight}px`;
   container.replaceChildren(queueCanvas);
+  container.scrollTop = savedQueueScrollTop;
+  const queueRows = new Map();
   const renderQueueWindow = (requestedStart) => {
     const start = Math.max(0, Math.min(requestedStart, Math.max(0, queue.length - queueWindowSize)));
     if (Number(container.dataset.windowStart) === start && queueCanvas.children.length) return;
     container.dataset.windowStart = String(start);
-    queueCanvas.replaceChildren();
+    for (const [index, button] of queueRows) {
+      if (index >= start && index < start + queueWindowSize) continue;
+      if (button.dataset.trackId === draggedQueueTrackId || button.contains(document.activeElement) || button.matches(":active")) continue;
+      button.remove();
+      queueRows.delete(index);
+    }
     queue.slice(start, start + queueWindowSize).forEach((item, offset) => {
       const index = start + offset;
+      if (queueRows.has(index)) return;
       const button = document.createElement("button");
       button.className = `queue-item${item.id === track.id ? " active" : ""}`;
       button.dataset.trackId = item.id;
@@ -2701,7 +2769,9 @@ function renderPlaybackDetail() {
         playTrack(tracks.findIndex((candidate) => candidate.id === item.id), true);
       });
       attachQueueDrag(button, item.id);
-      queueCanvas.append(button);
+      const next = [...queueRows.keys()].filter((key) => key > index).sort((a, b) => a - b)[0];
+      queueCanvas.insertBefore(button, queueRows.get(next) || null);
+      queueRows.set(index, button);
     });
   };
   const activeQueueIndex = Math.max(0, queue.findIndex((item) => item.id === track.id));
@@ -2753,6 +2823,7 @@ function clearCurrentPlayback() {
   audio.removeAttribute("src");
   audio.load();
   currentIndex = -1;
+  updateMiniCoverState();
   activeLyricIndex = -1;
   renderedLyricsState = null;
   clearTimeout(lyricInspectionRestoreTimer);
@@ -3304,6 +3375,7 @@ async function closePlaybackDetail() {
   void main.offsetWidth;
   document.body.classList.add("playback-detail-exiting");
   await new Promise((resolve) => requestAnimationFrame(resolve));
+  if (transitionId !== playbackTransitionId) return;
   await animatePlaybackDetail(false);
   if (transitionId !== playbackTransitionId) return;
   const persistentTools = [
@@ -3485,6 +3557,15 @@ document.querySelector("#playlist-delete").addEventListener("click", deleteCurre
 document.querySelector("#detail-save-queue").addEventListener("click", savePlaybackQueueAsPlaylist);
 document.querySelector("#playlist-art").addEventListener("click", choosePlaylistCover);
 document.querySelector("#open-playback-detail").addEventListener("click", () => {
+  const button = document.querySelector("#open-playback-detail");
+  if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    const flash = button.querySelector(".mini-cover-flash");
+    const pose = getComputedStyle(flash);
+    const start = { opacity: pose.opacity, transform: pose.transform };
+    flash.getAnimations().forEach((animation) => animation.cancel());
+    flash.animate([start, { opacity: .85, transform: "scale(1.02)", offset: .15 },
+      { opacity: 0, transform: "scale(1.45)" }], { duration: 420, easing: "cubic-bezier(.22,1,.36,1)" });
+  }
   if (currentView === "player") {
     closePlaybackDetail();
     return;
@@ -3890,6 +3971,9 @@ document.querySelectorAll(".tray-option").forEach((button) => {
 document.querySelectorAll(".global-play-shortcut-option").forEach((button) => {
   button.addEventListener("click", () => applyGlobalShortcutSettings("playPause", button.dataset.enabled === "true"));
 });
+document.querySelectorAll(".global-desktop-lyrics-shortcut-option").forEach((button) => {
+  button.addEventListener("click", () => applyGlobalShortcutSettings("desktopLyrics", button.dataset.enabled === "true"));
+});
 document.querySelectorAll(".global-lyrics-shortcut-option").forEach((button) => {
   button.addEventListener("click", () => applyGlobalShortcutSettings("lyricsRefresh", button.dataset.enabled === "true"));
 });
@@ -4229,6 +4313,11 @@ window.medo.onTrayCommand(({ command, value }) => {
   } else if (command === "previous") nextTrack(-1);
   else if (command === "next") nextTrack(1);
   else if (command === "toggle-play") togglePlayback();
+  else if (command === "toggle-desktop-lyrics") {
+    window.medo.toggleLyricsWindow();
+    activeLyricIndex = -1;
+    updateLyricsAtTime();
+  }
   else if (command === "refresh-lyrics") refreshCurrentLyricsFromNetwork();
   else if (command === "open-settings" || command === "open-desktop-lyric-settings") {
     selectedTrackIds.clear();

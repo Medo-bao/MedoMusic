@@ -256,7 +256,7 @@
           <div class="settings-heading">
             <div>
               <h2>全局快捷键</h2>
-              <p>即使 MedoMusic 不在前台，也可以控制播放和刷新歌词。</p>
+              <p>即使 MedoMusic 不在前台，也可以控制播放、显示或隐藏桌面歌词和刷新歌词。</p>
             </div>
           </div>
           <div class="display-setting global-play-shortcut-setting">
@@ -264,6 +264,13 @@
             <div class="segmented-control global-play-shortcut-options" role="radiogroup" aria-label="启用全局暂停快捷键">
               <button class="global-play-shortcut-option active" data-enabled="true" role="radio" aria-checked="true">启用</button>
               <button class="global-play-shortcut-option" data-enabled="false" role="radio" aria-checked="false">关闭</button>
+            </div>
+          </div>
+          <div class="display-setting global-desktop-lyrics-shortcut-setting">
+            <div><h3>启用全局桌面歌词快捷键</h3><p>显示或隐藏桌面歌词：Alt+W</p></div>
+            <div class="segmented-control global-desktop-lyrics-shortcut-options" role="radiogroup" aria-label="启用全局桌面歌词快捷键">
+              <button class="global-desktop-lyrics-shortcut-option active" data-enabled="true" role="radio" aria-checked="true">启用</button>
+              <button class="global-desktop-lyrics-shortcut-option" data-enabled="false" role="radio" aria-checked="false">关闭</button>
             </div>
           </div>
           <div class="display-setting global-lyrics-shortcut-setting">
@@ -360,8 +367,10 @@
 
     <footer class="player">
       <div class="song-info">
-        <button id="open-playback-detail" class="mini-cover-button" title="打开播放详情">
+        <button id="open-playback-detail" class="mini-cover-button" aria-label="请先选择歌曲" aria-expanded="false" aria-controls="playback-detail" disabled>
           <img id="mini-cover" src="../Groove/Assets/MissingAlbumArt.jpg" alt="">
+          <span class="mini-cover-overlay" aria-hidden="true"></span>
+          <span class="mini-cover-flash" aria-hidden="true"></span>
         </button>
         <div>
           <strong id="now-title">未选择歌曲</strong>

@@ -99,7 +99,7 @@ async function run() {
       showTrackMenu: async () => null,
       showTrackProperties: async (filePath) => ({ name: "Demo.mp3", path: filePath, extension: "MP3", size: 1024 }),
       showTrackInFolder: async () => true,
-      toggleLyricsWindow: () => {},
+      toggleLyricsWindow: () => { window.__desktopLyricsVisible = !window.__desktopLyricsVisible; },
       translateLyrics: async () => [],
       updateLyricsWindow: () => {},
       setCloseBehavior: () => {},
@@ -110,7 +110,7 @@ async function run() {
       onOpenAudioFiles: () => () => {},
       onMyFireflyCommand: () => () => {},
       respondToMyFirefly: () => {},
-      onTrayCommand: () => () => {},
+      onTrayCommand: (callback) => { window.__trayCommand = callback; return () => {}; },
       loadPlaylist: async () => null,
       readMetadata: async () => null,
       setTitleBarTheme: () => {},
@@ -233,6 +233,20 @@ async function run() {
     throw new Error("Global shortcut settings are incomplete");
   }
   await page.locator('.global-lyrics-shortcut-option[data-enabled="false"]').click();
+  assert.deepEqual(await page.locator('.global-shortcuts-group .display-setting h3').allTextContents(), [
+    "启用全局暂停快捷键", "启用全局桌面歌词快捷键", "启用全局歌词刷新快捷键",
+    "启用全局上一首歌快捷键", "启用全局下一首歌快捷键"
+  ]);
+  assert.equal(await page.evaluate(() => window.__globalShortcutSettings.at(-1).desktopLyrics), true);
+  await page.locator('.global-desktop-lyrics-shortcut-option[data-enabled="false"]').click();
+  assert.equal(await page.evaluate(() => localStorage.getItem("medo.globalDesktopLyricsShortcutEnabled")), "false");
+  assert.equal(await page.evaluate(() => window.__globalShortcutSettings.at(-1).desktopLyrics), false);
+  await page.locator('.global-desktop-lyrics-shortcut-option[data-enabled="true"]').click();
+  assert.equal(await page.evaluate(() => window.__globalShortcutSettings.at(-1).desktopLyrics), true);
+  await page.evaluate(() => window.__trayCommand({ command: "toggle-desktop-lyrics" }));
+  assert.equal(await page.evaluate(() => window.__desktopLyricsVisible), true);
+  await page.evaluate(() => window.__trayCommand({ command: "toggle-desktop-lyrics" }));
+  assert.equal(await page.evaluate(() => window.__desktopLyricsVisible), false);
   const shortcutSettings = await page.evaluate(() => window.__globalShortcutSettings.at(-1));
   if (shortcutSettings?.playPause !== true || shortcutSettings?.lyricsRefresh !== false ||
       shortcutSettings?.previous !== true || shortcutSettings?.next !== true) {
@@ -618,6 +632,7 @@ async function run() {
   await lyricPage.close();
 
   await require("./playback-experience")(page);
+  await require("./long-list-scroll")(page);
 
   console.log(
     `UI smoke passed; 1000-track library: ${timings.libraryMs.toFixed(1)}ms; ` +
