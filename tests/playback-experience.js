@@ -105,12 +105,61 @@ module.exports = async function checkPlaybackExperience(page) {
   assert.deepEqual(functional.clearedFailure, { index: -1, source: null });
   assert.equal(functional.currentFailure, "B");
   assert.equal(functional.singleShuffle, 1);
-  assert.ok(Math.abs(functional.interruptionDelta + .72) < 1, JSON.stringify(functional));
+  assert.ok(Math.abs(functional.interruptionDelta) < .1, "Wheel scrolling must begin at the visible pose without jumping");
   assert.deepEqual(functional.rerender, { delta: 0, sameNode: true, inspecting: true });
+  const wheelMotion = await page.evaluate(() => {
+    const y = () => new DOMMatrixReadOnly(getComputedStyle(lyricsLines).transform).m42;
+    const wheel = (deltaY, deltaMode = 0) => lyricsStage.dispatchEvent(new WheelEvent("wheel", { deltaY, deltaMode, cancelable: true }));
+    freezeLyricFollow();
+    lyricInspectionOffset = clampLyricInspectionOffset(-700);
+    lyricsLines.style.transform = `translateY(${lyricInspectionOffset}px)`;
+    const start = y();
+    wheel(120);
+    const target = lyricInspectionOffset;
+    lyricFollowAnimation.pause();
+    lyricFollowAnimation.currentTime = 70;
+    const middle = y();
+    wheel(-40);
+    const reverseStart = y();
+    const reverseTarget = lyricInspectionOffset;
+    lyricFollowAnimation.finish();
+    const lineStart = y();
+    wheel(1, 1);
+    const lineDelta = lyricInspectionOffset - lineStart;
+    lyricFollowAnimation.finish();
+    return { start, target, middle, reverseStart, reverseTarget, lineDelta };
+  });
+  assert.ok(wheelMotion.middle < wheelMotion.start && wheelMotion.middle > wheelMotion.target);
+  assert.ok(Math.abs(wheelMotion.reverseStart - wheelMotion.middle) < .1);
+  assert.ok(wheelMotion.reverseTarget > wheelMotion.middle, "Reverse wheel input must immediately reverse direction");
+  assert.ok(Math.abs(wheelMotion.lineDelta + 32 * .72) < .1, "Line-mode wheels must normalize their units");
   await page.waitForTimeout(5100);
   assert.equal(await page.evaluate(() => lyricInspectionActive), true, "Hovering readers must retain their place");
   await page.locator("#restore-lyric-follow").click();
   assert.equal(await page.evaluate(() => lyricInspectionActive), false);
+
+  await page.locator('.lyric-line[data-start="15"]').click();
+  await page.waitForTimeout(400);
+  const selectedState = await page.locator('.lyric-line.selected').evaluate((line) => ({
+    color: getComputedStyle(line).color, opacity: getComputedStyle(line).opacity,
+    animation: getComputedStyle(line).animationName
+  }));
+  assert.notEqual(selectedState.color, "rgba(0, 0, 0, 0)");
+  assert.equal(selectedState.opacity, "1");
+  assert.equal(selectedState.animation, "none");
+  const neighbour = page.locator('.lyric-line[data-start="16"]');
+  const opacityBefore = await neighbour.evaluate(line => getComputedStyle(line).opacity);
+  await page.locator('.lyric-line[data-start="14"]').hover();
+  await page.waitForTimeout(250);
+  assert.equal(await neighbour.evaluate(line => getComputedStyle(line).opacity), opacityBefore,
+    "Hovering a lyric must not fade unrelated lyrics");
+  const restoreMask = await page.locator('#restore-lyric-follow').evaluate(button => {
+    const masks = [];
+    for (let element = button; element; element = element.parentElement) masks.push(getComputedStyle(element).maskImage);
+    return masks;
+  });
+  assert.ok(restoreMask.every(mask => mask === "none"), "Return button must remain outside the changing lyric mask");
+  await page.locator('#restore-lyric-follow').click();
 
   const motion = await page.evaluate(async () => {
     const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

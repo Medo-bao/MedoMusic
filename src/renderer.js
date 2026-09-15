@@ -171,6 +171,7 @@ function setBoundedCache(cache, key, value, limit = 160) {
 }
 
 function persist() {
+  persistNavigation();
   const storedTracks = tracks
     .filter((track) => !track.transient)
     .map(({ transient, ...track }) => track);
@@ -1504,6 +1505,7 @@ function reorderTrack(draggedId, targetId) {
 }
 
 function applyViewShellState({ preservePlaybackDetailActive = false } = {}) {
+  persistNavigation();
   updateMiniCoverState();
   const settingsOpen = currentView === "settings";
   const playbackDetailOpen = currentView === "player";
@@ -3815,6 +3817,7 @@ lyricsStage.addEventListener("click", (event) => {
   const line = event.target.closest(".lyric-line[data-start]");
   if (!line) return;
   if (selectedLyricElement !== line) {
+    lyricInspectionOffset = freezeLyricFollow();
     selectedLyricElement?.classList.remove("selected");
     selectedLyricElement = line;
     selectedLyricElement.classList.add("selected");
@@ -3840,16 +3843,26 @@ lyricsStage.addEventListener("click", (event) => {
   });
 });
 lyricsStage.addEventListener("wheel", (event) => {
-  if (!lyricsCache.get(tracks[currentIndex]?.id)?.synced) return;
+  if (!lyricsCache.get(tracks[currentIndex]?.id)?.synced || event.ctrlKey || !event.deltaY) return;
   event.preventDefault();
+  const unit = event.deltaMode === 1 ? 32 : event.deltaMode === 2 ? lyricsStage.clientHeight : 1;
+  const delta = event.deltaY * unit * .72;
   const liveOffset = freezeLyricFollow();
-  if (!lyricInspectionActive) {
+  // Reverse immediately instead of finishing the previous wheel movement first.
+  if (!lyricInspectionActive || Math.sign(lyricInspectionOffset - liveOffset) === Math.sign(delta)) {
     lyricInspectionOffset = liveOffset;
   }
   lyricInspectionActive = true;
   lyricsStage.classList.add("inspecting");
-  lyricInspectionOffset = clampLyricInspectionOffset(lyricInspectionOffset - event.deltaY * .72);
-  lyricsLines.style.transform = `translateY(${lyricInspectionOffset}px)`;
+  lyricInspectionOffset = clampLyricInspectionOffset(lyricInspectionOffset - delta);
+  const target = `translateY(${lyricInspectionOffset}px)`;
+  lyricsLines.style.transform = target;
+  if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    lyricFollowAnimation = lyricsLines.animate(
+      [{ transform: `translateY(${liveOffset}px)` }, { transform: target }],
+      { duration: 200, easing: "cubic-bezier(.16,1,.3,1)" }
+    );
+  }
   scheduleLyricFollowRestore();
 }, { passive: false });
 const searchInput = document.querySelector("#search-input");
@@ -4237,6 +4250,33 @@ if ("mediaSession" in navigator) {
   navigator.mediaSession.setActionHandler("nexttrack", () => nextTrack(1));
 }
 
+function persistNavigation() {
+  localStorage.setItem("medo.navigation", JSON.stringify({
+    view: currentView === "player" ? viewBeforePlayer : currentView,
+    playlist: currentPlaylist,
+    sort: currentSort,
+    collection: currentCollection
+  }));
+}
+
+function restoreNavigation() {
+  const saved = loadJson("medo.navigation", null);
+  if (!saved || !["library", "recent", "favorites", "playlists", "now", "settings"].includes(saved.view)) return;
+  currentView = saved.view;
+  currentSort = ["songs", "albums", "artists"].includes(saved.sort) ? saved.sort : "songs";
+  currentPlaylist = playlists.some(playlist => playlist.name === saved.playlist) ? saved.playlist : null;
+  currentCollection = saved.collection && ["albums", "artists"].includes(saved.collection.type) &&
+    typeof saved.collection.name === "string" ? saved.collection : null;
+  if (saved.playlist && !currentPlaylist) {
+    currentView = "library";
+    currentCollection = null;
+  }
+  viewBeforePlayer = currentView;
+  setActiveNav(currentPlaylist ? null : document.querySelector(`.nav-item[data-view="${currentView}"]`));
+  document.querySelectorAll(".pivot").forEach(button => button.classList.toggle("active", button.dataset.sort === currentSort));
+}
+
+restoreNavigation();
 desiredVolume = Math.min(1, Math.max(0, Number(restoredPlaybackState.volume ?? desiredVolume)));
 volume.value = desiredVolume;
 applyOutputVolume();

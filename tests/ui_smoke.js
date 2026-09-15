@@ -330,6 +330,7 @@ async function run() {
     ).join("");
   });
   await page.locator(".lyrics-stage").dispatchEvent("wheel", { deltaY: 100000 });
+  await page.evaluate(() => lyricFollowAnimation?.finished);
   const lastLyricCenterDelta = await page.locator(".lyrics-stage").evaluate((stage) => {
     const line = stage.querySelector(".lyric-line:last-child");
     const stageRect = stage.getBoundingClientRect();
@@ -338,6 +339,7 @@ async function run() {
   });
   if (lastLyricCenterDelta > 2) throw new Error(`Last lyric cannot be fully reached: ${lastLyricCenterDelta}`);
   await page.locator(".lyrics-stage").dispatchEvent("wheel", { deltaY: -100000 });
+  await page.evaluate(() => lyricFollowAnimation?.finished);
   const firstLyricCenterDelta = await page.locator(".lyrics-stage").evaluate((stage) => {
     const line = stage.querySelector(".lyric-line:first-child");
     const stageRect = stage.getBoundingClientRect();
@@ -633,6 +635,7 @@ async function run() {
 
   await require("./playback-experience")(page);
   await require("./long-list-scroll")(page);
+  await require("./navigation-restore")(page);
 
   console.log(
     `UI smoke passed; 1000-track library: ${timings.libraryMs.toFixed(1)}ms; ` +

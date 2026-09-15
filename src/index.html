@@ -267,7 +267,7 @@
             </div>
           </div>
           <div class="display-setting global-desktop-lyrics-shortcut-setting">
-            <div><h3>启用全局桌面歌词快捷键</h3><p>显示或隐藏桌面歌词：Alt+W</p></div>
+            <div><h3>启用全局桌面歌词快捷键</h3><p>启用显示或隐藏桌面歌词快捷键：Alt+W</p></div>
             <div class="segmented-control global-desktop-lyrics-shortcut-options" role="radiogroup" aria-label="启用全局桌面歌词快捷键">
               <button class="global-desktop-lyrics-shortcut-option active" data-enabled="true" role="radio" aria-checked="true">启用</button>
               <button class="global-desktop-lyrics-shortcut-option" data-enabled="false" role="radio" aria-checked="false">关闭</button>
@@ -343,8 +343,10 @@
           </article>
           <section class="lyrics-stage" aria-label="歌词">
             <button id="restore-lyric-follow" class="restore-lyric-follow" title="回到当前播放的歌词">回到当前句 <span aria-hidden="true">↩</span></button>
-            <div id="lyrics-lines" class="lyrics-lines">
-              <p class="lyrics-empty">正在查找歌词</p>
+            <div class="lyrics-viewport">
+              <div id="lyrics-lines" class="lyrics-lines">
+                <p class="lyrics-empty">正在查找歌词</p>
+              </div>
             </div>
           </section>
           <aside class="detail-queue">

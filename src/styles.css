@@ -889,7 +889,8 @@ h1 { margin: 0; font-size: 34px; line-height: 1.08; font-weight: 350; letter-spa
 .detail-track strong { font-size: 18px; }
 .detail-track span { color: rgba(255,255,255,.78); font-size: 16px; }
 .detail-track small { color: rgba(255,255,255,.62); font-size: 13px; }
-.lyrics-stage { position: relative; height: min(66vh, 620px); min-height: 420px; overflow: hidden; cursor: grab; touch-action: none; -webkit-mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent); mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent); }
+.lyrics-stage { position: relative; height: min(66vh, 620px); min-height: 420px; overflow: hidden; cursor: grab; touch-action: none; }
+.lyrics-viewport { position: absolute; inset: 0; overflow: hidden; -webkit-mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent); mask-image: linear-gradient(transparent, #000 18%, #000 82%, transparent); }
 .lyric-translation-toggle { display: none; }
 .playback-detail-active .player-right .lyric-translation-toggle:not([hidden]) {
   display: grid;
@@ -912,9 +913,9 @@ h1 { margin: 0; font-size: 34px; line-height: 1.08; font-weight: 350; letter-spa
   background-clip: text;
 }
 .lyrics-stage:active { cursor: grabbing; }
-.lyrics-stage.inspecting {
-  -webkit-mask-image: linear-gradient(transparent, #000 8%, #000 92%, transparent);
-  mask-image: linear-gradient(transparent, #000 8%, #000 92%, transparent);
+.lyrics-stage.inspecting .lyrics-viewport {
+  -webkit-mask-image: linear-gradient(transparent, #000 8%, #000 96%, transparent);
+  mask-image: linear-gradient(transparent, #000 8%, #000 96%, transparent);
 }
 .lyrics-stage.inspecting .lyrics-lines { transition-duration: 0ms; }
 .lyrics-stage.inspecting .lyric-line { color: rgba(255,255,255,.68); opacity: .82; transform: scale(.985); transition-duration: 150ms; }
@@ -923,39 +924,34 @@ h1 { margin: 0; font-size: 34px; line-height: 1.08; font-weight: 350; letter-spa
 .lyrics-stage.inspecting .lyric-line.past:not(.near) { color: rgba(255,255,255,.64); opacity: .76; }
 .lyrics-lines { position: absolute; top: 50%; width: 100%; will-change: transform; }
 .restore-lyric-follow {
-  position: absolute; z-index: 3; left: 50%; bottom: 9%;
+  position: absolute; z-index: 3; left: 50%; bottom: 4%;
   padding: 9px 16px; border-radius: 24px; color: white;
   background: var(--accent-gradient); box-shadow: 0 8px 28px rgba(80,65,210,.3);
   opacity: 0; visibility: hidden; pointer-events: none;
-  transform: translate(-50%, 10px) scale(.94);
-  transition: opacity 180ms ease, transform 280ms var(--ease-out), visibility 0s 280ms;
+  transform: translate(-50%, 8px);
+  transition: opacity 160ms ease, transform 220ms var(--ease-out), box-shadow 180ms ease, visibility 0s 220ms;
 }
 .lyrics-stage.inspecting .restore-lyric-follow {
   opacity: 1; visibility: visible; pointer-events: auto;
-  transform: translate(-50%, 0) scale(1); transition-delay: 0s;
+  transform: translate(-50%, 0); transition-delay: 0s;
 }
-.lyrics-stage.inspecting .restore-lyric-follow:hover { transform: translate(-50%, -2px) scale(1.03); }
-.lyrics-stage.inspecting .restore-lyric-follow:active { transform: translate(-50%, 0) scale(.96); }
+.lyrics-stage.inspecting .restore-lyric-follow:hover { transform: translate(-50%, -2px); box-shadow: 0 10px 30px rgba(80,65,210,.42); }
+.lyrics-stage.inspecting .restore-lyric-follow:active { transform: translate(-50%, 1px); box-shadow: 0 3px 12px rgba(80,65,210,.24); transition-duration: 80ms; }
 .lyrics-lines.unsynced { top: 12%; height: 76%; overflow-y: auto; padding: 24px 0; -webkit-mask-image: linear-gradient(transparent, #000 10%, #000 90%, transparent); mask-image: linear-gradient(transparent, #000 10%, #000 90%, transparent); }
 .lyric-line { display: block; width: 100%; margin: 0; padding: 11px 18px; border: 0; border-radius: 10px; color: rgba(255,255,255,.34); background: transparent; font-size: clamp(18px, var(--detail-lyric-size), 38px); font-weight: 540; line-height: 1.35; text-align: center; opacity: .55; transform: scale(.96); transition: color 300ms ease, background-color 150ms ease, box-shadow 150ms ease, text-shadow 150ms ease, opacity 340ms ease, transform 380ms cubic-bezier(.18,.82,.22,1); }
 button.lyric-line { cursor: pointer; }
 .lyric-line.active { color: #fff; opacity: 1; transform: scale(1); font-weight: 680; }
-.lyric-line.selected {
-  color: transparent;
+#lyrics-lines .lyric-line.selected {
+  color: var(--accent);
   opacity: 1;
   transform: scale(1);
-  background: var(--accent-gradient);
-  -webkit-background-clip: text;
-  background-clip: text;
-  box-shadow: inset 3px 0 0 var(--detail-theme, var(--accent));
-  animation: lyric-selected-in 360ms cubic-bezier(.18,.82,.22,1);
+  background: rgba(var(--detail-theme-rgb, 113,135,255), .12);
+  -webkit-background-clip: border-box;
+  background-clip: border-box;
+  box-shadow: inset 3px 0 0 var(--accent), inset 0 0 0 1px rgba(var(--detail-theme-rgb, 113,135,255), .2);
 }
-.lyric-line.selected .lyric-karaoke-base { color: color-mix(in srgb, var(--accent) 48%, white); }
-.lyric-line.selected .lyric-translation { color: transparent; background: var(--accent-gradient); -webkit-background-clip: text; background-clip: text; }
-@keyframes lyric-selected-in {
-  from { opacity: .58; transform: scale(.96); }
-  to { opacity: 1; transform: scale(1); }
-}
+#lyrics-lines .lyric-line.selected .lyric-karaoke-base,
+#lyrics-lines .lyric-line.selected .lyric-translation { color: inherit; background: none; }
 .lyric-line.active:not(:has(.lyric-karaoke)) {
   color: transparent;
   background: var(--accent-gradient);
@@ -989,9 +985,6 @@ button.lyric-line { cursor: pointer; }
     text-shadow: 0 2px 12px rgba(0,0,0,.24);
     opacity: 1;
     transform: scale(1);
-  }
-  .lyrics-stage.inspecting:has(.lyric-line:not(.active):not(.selected):hover) .lyric-line:not(:hover):not(.active):not(.selected) {
-    opacity: .62;
   }
   .lyrics-stage.inspecting .lyric-line:not(.active):not(.selected):active {
     background-color: rgba(var(--detail-theme-rgb, 113,135,255), .18);
@@ -1671,7 +1664,7 @@ body.playback-detail-active #lyric-translation-toggle:not([hidden]) {
 .mini-cover-button:focus-visible .mini-cover-overlay { opacity: 1; }
 .mini-cover-button:disabled { cursor: default; transform: none; }
 @media (hover: hover) and (pointer: fine) {
-  .mini-cover-button:not(:disabled):hover { transform: translateY(-3px) rotate(-2deg) scale(1.06); }
+  .mini-cover-button:not(:disabled):hover { transform: translateY(-3px) scale(1.06); }
   .mini-cover-button:not(:disabled):hover::before { opacity: .7; transform: scale(1.06); }
   .mini-cover-button:not(:disabled):hover .mini-cover-overlay { opacity: 1; }
   .mini-cover-button:not(:disabled):hover .mini-cover-overlay::before { transform: translateX(80%); }
