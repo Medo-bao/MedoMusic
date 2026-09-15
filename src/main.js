@@ -480,7 +480,9 @@ function setLyricsWindowLocked(locked) {
   const window = createLyricsWindow();
   if (lyricsWindowLocked && !window.isVisible()) showLyricsWindowWhenReady(window);
   keepLyricsWindowOnTop(window);
-  window.setIgnoreMouseEvents(lyricsWindowLocked, { forward: true });
+  // Locked hover detection uses screen coordinates below. Forwarding mouse moves
+  // through the overlay is unnecessary and can interfere with native window drags.
+  window.setIgnoreMouseEvents(lyricsWindowLocked);
   window.webContents.send("lyrics-window:lock-state", lyricsWindowLocked);
   updateLyricsWindowPointerTracking();
   mainWindow?.webContents.send("lyrics-window:lock-state", lyricsWindowLocked);
@@ -665,8 +667,8 @@ function createLyricsWindow() {
   });
   lyricsWindowReady = false;
   lyricsWindowShowWhenReady = false;
-  lyricsWindow.setIgnoreMouseEvents(lyricsWindowLocked, { forward: true });
-  keepLyricsWindowOnTop(lyricsWindow);
+  lyricsWindow.setIgnoreMouseEvents(lyricsWindowLocked);
+  lyricsWindow.setAlwaysOnTop(true, "screen-saver");
   lyricsWindow.loadFile(path.join(__dirname, "lyrics.html"));
   lyricsWindow.webContents.on("did-finish-load", () => {
     lyricsWindowReady = true;

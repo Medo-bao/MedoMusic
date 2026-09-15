@@ -7,7 +7,7 @@
   "scripts": {
     "start": "electron .",
     "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer.js && node --check src/lyrics-window.js && node --check src/lyrics-timing.js && node --check src/lyrics-source-priority.js && node --check src/netease-eapi.js && node --check src/qq-music.js && node --check src/zpl.js && node --check src/media-file-response.js",
-    "test": "npm run check && node tests/media-file-response.test.js && node tests/zpl.test.js && node tests/text-decoder.test.js && node tests/lyrics-timing.test.js && node tests/lyrics-source-priority.test.js && node tests/netease-eapi.test.js && node tests/qq-music.test.js && node tests/myfirefly-extension.test.js && node tests/tray-identity.test.js && node tests/removed-branding.test.js",
+    "test": "npm run check && node tests/media-file-response.test.js && node tests/zpl.test.js && node tests/text-decoder.test.js && node tests/lyrics-timing.test.js && node tests/lyrics-source-priority.test.js && node tests/netease-eapi.test.js && node tests/qq-music.test.js && node tests/myfirefly-extension.test.js && node tests/tray-identity.test.js && node tests/lyrics-window-top.test.js && node tests/removed-branding.test.js",
     "make-icon": "node scripts/make-icon.js",
     "dist": "node scripts/clean-release.js && npm run test && npm run make-icon && electron-builder --win nsis && npm run install-local",
     "install-local": "node scripts/install-local.js"
