@@ -118,26 +118,36 @@ async function fetchQqMusicLyricsOnce(options, fetchImplementation) {
     const durationScore = !expectedDuration ? .5 : Math.max(0, 1 - Math.abs(duration - expectedDuration) / 12);
     return { song, artist: songArtists, score: titleScore * .58 + artistScore * .27 + durationScore * .15 };
   }).sort((left, right) => right.score - left.score);
-  const best = ranked[0];
-  if (!best || best.score < .62) return null;
-  const qrcText = await fetchQrcBySongId(best.song.id || best.song.songid, fetchImplementation);
-  const text = qrcText || await fetchLineLyric(best.song.mid || best.song.songmid, fetchImplementation);
-  if (!text) return null;
-  const wordTimed = hasNativeWordTiming(text);
-  return {
-    text,
-    source: wordTimed ? "qq-word" : "qq-line",
-    confidence: Math.round(best.score * 100),
-    match: { title: best.song.name || best.song.title || best.song.songname, artist: best.artist }
-  };
+  const requireWords = options.requireWordTiming || options.mode === "network";
+  let fallback = null;
+  for (const best of ranked.filter(item => item.score >= .62)) {
+    let qrcText = null;
+    let text = null;
+    try { qrcText = await fetchQrcBySongId(best.song.id || best.song.songid, fetchImplementation); } catch {}
+    try { text = qrcText || await fetchLineLyric(best.song.mid || best.song.songmid, fetchImplementation); } catch {}
+    if (!text) continue;
+    const wordTimed = hasNativeWordTiming(text);
+    const result = {
+      text,
+      source: wordTimed ? "qq-word" : "qq-line",
+      confidence: Math.round(best.score * 100),
+      match: { title: best.song.name || best.song.title || best.song.songname, artist: best.artist }
+    };
+    if (!requireWords || wordTimed) return result;
+    fallback ||= result;
+  }
+  return fallback;
 }
 
 async function fetchQqMusicLyrics(options, fetchImplementation = fetch) {
-  const result = await fetchQqMusicLyricsOnce(options, fetchImplementation);
-  if (result) return result;
+  const result = await fetchQqMusicLyricsOnce(options, fetchImplementation).catch(() => null);
+  if (result && (!(options.requireWordTiming || options.mode === "network") || hasNativeWordTiming(result.text))) return result;
   const retryTitle = removeLiveQualifier(options?.title);
-  if (!retryTitle) return null;
-  return fetchQqMusicLyricsOnce({ ...options, title: retryTitle }, fetchImplementation);
+  if (!retryTitle) return result;
+  try {
+    const retry = await fetchQqMusicLyricsOnce({ ...options, title: retryTitle }, fetchImplementation);
+    return retry && hasNativeWordTiming(retry.text) ? retry : result || retry;
+  } catch { return result; }
 }
 
 module.exports = {

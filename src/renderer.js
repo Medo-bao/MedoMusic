@@ -42,7 +42,9 @@ let desktopLyricPrimaryColor = localStorage.getItem("medo.desktopLyricPrimaryCol
 let desktopLyricSecondaryColor = localStorage.getItem("medo.desktopLyricSecondaryColor") || "#d934ff";
 let displayMode = localStorage.getItem("medo.displayMode") || "thumbnail";
 let closeBehavior = localStorage.getItem("medo.closeBehavior") || "background";
+let trayEnabled = localStorage.getItem("medo.trayEnabled") === "true";
 let globalPlayPauseShortcutEnabled = localStorage.getItem("medo.globalPlayPauseShortcutEnabled") !== "false";
+let globalDesktopLyricsShortcutEnabled = localStorage.getItem("medo.globalDesktopLyricsShortcutEnabled") !== "false";
 let globalLyricsRefreshShortcutEnabled = localStorage.getItem("medo.globalLyricsRefreshShortcutEnabled") !== "false";
 let globalPreviousShortcutEnabled = localStorage.getItem("medo.globalPreviousShortcutEnabled") !== "false";
 let globalNextShortcutEnabled = localStorage.getItem("medo.globalNextShortcutEnabled") !== "false";
@@ -83,13 +85,13 @@ let lyricDragStartY = 0;
 let lyricDragStartOffset = 0;
 let lyricDraggedDistance = 0;
 let lyricFollowAnimation = null;
+let renderedLyricsState = null;
+let lyricPointerInside = false;
 let detailTrackVisible = true;
 let detailQueueVisible = true;
 let desktopLyricsLocked = false;
 const INITIAL_TRACK_RENDER_LIMIT = 48;
-const TRACK_RENDER_BATCH = 160;
-let renderedTrackLimit = INITIAL_TRACK_RENDER_LIMIT;
-let listLoadObserver = null;
+let disposeTrackWindow = () => {};
 let backgroundMode = document.hidden;
 let lastBackgroundUiUpdate = 0;
 let lastMediaSessionUpdate = 0;
@@ -169,6 +171,7 @@ function setBoundedCache(cache, key, value, limit = 160) {
 }
 
 function persist() {
+  persistNavigation();
   const storedTracks = tracks
     .filter((track) => !track.transient)
     .map(({ transient, ...track }) => track);
@@ -343,6 +346,9 @@ function applyCloseBehavior(value) {
     button.classList.toggle("active", active);
     button.setAttribute("aria-checked", String(active));
   });
+  const traySetting = document.querySelector("#tray-setting");
+  if (traySetting) traySetting.hidden = closeBehavior !== "quit";
+  if (closeBehavior !== "quit" && !trayEnabled) applyTrayEnabled(true);
 }
 
 function reloadCurrentLyrics({ networkProvider = null } = {}) {
@@ -359,6 +365,9 @@ function applyGlobalShortcutSettings(type, enabled) {
   if (type === "playPause") {
     globalPlayPauseShortcutEnabled = Boolean(enabled);
     localStorage.setItem("medo.globalPlayPauseShortcutEnabled", String(globalPlayPauseShortcutEnabled));
+  } else if (type === "desktopLyrics") {
+    globalDesktopLyricsShortcutEnabled = Boolean(enabled);
+    localStorage.setItem("medo.globalDesktopLyricsShortcutEnabled", String(globalDesktopLyricsShortcutEnabled));
   } else if (type === "lyricsRefresh") {
     globalLyricsRefreshShortcutEnabled = Boolean(enabled);
     localStorage.setItem("medo.globalLyricsRefreshShortcutEnabled", String(globalLyricsRefreshShortcutEnabled));
@@ -389,7 +398,13 @@ function applyGlobalShortcutSettings(type, enabled) {
     button.classList.toggle("active", active);
     button.setAttribute("aria-checked", String(active));
   });
+  document.querySelectorAll(".global-desktop-lyrics-shortcut-option").forEach((button) => {
+    const active = (button.dataset.enabled === "true") === globalDesktopLyricsShortcutEnabled;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
   window.medo.setGlobalShortcuts({
+    desktopLyrics: globalDesktopLyricsShortcutEnabled,
     playPause: globalPlayPauseShortcutEnabled,
     lyricsRefresh: globalLyricsRefreshShortcutEnabled,
     previous: globalPreviousShortcutEnabled,
@@ -588,7 +603,8 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
       duration: track.duration || audio.duration,
       mode: requestMode,
       force,
-      ignoreLocal: wordLyricsEnabled || Boolean(modeOverride)
+      ignoreLocal: wordLyricsEnabled || Boolean(modeOverride),
+      requireWordTiming: wordLyricsEnabled
     });
   })()
     .then((result) => {
@@ -668,9 +684,31 @@ async function ensureLyricTranslation(track) {
 
 function renderLyrics(track) {
   const container = document.querySelector("#lyrics-lines");
+  const lyrics = lyricsCache.get(track.id);
+  const state = [track.id, lyrics, lyricTranslations.get(track.id), lyricTranslationEnabled,
+    hiddenLyricTranslations.has(track.id), wordLyricsEnabled];
+  if (renderedLyricsState?.every((value, index) => value === state[index])) {
+    updateLyricsAtTime();
+    return;
+  }
+  const preserveInspection = renderedLyricsState?.[0] === track.id && lyricInspectionActive && lyrics?.synced;
+  const selectedStart = selectedLyricElement?.dataset.start;
+  const oldLines = [...container.querySelectorAll(".lyric-line[data-start]")];
+  const oldOffset = freezeLyricFollow();
+  const anchor = preserveInspection && oldLines.reduce((nearest, line) =>
+    !nearest || Math.abs(line.offsetTop + line.offsetHeight / 2 + oldOffset) <
+      Math.abs(nearest.offsetTop + nearest.offsetHeight / 2 + oldOffset) ? line : nearest, null);
+  const anchorPosition = anchor ? anchor.offsetTop + anchor.offsetHeight / 2 + oldOffset : 0;
+  renderedLyricsState = state;
+  if (!preserveInspection) {
+    clearTimeout(lyricInspectionRestoreTimer);
+    lyricInspectionActive = false;
+    lyricInspectionOffset = 0;
+    lyricDragPointerId = null;
+    lyricsStage.classList.remove("inspecting");
+  }
   selectedLyricElement?.classList.remove("selected");
   selectedLyricElement = null;
-  const lyrics = lyricsCache.get(track.id);
   const translationButton = document.querySelector("#lyric-translation-toggle");
   activeLyricIndex = -1;
   container.style.transform = "translateY(0)";
@@ -733,6 +771,15 @@ function renderLyrics(track) {
     }
     container.append(item);
   });
+  if (preserveInspection) {
+    const lines = [...container.querySelectorAll(".lyric-line[data-start]")];
+    const nextAnchor = lines.find((line) => line.dataset.start === anchor?.dataset.start);
+    lyricInspectionOffset = clampLyricInspectionOffset(nextAnchor
+      ? anchorPosition - nextAnchor.offsetTop - nextAnchor.offsetHeight / 2 : oldOffset);
+    container.style.transform = `translateY(${lyricInspectionOffset}px)`;
+    selectedLyricElement = lines.find((line) => line.dataset.start === selectedStart) || null;
+    selectedLyricElement?.classList.add("selected");
+  }
   updateLyricsAtTime();
 }
 
@@ -779,12 +826,12 @@ function updateDesktopLyrics(track, lyrics, index) {
 
 function animateLyricFollow(container, active) {
   const target = `translateY(${-active.offsetTop - active.offsetHeight / 2}px)`;
+  const liveTransform = getComputedStyle(container).transform;
+  lyricFollowAnimation?.cancel();
   if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
     container.style.transform = target;
     return;
   }
-  const liveTransform = getComputedStyle(container).transform;
-  lyricFollowAnimation?.cancel();
   container.style.transform = target;
   lyricFollowAnimation = container.animate(
     [
@@ -1185,7 +1232,8 @@ function renderFolders() {
 }
 
 function syncSelectionState() {
-  const visible = multiSelectionMode && selectedTrackIds.size > 0 && currentView !== "settings" && currentView !== "player";
+  if (!selectedTrackIds.size) multiSelectionMode = false;
+  const visible = multiSelectionMode && currentView !== "settings" && currentView !== "player";
   const main = document.querySelector("main");
   main.classList.toggle("selection-mode", visible);
   setSelectionActionsVisible(visible);
@@ -1212,6 +1260,10 @@ function syncSelectionState() {
 }
 
 function setSelectionActionsVisible(visible) {
+  for (const id of ["play-selected", "next-selected", "append-selected", "queue-selected", "remove-selected"]) {
+    document.getElementById(id).disabled = selectedTrackIds.size === 0;
+  }
+  document.querySelector("#remove-selected").hidden = !playlists.some(playlist => playlist.name === currentPlaylist);
   const actions = document.querySelector("#selection-actions");
   clearTimeout(selectionActionsHideTimer);
   if (visible) {
@@ -1430,6 +1482,7 @@ function showTrackPropertiesDialog(track, properties) {
 
 function reorderTrack(draggedId, targetId) {
   if (!draggedId || draggedId === targetId) return;
+  const currentId = tracks[currentIndex]?.id;
   const moveBefore = (ids) => {
     const next = ids.filter((id) => id !== draggedId);
     const targetIndex = next.indexOf(targetId);
@@ -1451,11 +1504,14 @@ function reorderTrack(draggedId, targetId) {
     tracks.forEach((track, index) => { track.addedAt = stamp - index; });
     librarySort = "added";
   }
+  reconcileCurrentTrack(currentId);
   persist();
   render();
 }
 
 function applyViewShellState({ preservePlaybackDetailActive = false } = {}) {
+  persistNavigation();
+  updateMiniCoverState();
   const settingsOpen = currentView === "settings";
   const playbackDetailOpen = currentView === "player";
   const main = document.querySelector("main");
@@ -1472,6 +1528,7 @@ function applyViewShellState({ preservePlaybackDetailActive = false } = {}) {
 }
 
 function render() {
+  const savedScrollTop = document.querySelector("main").scrollTop;
   const { main, settingsOpen, playbackDetailOpen } = applyViewShellState();
   if (playbackDetailOpen) {
     document.querySelector("#back-button").disabled = false;
@@ -1484,7 +1541,7 @@ function render() {
     currentView === "library" && !currentPlaylist && !currentCollection;
   const showLibraryTools = (currentView === "library" || currentView === "recent") && !currentPlaylist && !currentCollection;
   const hasSelection = selectedTrackIds.size > 0;
-  const selectionVisible = multiSelectionMode && hasSelection && !settingsOpen && !playbackDetailOpen;
+  const selectionVisible = multiSelectionMode && !settingsOpen && !playbackDetailOpen;
   main.classList.toggle("selection-mode", selectionVisible);
   setSelectionActionsVisible(selectionVisible);
   document.querySelector("#selection-count").textContent = `已选择 ${selectedTrackIds.size} 首`;
@@ -1506,6 +1563,8 @@ function render() {
     return;
   }
 
+  disposeTrackWindow();
+  disposeTrackWindow = () => {};
   const visible = visibleTracks();
   renderPlaylistHero(visible);
   metadataObserver?.disconnect();
@@ -1524,6 +1583,7 @@ function render() {
   emptyState.classList.toggle("hidden", visible.length > 0);
   trackList.innerHTML = "";
   trackList.className = "track-list";
+  trackList.style.removeProperty("height");
 
   if (currentView === "playlists") {
     trackList.className = "track-list playlist-overview-list";
@@ -1568,7 +1628,7 @@ function render() {
   }
 
   const trackIndexes = new Map(tracks.map((track, index) => [track.id, index]));
-  visible.slice(0, renderedTrackLimit).forEach((track) => {
+  const createTrackRow = (track) => {
     const actualIndex = trackIndexes.get(track.id) ?? -1;
     const row = document.createElement("div");
     row.className = `track-row${actualIndex === currentIndex ? " active" : ""}${selectedTrackIds.has(track.id) ? " selected" : ""}`;
@@ -1595,13 +1655,14 @@ function render() {
     row.querySelector(".row-album-name").textContent = track.album || "未知专辑";
     const playCount = row.querySelector(".play-count");
     playCount.hidden = currentView !== "recent";
-    playCount.textContent = `${mergedPlayCount(track)} 次播放`;
+    playCount.textContent = playCount.hidden ? "" : `${mergedPlayCount(track)} 次播放`;
     let longPressTimer = null;
     let pointerId = null;
     let dropTargetId = null;
     let dragPreview = null;
     let dragPointerX = 0;
     let dragPointerY = 0;
+    let suppressCheckboxPlaybackUntil = 0;
     row.addEventListener("click", () => {
       if (Date.now() < suppressRowClickUntil) return;
       if (multiSelectionMode) {
@@ -1614,7 +1675,7 @@ function render() {
       syncSelectionState();
     });
     row.addEventListener("dblclick", (event) => {
-      if (event.target.closest("button")) return;
+      if (multiSelectionMode || event.target.closest("button, .selection-check") || Date.now() < suppressCheckboxPlaybackUntil) return;
       selectedTrackIds.delete(track.id);
       multiSelectionMode = false;
       syncSelectionState();
@@ -1631,11 +1692,15 @@ function render() {
       playTrack(actualIndex);
     });
     row.querySelector(".row-leading").addEventListener("click", (event) => {
-      if (!selectedTrackIds.has(track.id) && !multiSelectionMode) return;
       event.stopPropagation();
-      multiSelectionMode = true;
+      suppressCheckboxPlaybackUntil = Date.now() + 500;
+
+      if (!multiSelectionMode) {
+        selectedTrackIds.clear();
+        multiSelectionMode = true;
+      }
       selectedTrackIds.has(track.id) ? selectedTrackIds.delete(track.id) : selectedTrackIds.add(track.id);
-      if (!selectedTrackIds.size) selectedTrackIds.add(track.id);
+      if (!selectedTrackIds.size) multiSelectionMode = false;
       syncSelectionState();
     });
     row.addEventListener("pointerdown", (event) => {
@@ -1784,6 +1849,7 @@ function render() {
         render();
       } else if (result.action === "remove-from-library") {
         if (!window.confirm(`从 MedoMusic 音乐库中删除“${track.title}”？\n不会删除本地音频文件。`)) return;
+        const currentId = tracks[currentIndex]?.id;
         tracks = tracks.filter((item) => item.id !== track.id);
         playbackQueueIds = playbackQueueIds.filter((id) => id !== track.id);
         recent = recent.filter((id) => id !== track.id);
@@ -1791,13 +1857,7 @@ function render() {
         playlists.forEach((playlist) => {
           playlist.trackIds = (playlist.trackIds || []).filter((id) => id !== track.id);
         });
-        if (currentIndex === actualIndex) {
-          audio.pause();
-          audio.removeAttribute("src");
-          currentIndex = -1;
-        } else if (currentIndex > actualIndex) {
-          currentIndex -= 1;
-        }
+        reconcileCurrentTrack(currentId);
         persist();
         render();
       } else if (result.action === "show-album") {
@@ -1836,23 +1896,56 @@ function render() {
         syncSelectionState();
       }
     });
-    trackList.append(row);
-    observeMetadataRow(row, track);
-  });
-  listLoadObserver?.disconnect();
-  if (visible.length > renderedTrackLimit) {
-    const sentinel = document.createElement("div");
-    sentinel.className = "list-load-sentinel";
-    sentinel.textContent = `继续加载 ${Math.min(TRACK_RENDER_BATCH, visible.length - renderedTrackLimit)} 首歌曲`;
-    trackList.append(sentinel);
-    listLoadObserver = new IntersectionObserver((entries) => {
-      if (!entries[0]?.isIntersecting) return;
-      listLoadObserver.disconnect();
-      renderedTrackLimit += TRACK_RENDER_BATCH;
-      render();
-    }, { root: document.querySelector("main"), rootMargin: "320px" });
-    listLoadObserver.observe(sentinel);
-  }
+    return row;
+  };
+  const rowHeight = displayMode === "compact" ? 48 : 66;
+  const stride = rowHeight + 2;
+  const rows = new Map();
+  let frame = null;
+  trackList.classList.add("virtual-track-list");
+  trackList.style.height = `${14 + Math.max(0, visible.length * stride - 2)}px`;
+  main.scrollTop = savedScrollTop;
+  const renderWindow = () => {
+    frame = null;
+    if (!trackList.getClientRects().length) return;
+    const listTop = trackList.getBoundingClientRect().top - main.getBoundingClientRect().top - main.clientTop + main.scrollTop;
+    const windowSize = Math.max(INITIAL_TRACK_RENDER_LIMIT, Math.ceil(main.clientHeight / stride) + 16);
+    const start = Math.max(0, Math.min(
+      Math.floor((Math.floor((main.scrollTop - listTop) / stride) - 8) / 8) * 8,
+      Math.max(0, visible.length - windowSize)
+    ));
+    const end = Math.min(visible.length, start + windowSize);
+    for (const [index, row] of rows) {
+      if (index >= start && index < end) continue;
+      // Keep pointer capture and keyboard focus when their row leaves the viewport.
+      if (row.dataset.trackId === draggedTrackId || row.contains(document.activeElement) || row.matches(":active")) continue;
+      metadataObserver.unobserve(row);
+      row.remove();
+      rows.delete(index);
+    }
+    for (let index = start; index < end; index += 1) {
+      if (rows.has(index)) continue;
+      const track = visible[index];
+      const row = createTrackRow(track);
+      row.style.top = `${14 + index * stride}px`;
+      row.style.height = `${rowHeight}px`;
+      const next = [...rows.keys()].filter((key) => key > index).sort((a, b) => a - b)[0];
+      trackList.insertBefore(row, rows.get(next) || null);
+      rows.set(index, row);
+      observeMetadataRow(row, track);
+    }
+  };
+  const scheduleWindow = () => { if (frame === null) frame = requestAnimationFrame(renderWindow); };
+  main.addEventListener("scroll", scheduleWindow, { passive: true });
+  const resizeObserver = new ResizeObserver(scheduleWindow);
+  resizeObserver.observe(main);
+  resizeObserver.observe(trackList);
+  renderWindow();
+  disposeTrackWindow = () => {
+    main.removeEventListener("scroll", scheduleWindow);
+    resizeObserver.disconnect();
+    if (frame !== null) cancelAnimationFrame(frame);
+  };
 }
 
 function trackFileKey(track) {
@@ -1926,7 +2019,9 @@ async function openExternalAudioFiles(filePaths) {
   // Temporary files from an earlier shell-open session never leak into the
   // next queue. Files under a managed folder are promoted into the library
   // immediately, even when that folder has not indexed them yet.
+  const currentId = tracks[currentIndex]?.id;
   tracks = tracks.filter((track) => !track.transient);
+  reconcileCurrentTrack(currentId);
   const queueIds = [];
   for (const incoming of incomingTracks) {
     let existing = tracks.find((track) => tracksReferToSameFile(track, incoming));
@@ -2002,8 +2097,19 @@ async function chooseFiles() {
   mergeTracks(await window.medo.chooseFiles());
 }
 
+function reconcileCurrentTrack(currentId) {
+  const validIds = new Set(tracks.map((track) => track.id));
+  playbackQueueIds = playbackQueueIds.filter((id) => validIds.has(id));
+  currentIndex = tracks.findIndex((track) => track.id === currentId);
+  if (currentId && currentIndex < 0) {
+    clearCurrentPlayback();
+    if (currentView === "player") closePlaybackDetail();
+  }
+}
+
 function applyFolderScan(result, commit = true) {
   if (!result?.folder || !Array.isArray(result.tracks)) return;
+  const currentId = tracks[currentIndex]?.id;
   const folderKey = result.folder.toLowerCase();
   tracks = tracks.filter((track) => {
     const fromFolder = track.sourceDirectory?.toLowerCase() === folderKey;
@@ -2015,6 +2121,7 @@ function applyFolderScan(result, commit = true) {
     syncMusicFolderWatchers();
   }
   mergeTracks(result.tracks, false);
+  reconcileCurrentTrack(currentId);
   if (commit) {
     persist();
     render();
@@ -2076,7 +2183,9 @@ async function rebuildMusicLibraryIndex() {
     const manualTracks = tracks.filter((track) =>
       !track.sourceDirectory || !managedFolders.includes(track.sourceDirectory.toLowerCase())
     ).map((track) => ({ ...track, metadataLoaded: false, cover: null }));
+    const currentId = tracks[currentIndex]?.id;
     tracks = [...new Map([...rebuilt, ...manualTracks].map((track) => [track.id, track])).values()];
+    reconcileCurrentTrack(currentId);
     metadataRequests.clear();
     lyricsCache.clear();
     lyricsRequests.clear();
@@ -2089,6 +2198,7 @@ async function rebuildMusicLibraryIndex() {
 }
 
 function removeFolder(folder) {
+  const currentId = tracks[currentIndex]?.id;
   const folderKey = folder.toLowerCase();
   musicFolders = musicFolders.filter((item) => item.toLowerCase() !== folderKey);
   syncMusicFolderWatchers();
@@ -2099,7 +2209,7 @@ function removeFolder(folder) {
   const validIds = new Set(tracks.map((track) => track.id));
   favorites = new Set([...favorites].filter((id) => validIds.has(id)));
   recent = recent.filter((id) => validIds.has(id));
-  if (!tracks[currentIndex]) currentIndex = -1;
+  reconcileCurrentTrack(currentId);
   persist();
   render();
 }
@@ -2309,8 +2419,10 @@ async function playTrack(index, preserveQueue = false, preservePreviousNavigatio
   if (!playbackQueueIds.length) playbackQueueIds = [tracks[index].id];
   const track = tracks[index];
   window.medo.updateLyricsWindow({ noLyrics: false, playing: true });
-  const resolvedSource = await window.medo.resolveMediaSource(track.path);
+  const resolvedSource = await window.medo.resolveMediaSource(track.path).catch(() => null);
   if (generation !== playbackGeneration) return;
+  index = tracks.findIndex((candidate) => candidate.id === track.id);
+  if (index < 0) return;
   if (!resolvedSource) {
     recoverPlaybackFailure(track);
     return;
@@ -2373,8 +2485,10 @@ async function playTrack(index, preserveQueue = false, preservePreviousNavigatio
     return;
   }
   audio.play().then(() => {
+    if (generation !== playbackGeneration) return;
     playbackFailedIds.delete(track.id);
-  }).catch(() => {
+  }).catch((error) => {
+    if (generation !== playbackGeneration || error?.name === "AbortError") return;
     switchingPlaybackGeneration = 0;
     recoverPlaybackFailure(track);
   });
@@ -2411,7 +2525,17 @@ async function playTrack(index, preserveQueue = false, preservePreviousNavigatio
   }
 }
 
+function updateMiniCoverState() {
+  const button = document.querySelector("#open-playback-detail");
+  const available = Boolean(tracks[currentIndex]);
+  const expanded = currentView === "player";
+  button.disabled = !available;
+  button.setAttribute("aria-label", available ? (expanded ? "返回上一页" : "打开歌词页") : "请先选择歌曲");
+  button.setAttribute("aria-expanded", String(expanded));
+}
+
 function updateNowPlaying(track) {
+  updateMiniCoverState();
   document.querySelector("#now-title").textContent = track.title;
   document.querySelector("#now-album").textContent = track.artist || "未知艺术家";
   const cover = document.querySelector("#mini-cover");
@@ -2563,6 +2687,9 @@ function attachQueueDrag(button, trackId) {
       queueDragFrame = requestAnimationFrame(autoScroll);
     }
   });
+  button.addEventListener("pointerleave", () => {
+    if (draggedQueueTrackId !== trackId) clearTimeout(longPressTimer);
+  });
   ["pointerup", "pointercancel"].forEach((eventName) => {
     button.addEventListener(eventName, (event) => {
       clearTimeout(longPressTimer);
@@ -2594,7 +2721,6 @@ function renderPlaybackDetail() {
     document.querySelector("#toggle-detail-track"),
     document.querySelector("#toggle-detail-queue")
   ].forEach((button) => {
-    button.getAnimations().forEach((animation) => animation.cancel());
     button.style.removeProperty("opacity");
     button.style.removeProperty("transform");
     button.style.removeProperty("visibility");
@@ -2616,6 +2742,7 @@ function renderPlaybackDetail() {
   const queue = playbackQueueIds.map((id) => tracksById.get(id)).filter(Boolean);
   document.querySelector("#detail-queue-count").textContent = `${queue.length} 首歌曲`;
   const container = document.querySelector("#detail-queue-list");
+  const savedQueueScrollTop = container.scrollTop;
   cancelAnimationFrame(detailQueueRenderFrame);
   detailQueueRenderFrame = null;
   delete container.dataset.windowStart;
@@ -2626,13 +2753,21 @@ function renderPlaybackDetail() {
   queueCanvas.className = "queue-virtual-content";
   queueCanvas.style.height = `${queue.length * queueRowHeight}px`;
   container.replaceChildren(queueCanvas);
+  container.scrollTop = savedQueueScrollTop;
+  const queueRows = new Map();
   const renderQueueWindow = (requestedStart) => {
     const start = Math.max(0, Math.min(requestedStart, Math.max(0, queue.length - queueWindowSize)));
     if (Number(container.dataset.windowStart) === start && queueCanvas.children.length) return;
     container.dataset.windowStart = String(start);
-    queueCanvas.replaceChildren();
+    for (const [index, button] of queueRows) {
+      if (index >= start && index < start + queueWindowSize) continue;
+      if (button.dataset.trackId === draggedQueueTrackId || button.contains(document.activeElement) || button.matches(":active")) continue;
+      button.remove();
+      queueRows.delete(index);
+    }
     queue.slice(start, start + queueWindowSize).forEach((item, offset) => {
       const index = start + offset;
+      if (queueRows.has(index)) return;
       const button = document.createElement("button");
       button.className = `queue-item${item.id === track.id ? " active" : ""}`;
       button.dataset.trackId = item.id;
@@ -2646,7 +2781,9 @@ function renderPlaybackDetail() {
         playTrack(tracks.findIndex((candidate) => candidate.id === item.id), true);
       });
       attachQueueDrag(button, item.id);
-      queueCanvas.append(button);
+      const next = [...queueRows.keys()].filter((key) => key > index).sort((a, b) => a - b)[0];
+      queueCanvas.insertBefore(button, queueRows.get(next) || null);
+      queueRows.set(index, button);
     });
   };
   const activeQueueIndex = Math.max(0, queue.findIndex((item) => item.id === track.id));
@@ -2681,7 +2818,11 @@ function togglePlayback() {
   } else if (audio.paused) {
     ensureOutputGain();
     applyOutputVolume();
-    audio.play().catch(() => recoverPlaybackFailure(tracks[currentIndex]));
+    const generation = playbackGeneration;
+    const track = tracks[currentIndex];
+    audio.play().catch((error) => {
+      if (generation === playbackGeneration && error?.name !== "AbortError") recoverPlaybackFailure(track);
+    });
   } else {
     audio.pause();
   }
@@ -2694,7 +2835,13 @@ function clearCurrentPlayback() {
   audio.removeAttribute("src");
   audio.load();
   currentIndex = -1;
+  updateMiniCoverState();
   activeLyricIndex = -1;
+  renderedLyricsState = null;
+  clearTimeout(lyricInspectionRestoreTimer);
+  lyricInspectionActive = false;
+  lyricFollowAnimation?.cancel();
+  lyricsStage.classList.remove("inspecting");
   document.querySelectorAll(".track-row.active").forEach((row) => row.classList.remove("active"));
   updatePlayButtonState(false);
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
@@ -2756,6 +2903,9 @@ function nextTrack(direction = 1) {
     lastPreviousRestartTrackId = null;
   }
   if (playMode === "shuffle") {
+    if (queue.length === 1) {
+      return playTrack(tracks.findIndex((track) => track.id === queue[0].id), true, continuingPreviousNavigation);
+    }
     const queueIds = queue.map((track) => track.id);
     const signature = [...queueIds].sort().join("\u001f");
     if (shuffleQueueSignature !== signature) {
@@ -2832,6 +2982,17 @@ function updateFavoriteButton() {
   const active = favorites.has(tracks[currentIndex]?.id);
   favoriteButton.classList.toggle("active", active);
   favoriteButton.textContent = active ? "♥" : "♡";
+}
+
+function applyTrayEnabled(enabled) {
+  trayEnabled = Boolean(enabled);
+  localStorage.setItem("medo.trayEnabled", String(trayEnabled));
+  document.querySelectorAll(".tray-option").forEach((button) => {
+    const active = (button.dataset.trayValue === "true") === trayEnabled;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+  window.medo.setTrayEnabled(trayEnabled);
 }
 
 function scheduleStartupMaintenance() {
@@ -3155,16 +3316,24 @@ function animatePlaybackDetail(entering) {
   const backdrop = surface?.querySelector(".detail-backdrop");
   if (!surface || !layout || !backdrop) return Promise.resolve();
   const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const surfaceStyle = getComputedStyle(surface);
-  const layoutStyle = getComputedStyle(layout);
+  const snapshot = (element) => {
+    const style = getComputedStyle(element);
+    return { opacity: style.opacity, transform: style.transform };
+  };
+  const surfaceStyle = snapshot(surface);
+  const layoutStyle = snapshot(layout);
+  const backdropStyle = snapshot(backdrop);
+  const interrupted = surface.getAnimations().some((animation) => animation.playState === "running");
   [surface, layout, backdrop].forEach((element) => element.getAnimations().forEach((animation) => animation.cancel()));
   const duration = reduced ? 80 : entering ? 220 : 210;
   const easing = "cubic-bezier(0.23, 1, 0.32, 1)";
   const animations = [
     surface.animate(
-      entering
-        ? [{ opacity: 0.35, transform: "scale(1.006)" }, { opacity: 1, transform: "scale(1)" }]
-        : [{ opacity: surfaceStyle.opacity, transform: "scale(1)" }, { opacity: 0, transform: "translateY(7px) scale(.996)" }],
+      reduced
+        ? [{ opacity: entering && !interrupted ? .35 : surfaceStyle.opacity }, { opacity: entering ? 1 : 0 }]
+        : entering
+          ? [interrupted ? surfaceStyle : { opacity: .35, transform: "translateY(12px) scale(1.012)" }, { opacity: 1, transform: "translateY(0) scale(1)" }]
+          : [surfaceStyle, { opacity: 0, transform: "translateY(7px) scale(.996)" }],
       { duration, easing, fill: "forwards" }
     )
   ];
@@ -3172,13 +3341,13 @@ function animatePlaybackDetail(entering) {
     animations.push(
       layout.animate(
         entering
-          ? [{ opacity: 0.58, transform: "scale(0.985)" }, { opacity: 1, transform: "scale(1)" }]
+          ? [interrupted ? layoutStyle : { opacity: 0.58, transform: "translateY(9px) scale(0.975)" }, { opacity: 1, transform: "translateY(0) scale(1)" }]
           : [{ opacity: layoutStyle.opacity, transform: layoutStyle.transform }, { opacity: 0.45, transform: "scale(0.992)" }],
-        { duration: entering ? 250 : 150, easing, fill: "forwards" }
+        { duration: entering ? 340 : 180, easing, fill: "forwards" }
       ),
       ...(entering ? [backdrop.animate(
-        [{ opacity: 0 }, { opacity: 0.52 }],
-        { duration: 240, easing, fill: "forwards" }
+        [{ opacity: interrupted ? backdropStyle.opacity : 0 }, { opacity: 0.52 }],
+        { duration: 380, easing, fill: "forwards" }
       )] : [])
     );
   }
@@ -3187,9 +3356,13 @@ function animatePlaybackDetail(entering) {
 
 function openPlaybackDetail() {
   if (!tracks[currentIndex]) return;
+  if (currentView === "player") return;
   const transitionId = ++playbackTransitionId;
   viewBeforePlayer = currentView;
   currentView = "player";
+  if (!lyricInspectionActive) activeLyricIndex = -1;
+  document.querySelector("main").classList.remove("playback-detail-closing");
+  document.body.classList.remove("playback-detail-exiting");
   render();
   requestAnimationFrame(() => {
     if (currentView === "player" && transitionId === playbackTransitionId) animatePlaybackDetail(true);
@@ -3214,6 +3387,7 @@ async function closePlaybackDetail() {
   void main.offsetWidth;
   document.body.classList.add("playback-detail-exiting");
   await new Promise((resolve) => requestAnimationFrame(resolve));
+  if (transitionId !== playbackTransitionId) return;
   await animatePlaybackDetail(false);
   if (transitionId !== playbackTransitionId) return;
   const persistentTools = [
@@ -3227,6 +3401,7 @@ async function closePlaybackDetail() {
   document.body.classList.remove("playback-detail-active");
   document.body.classList.remove("playback-detail-exiting");
   persistentTools.forEach((element) => {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     const before = previousRects.get(element);
     const after = element.getBoundingClientRect();
     const deltaX = before.left - after.left;
@@ -3365,22 +3540,60 @@ document.querySelector("#play-selected").addEventListener("click", () => {
   playTrack(tracks.findIndex((track) => track.id === playbackQueueIds[0]), true);
   render();
 });
-document.querySelector("#next-selected").addEventListener("click", () => {
-  const selected = visibleTracks().filter((track) => selectedTrackIds.has(track.id)).map((track) => track.id);
+function queueSelectedTracks(playNext) {
   const currentId = tracks[currentIndex]?.id;
+  const selected = visibleTracks().filter((track) => selectedTrackIds.has(track.id) && track.id !== currentId).map((track) => track.id);
   const remaining = playbackQueueIds.filter((id) => !selected.includes(id));
-  const insertAt = Math.max(0, remaining.indexOf(currentId) + 1);
+  if (currentId && !remaining.includes(currentId)) remaining.unshift(currentId);
+  const insertAt = playNext ? Math.max(0, remaining.indexOf(currentId) + 1) : remaining.length;
   remaining.splice(insertAt, 0, ...selected);
   playbackQueueIds = remaining;
   selectedTrackIds.clear();
+  multiSelectionMode = false;
   persist();
   render();
-});
+}
+document.querySelector("#next-selected").addEventListener("click", () => queueSelectedTracks(true));
+document.querySelector("#append-selected").addEventListener("click", () => queueSelectedTracks(false));
 document.querySelector("#queue-selected").addEventListener("click", () => {
-  visibleTracks().forEach((track) => {
-    if (selectedTrackIds.has(track.id) && !playbackQueueIds.includes(track.id)) playbackQueueIds.push(track.id);
+  const selected = visibleTracks().filter(track => selectedTrackIds.has(track.id));
+  if (!selected.length || document.querySelector(".playlist-picker-dialog")) return;
+  const dialog = document.createElement("dialog");
+  dialog.className = "track-info-dialog playlist-picker-dialog";
+  dialog.setAttribute("aria-labelledby", "playlist-picker-title");
+  dialog.innerHTML = '<form method="dialog"><header><h2 id="playlist-picker-title">添加到歌单</h2><p></p></header><div class="playlist-picker-options"></div><footer><button value="cancel">取消</button></footer></form>';
+  dialog.querySelector("header p").textContent = playlists.length ? `将 ${selected.length} 首歌曲添加到：` : "还没有歌单，请先创建歌单。";
+  const list = dialog.querySelector(".playlist-picker-options");
+  playlists.forEach(playlist => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = playlist.name;
+    button.addEventListener("click", () => {
+      if (!playlists.includes(playlist)) return;
+      playlist.trackIds = [...new Set([...(playlist.trackIds || []), ...selected.map(track => track.id)])];
+      selected.forEach(track => { track.playlists = [...new Set([...(track.playlists || []), playlist.name])]; });
+      selectedTrackIds.clear();
+      multiSelectionMode = false;
+      persist();
+      dialog.close();
+      render();
+    });
+    list.append(button);
+  });
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  document.body.append(dialog);
+  dialog.showModal();
+});
+document.querySelector("#remove-selected").addEventListener("click", () => {
+  const playlist = playlists.find(item => item.name === currentPlaylist);
+  if (!playlist) return;
+  const ids = new Set(visibleTracks().filter(track => selectedTrackIds.has(track.id)).map(track => track.id));
+  playlist.trackIds = (playlist.trackIds || []).filter(id => !ids.has(id));
+  tracks.forEach(track => {
+    if (ids.has(track.id)) track.playlists = (track.playlists || []).filter(name => name !== playlist.name);
   });
   selectedTrackIds.clear();
+  multiSelectionMode = false;
   persist();
   render();
 });
@@ -3394,6 +3607,15 @@ document.querySelector("#playlist-delete").addEventListener("click", deleteCurre
 document.querySelector("#detail-save-queue").addEventListener("click", savePlaybackQueueAsPlaylist);
 document.querySelector("#playlist-art").addEventListener("click", choosePlaylistCover);
 document.querySelector("#open-playback-detail").addEventListener("click", () => {
+  const button = document.querySelector("#open-playback-detail");
+  if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    const flash = button.querySelector(".mini-cover-flash");
+    const pose = getComputedStyle(flash);
+    const start = { opacity: pose.opacity, transform: pose.transform };
+    flash.getAnimations().forEach((animation) => animation.cancel());
+    flash.animate([start, { opacity: .85, transform: "scale(1.02)", offset: .15 },
+      { opacity: 0, transform: "scale(1.45)" }], { duration: 420, easing: "cubic-bezier(.22,1,.36,1)" });
+  }
   if (currentView === "player") {
     closePlaybackDetail();
     return;
@@ -3428,6 +3650,12 @@ sidebarResizer.addEventListener("pointerdown", (event) => {
 });
 document.querySelector("#window-minimize").addEventListener("click", window.medo.minimizeWindow);
 document.querySelector("#window-maximize").addEventListener("click", window.medo.toggleMaximizeWindow);
+window.medo.onWindowMaximized((maximized) => {
+  const button = document.querySelector("#window-maximize");
+  button.classList.toggle("is-maximized", maximized);
+  button.title = maximized ? "还原" : "最大化";
+  button.setAttribute("aria-label", button.title);
+});
 document.querySelector("#window-close").addEventListener("click", window.medo.closeWindow);
 document.querySelector("#collection-back").addEventListener("click", () => {
   currentCollection = null;
@@ -3464,42 +3692,78 @@ document.querySelector("#playlists-overview").addEventListener("click", () => {
 });
 function animatePlayerToolButton(button) {
   if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const liveTransform = getComputedStyle(button).transform;
   button.getAnimations().forEach((animation) => animation.cancel());
   button.animate(
     [
-      { transform: "scale(.82) rotate(-7deg)" },
-      { transform: "scale(1.08) rotate(2deg)", offset: .58 },
+      { transform: liveTransform },
+      { transform: "scale(.88) rotate(-5deg)", offset: .16 },
+      { transform: "scale(1.09) rotate(2deg)", offset: .54 },
       { transform: "scale(1) rotate(0)" }
     ],
     { duration: 320, easing: "cubic-bezier(.22,1,.36,1)" }
   );
+  let ring = button.querySelector(".tool-feedback-ring");
+  if (!ring) {
+    ring = document.createElement("span");
+    ring.className = "tool-feedback-ring";
+    ring.setAttribute("aria-hidden", "true");
+    button.append(ring);
+  }
+  const running = ring.getAnimations().length > 0;
+  const ringStyle = getComputedStyle(ring);
+  const start = { opacity: running ? ringStyle.opacity : .8, transform: running ? ringStyle.transform : "scale(.65)" };
+  ring.getAnimations().forEach((animation) => animation.cancel());
+  ring.animate([start, { opacity: 0, transform: "scale(1.65)" }],
+    { duration: 480, easing: "cubic-bezier(.22,1,.36,1)" });
 }
 
-function animateDetailPanelToggle(button, panel, visible) {
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+function animateDetailPanelToggle(button, panel, visible, hiddenClass) {
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const surfaces = [...document.querySelector(".detail-layout").children];
+  const before = new Map(surfaces.map((element) => [element, {
+    rect: element.getBoundingClientRect(), opacity: getComputedStyle(element).opacity
+  }]));
+  surfaces.forEach((element) => {
+    element.getAnimations().forEach((animation) => animation.cancel());
+    element.style.removeProperty("width");
+  });
+  document.body.classList.toggle(hiddenClass, !visible);
+  button.classList.toggle("active", visible);
+  button.setAttribute("aria-pressed", String(visible));
+  if (reduced) return;
   animatePlayerToolButton(button);
-  panel.getAnimations().forEach((animation) => animation.cancel());
-  panel.animate(
-    visible
-      ? [{ opacity: 0, transform: "translateX(24px) scale(.97)" }, { opacity: 1, transform: "translateX(0) scale(1)" }]
-      : [{ filter: "brightness(1.08)" }, { filter: "brightness(1)" }],
-    { duration: visible ? 360 : 220, easing: "cubic-bezier(.22,1,.36,1)" }
-  );
+  if (!visible) panel.style.width = `${before.get(panel).rect.width}px`;
+  surfaces.forEach((element) => {
+    const previous = before.get(element);
+    const after = element.getBoundingClientRect();
+    const isPanel = element === panel;
+    if (!isPanel && getComputedStyle(element).visibility === "hidden") return;
+    const deltaX = previous.rect.left - after.left +
+      (element.classList.contains("lyrics-stage") ? (previous.rect.width - after.width) / 2 : 0);
+    const deltaY = previous.rect.top - after.top;
+    const direction = element.classList.contains("detail-track") ? -1 : 1;
+    const animation = element.animate([
+      { transform: `translate(${deltaX}px, ${deltaY}px) scale(${isPanel && visible && Number(previous.opacity) === 0 ? .94 : 1})`,
+        opacity: previous.opacity, visibility: "visible" },
+      { transform: isPanel && !visible ? `translateX(${direction * 28}px) scale(.95)` : "translate(0, 0) scale(1)",
+        opacity: isPanel && !visible ? 0 : 1, visibility: "visible" }
+    ], { duration: isPanel && !visible ? 240 : 380, easing: "cubic-bezier(.22,1,.36,1)" });
+    animation.finished.then(() => {
+      if (isPanel && !visible) panel.style.removeProperty("width");
+    }).catch(() => {});
+  });
 }
 
 document.querySelector("#toggle-detail-track").addEventListener("click", () => {
   detailTrackVisible = !detailTrackVisible;
   const button = document.querySelector("#toggle-detail-track");
-  document.body.classList.toggle("detail-track-hidden", !detailTrackVisible);
-  button.classList.toggle("active", detailTrackVisible);
-  animateDetailPanelToggle(button, document.querySelector(".detail-track"), detailTrackVisible);
+  animateDetailPanelToggle(button, document.querySelector(".detail-track"), detailTrackVisible, "detail-track-hidden");
 });
 document.querySelector("#toggle-detail-queue").addEventListener("click", () => {
   detailQueueVisible = !detailQueueVisible;
   const button = document.querySelector("#toggle-detail-queue");
-  document.body.classList.toggle("detail-queue-hidden", !detailQueueVisible);
-  button.classList.toggle("active", detailQueueVisible);
-  animateDetailPanelToggle(button, document.querySelector(".detail-queue"), detailQueueVisible);
+  animateDetailPanelToggle(button, document.querySelector(".detail-queue"), detailQueueVisible, "detail-queue-hidden");
 });
 document.querySelector("#desktop-lyrics-button").addEventListener("click", () => {
   animatePlayerToolButton(document.querySelector("#desktop-lyrics-button"));
@@ -3524,25 +3788,57 @@ window.medo.onLyricsWindowLockState((locked) => {
 
 const lyricsStage = document.querySelector(".lyrics-stage");
 const lyricsLines = document.querySelector("#lyrics-lines");
+function freezeLyricFollow() {
+  const transform = getComputedStyle(lyricsLines).transform;
+  const offset = transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m42;
+  lyricFollowAnimation?.cancel();
+  lyricFollowAnimation = null;
+  lyricsLines.style.transform = `translateY(${offset}px)`;
+  return offset;
+}
+
+function restoreLyricFollow() {
+  clearTimeout(lyricInspectionRestoreTimer);
+  selectedLyricElement?.classList.remove("selected");
+  selectedLyricElement = null;
+  lyricInspectionActive = false;
+  lyricInspectionOffset = 0;
+  activeLyricIndex = -1;
+  lyricsStage.classList.remove("inspecting");
+  updateLyricsAtTime();
+}
+
 function scheduleLyricFollowRestore() {
   clearTimeout(lyricInspectionRestoreTimer);
-  lyricInspectionRestoreTimer = setTimeout(() => {
-    selectedLyricElement?.classList.remove("selected");
-    selectedLyricElement = null;
-    lyricInspectionActive = false;
-    lyricInspectionOffset = 0;
-    activeLyricIndex = -1;
-    lyricsStage.classList.remove("inspecting");
-    updateLyricsAtTime();
-  }, 5000);
+  if (lyricPointerInside || lyricDragPointerId !== null) return;
+  lyricInspectionRestoreTimer = setTimeout(restoreLyricFollow, 5000);
+}
+lyricsStage.addEventListener("pointerenter", (event) => {
+  if (event.pointerType === "touch") return;
+  lyricPointerInside = true;
+  clearTimeout(lyricInspectionRestoreTimer);
+});
+lyricsStage.addEventListener("pointerleave", () => {
+  lyricPointerInside = false;
+  if (lyricInspectionActive) scheduleLyricFollowRestore();
+});
+document.querySelector("#restore-lyric-follow").addEventListener("click", restoreLyricFollow);
+function clampLyricInspectionOffset(offset) {
+  const lines = [...lyricsLines.querySelectorAll(".lyric-line[data-start]")];
+  if (!lines.length) return offset;
+  const firstLine = lines[0];
+  const lastLine = lines.at(-1);
+  const maximum = -(firstLine.offsetTop + firstLine.offsetHeight / 2);
+  const minimum = -(lastLine.offsetTop + lastLine.offsetHeight / 2);
+  return Math.max(minimum, Math.min(maximum, offset));
 }
 lyricsStage.addEventListener("pointerdown", (event) => {
-  if (event.button !== 0 || !lyricsCache.get(tracks[currentIndex]?.id)?.synced) return;
+  if (event.target.closest("#restore-lyric-follow") || lyricDragPointerId !== null ||
+      event.button !== 0 || !lyricsCache.get(tracks[currentIndex]?.id)?.synced) return;
+  lyricDragStartOffset = freezeLyricFollow();
   lyricDragPointerId = event.pointerId;
   lyricDragStartY = event.clientY;
   lyricDraggedDistance = 0;
-  const transform = getComputedStyle(lyricsLines).transform;
-  lyricDragStartOffset = transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m42;
   clearTimeout(lyricInspectionRestoreTimer);
 });
 lyricsStage.addEventListener("pointermove", (event) => {
@@ -3553,12 +3849,13 @@ lyricsStage.addEventListener("pointermove", (event) => {
   if (!lyricInspectionActive) {
     lyricInspectionActive = true;
     lyricsStage.classList.add("inspecting");
-    lyricsStage.setPointerCapture(event.pointerId);
   }
-  lyricInspectionOffset = lyricDragStartOffset + event.clientY - lyricDragStartY;
+  if (!lyricsStage.hasPointerCapture(event.pointerId)) lyricsStage.setPointerCapture(event.pointerId);
+  lyricInspectionOffset = clampLyricInspectionOffset(lyricDragStartOffset + event.clientY - lyricDragStartY);
   lyricsLines.style.transform = `translateY(${lyricInspectionOffset}px)`;
 });
 lyricsStage.addEventListener("click", (event) => {
+  if (event.target.closest("#restore-lyric-follow")) return;
   if (lyricDraggedDistance > 6) {
     event.preventDefault();
     event.stopPropagation();
@@ -3568,6 +3865,7 @@ lyricsStage.addEventListener("click", (event) => {
   const line = event.target.closest(".lyric-line[data-start]");
   if (!line) return;
   if (selectedLyricElement !== line) {
+    lyricInspectionOffset = freezeLyricFollow();
     selectedLyricElement?.classList.remove("selected");
     selectedLyricElement = line;
     selectedLyricElement.classList.add("selected");
@@ -3585,7 +3883,7 @@ lyricsStage.addEventListener("click", (event) => {
   lyricsStage.classList.remove("inspecting");
   updateLyricsAtTime();
 }, true);
-["pointerup", "pointercancel"].forEach((eventName) => {
+["pointerup", "pointercancel", "lostpointercapture"].forEach((eventName) => {
   lyricsStage.addEventListener(eventName, (event) => {
     if (event.pointerId !== lyricDragPointerId) return;
     lyricDragPointerId = null;
@@ -3593,16 +3891,26 @@ lyricsStage.addEventListener("click", (event) => {
   });
 });
 lyricsStage.addEventListener("wheel", (event) => {
-  if (!lyricsCache.get(tracks[currentIndex]?.id)?.synced) return;
+  if (!lyricsCache.get(tracks[currentIndex]?.id)?.synced || event.ctrlKey || !event.deltaY) return;
   event.preventDefault();
-  if (!lyricInspectionActive) {
-    const transform = getComputedStyle(lyricsLines).transform;
-    lyricInspectionOffset = transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m42;
+  const unit = event.deltaMode === 1 ? 32 : event.deltaMode === 2 ? lyricsStage.clientHeight : 1;
+  const delta = event.deltaY * unit * .72;
+  const liveOffset = freezeLyricFollow();
+  // Reverse immediately instead of finishing the previous wheel movement first.
+  if (!lyricInspectionActive || Math.sign(lyricInspectionOffset - liveOffset) === Math.sign(delta)) {
+    lyricInspectionOffset = liveOffset;
   }
   lyricInspectionActive = true;
   lyricsStage.classList.add("inspecting");
-  lyricInspectionOffset -= event.deltaY * .72;
-  lyricsLines.style.transform = `translateY(${lyricInspectionOffset}px)`;
+  lyricInspectionOffset = clampLyricInspectionOffset(lyricInspectionOffset - delta);
+  const target = `translateY(${lyricInspectionOffset}px)`;
+  lyricsLines.style.transform = target;
+  if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    lyricFollowAnimation = lyricsLines.animate(
+      [{ transform: `translateY(${liveOffset}px)` }, { transform: target }],
+      { duration: 200, easing: "cubic-bezier(.16,1,.3,1)" }
+    );
+  }
   scheduleLyricFollowRestore();
 }, { passive: false });
 const searchInput = document.querySelector("#search-input");
@@ -3718,8 +4026,14 @@ document.querySelectorAll(".display-option").forEach((button) => {
 document.querySelectorAll(".close-behavior-option").forEach((button) => {
   button.addEventListener("click", () => applyCloseBehavior(button.dataset.closeValue));
 });
+document.querySelectorAll(".tray-option").forEach((button) => {
+  button.addEventListener("click", () => applyTrayEnabled(button.dataset.trayValue === "true"));
+});
 document.querySelectorAll(".global-play-shortcut-option").forEach((button) => {
   button.addEventListener("click", () => applyGlobalShortcutSettings("playPause", button.dataset.enabled === "true"));
+});
+document.querySelectorAll(".global-desktop-lyrics-shortcut-option").forEach((button) => {
+  button.addEventListener("click", () => applyGlobalShortcutSettings("desktopLyrics", button.dataset.enabled === "true"));
 });
 document.querySelectorAll(".global-lyrics-shortcut-option").forEach((button) => {
   button.addEventListener("click", () => applyGlobalShortcutSettings("lyricsRefresh", button.dataset.enabled === "true"));
@@ -3942,14 +4256,18 @@ async function restorePlaybackState() {
   updateMuteButton();
   const index = tracks.findIndex((track) => track.id === restoredPlaybackState.trackId);
   if (index < 0) return;
-  currentIndex = index;
   const track = tracks[index];
-  const source = await window.medo.resolveMediaSource(track.path);
-  if (!source) return;
+  const generation = ++playbackGeneration;
+  const source = await window.medo.resolveMediaSource(track.path).catch(() => null);
+  if (!source || generation !== playbackGeneration) return;
+  const restoredIndex = tracks.findIndex((candidate) => candidate.id === track.id);
+  if (restoredIndex < 0) return;
+  currentIndex = restoredIndex;
   track.url = source;
   audio.src = source;
   audio.load();
   audio.addEventListener("loadedmetadata", () => {
+    if (generation !== playbackGeneration) return;
     audio.currentTime = Math.min(Number(restoredPlaybackState.currentTime) || 0, Math.max(0, audio.duration - .1));
   }, { once: true });
   updateNowPlaying(track);
@@ -3980,6 +4298,33 @@ if ("mediaSession" in navigator) {
   navigator.mediaSession.setActionHandler("nexttrack", () => nextTrack(1));
 }
 
+function persistNavigation() {
+  localStorage.setItem("medo.navigation", JSON.stringify({
+    view: currentView === "player" ? viewBeforePlayer : currentView,
+    playlist: currentPlaylist,
+    sort: currentSort,
+    collection: currentCollection
+  }));
+}
+
+function restoreNavigation() {
+  const saved = loadJson("medo.navigation", null);
+  if (!saved || !["library", "recent", "favorites", "playlists", "now", "settings"].includes(saved.view)) return;
+  currentView = saved.view;
+  currentSort = ["songs", "albums", "artists"].includes(saved.sort) ? saved.sort : "songs";
+  currentPlaylist = playlists.some(playlist => playlist.name === saved.playlist) ? saved.playlist : null;
+  currentCollection = saved.collection && ["albums", "artists"].includes(saved.collection.type) &&
+    typeof saved.collection.name === "string" ? saved.collection : null;
+  if (saved.playlist && !currentPlaylist) {
+    currentView = "library";
+    currentCollection = null;
+  }
+  viewBeforePlayer = currentView;
+  setActiveNav(currentPlaylist ? null : document.querySelector(`.nav-item[data-view="${currentView}"]`));
+  document.querySelectorAll(".pivot").forEach(button => button.classList.toggle("active", button.dataset.sort === currentSort));
+}
+
+restoreNavigation();
 desiredVolume = Math.min(1, Math.max(0, Number(restoredPlaybackState.volume ?? desiredVolume)));
 volume.value = desiredVolume;
 applyOutputVolume();
@@ -3990,6 +4335,7 @@ applyTheme(theme);
 applyThemeColors();
 applyDisplayMode(displayMode);
 applyCloseBehavior(closeBehavior);
+applyTrayEnabled(trayEnabled);
 applyGlobalShortcutSettings();
 applyLyricTranslationSetting(lyricTranslationEnabled);
 applyWordLyricsSetting(wordLyricsEnabled);
@@ -4055,6 +4401,11 @@ window.medo.onTrayCommand(({ command, value }) => {
   } else if (command === "previous") nextTrack(-1);
   else if (command === "next") nextTrack(1);
   else if (command === "toggle-play") togglePlayback();
+  else if (command === "toggle-desktop-lyrics") {
+    window.medo.toggleLyricsWindow();
+    activeLyricIndex = -1;
+    updateLyricsAtTime();
+  }
   else if (command === "refresh-lyrics") refreshCurrentLyricsFromNetwork();
   else if (command === "open-settings" || command === "open-desktop-lyric-settings") {
     selectedTrackIds.clear();

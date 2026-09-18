@@ -5,6 +5,7 @@ body { margin: 0; overflow: hidden; background: transparent; font-family: "Segoe
   width: calc(100% - 4px);
   height: calc(100% - 4px);
   margin: 2px;
+  opacity: 0;
   display: grid;
   align-content: safe center;
   gap: var(--desktop-lyric-gap, 9px);
@@ -18,6 +19,7 @@ body { margin: 0; overflow: hidden; background: transparent; font-family: "Segoe
   user-select: none;
   transition: opacity 300ms ease;
 }
+.lyrics-ready .lyrics-island { opacity: 1; }
 #desktop-lyric, #desktop-next-lyric {
   overflow: hidden;
   padding-bottom: .16em;

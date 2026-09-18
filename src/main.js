@@ -6,12 +6,15 @@ const crypto = require("node:crypto");
 const { pathToFileURL } = require("node:url");
 const { parseZpl } = require("./zpl");
 const { decodeTextBuffer } = require("./text-decoder");
+const { createMediaFileResponse } = require("./media-file-response");
 const { hasNativeWordTiming } = require("./lyrics-timing");
 const { fetchNeteaseLyrics } = require("./netease-eapi");
 const { fetchQqMusicLyrics } = require("./qq-music");
-const { resolveOnlineLyricProviders, selectLocalLyrics, removeLiveQualifier } = require("./lyrics-source-priority");
+const { resolveOnlineLyricProviders, selectLocalLyrics, removeLiveQualifier, removeEnglishSuffixFromChineseTitle } = require("./lyrics-source-priority");
 const { startMyFireflyExtension } = require("./myfirefly-extension");
 
+const WINDOWS_APP_USER_MODEL_ID = "com.medomusic.desktop";
+const WINDOWS_TRAY_GUID = "8c33d388-8b65-4e7c-a54d-1af447cd8bfa";
 const AUDIO_EXTENSIONS = new Set([
   ".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg", ".opus", ".wma"
 ]);
@@ -20,6 +23,7 @@ protocol.registerSchemesAsPrivileged([{
   privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true }
 }]);
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
+if (process.platform === "win32") app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
   app.quit();
@@ -31,7 +35,9 @@ if (!hasSingleInstanceLock) {
 }
 let mainWindow = null;
 let pendingExternalAudioFiles = [];
+let externalAudioDispatchTimer = null;
 let tray = null;
+let trayEnabled = false;
 let myFireflyExtension = null;
 const myFireflyPending = new Map();
 let closeBehavior = "background";
@@ -45,12 +51,15 @@ let lyricTranslationCacheWriteTimer = null;
 let lyricsWindow = null;
 let lastLyricsWindowPayload = null;
 let lyricsWindowLocked = true;
+let lyricsWindowReady = false;
+let lyricsWindowShowWhenReady = false;
 let lyricsWindowPointerTimer = null;
 let lyricsWindowPointerInside = false;
 let lyricsWindowTopTimer = null;
 let trayMuted = false;
 let trayLyricsSize = 34;
 let globalPlayPauseShortcutEnabled = true;
+let globalDesktopLyricsShortcutEnabled = true;
 let globalLyricsRefreshShortcutEnabled = true;
 let globalPreviousShortcutEnabled = true;
 let globalNextShortcutEnabled = true;
@@ -118,11 +127,16 @@ function audioPathsFromArguments(args = []) {
 function queueExternalAudioFiles(args) {
   const files = audioPathsFromArguments(args);
   if (!files.length) return;
-  pendingExternalAudioFiles = files;
-  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isLoading()) {
-    mainWindow.webContents.send("app:open-audio-files", pendingExternalAudioFiles);
+  pendingExternalAudioFiles = [...new Set([...pendingExternalAudioFiles, ...files])];
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading()) return;
+  clearTimeout(externalAudioDispatchTimer);
+  externalAudioDispatchTimer = setTimeout(() => {
+    externalAudioDispatchTimer = null;
+    if (!pendingExternalAudioFiles.length || !mainWindow || mainWindow.isDestroyed()) return;
+    const queuedFiles = pendingExternalAudioFiles;
     pendingExternalAudioFiles = [];
-  }
+    mainWindow.webContents.send("app:open-audio-files", queuedFiles);
+  }, 60);
 }
 
 app.on("open-file", (event, filePath) => {
@@ -323,12 +337,20 @@ function createWindow() {
   });
 
   mainWindow = window;
+  const sendMaximizedState = () => {
+    if (!window.isDestroyed()) window.webContents.send("window:maximized", window.isMaximized());
+  };
+  window.on("maximize", sendMaximizedState);
+  window.on("unmaximize", sendMaximizedState);
+  window.webContents.on("did-finish-load", sendMaximizedState);
   window.loadFile(path.join(__dirname, "index.html"));
   window.once("ready-to-show", () => {
     if (!window.isDestroyed()) window.show();
   });
   window.webContents.on("did-finish-load", () => {
     if (!pendingExternalAudioFiles.length) return;
+    clearTimeout(externalAudioDispatchTimer);
+    externalAudioDispatchTimer = null;
     window.webContents.send("app:open-audio-files", pendingExternalAudioFiles);
     pendingExternalAudioFiles = [];
   });
@@ -403,15 +425,20 @@ async function controlWindowFromMyFirefly(action) {
 
 function applyGlobalShortcutSettings(settings = {}) {
   globalPlayPauseShortcutEnabled = settings.playPause !== false;
+  globalDesktopLyricsShortcutEnabled = settings.desktopLyrics !== false;
   globalLyricsRefreshShortcutEnabled = settings.lyricsRefresh !== false;
   globalPreviousShortcutEnabled = settings.previous !== false;
   globalNextShortcutEnabled = settings.next !== false;
   globalShortcut.unregister("Alt+S");
+  globalShortcut.unregister("Alt+W");
   globalShortcut.unregister("Alt+D");
   globalShortcut.unregister("Alt+Q");
   globalShortcut.unregister("Alt+E");
   if (globalPlayPauseShortcutEnabled) {
     globalShortcut.register("Alt+S", () => sendGlobalPlaybackCommand("toggle-play"));
+  }
+  if (globalDesktopLyricsShortcutEnabled) {
+    globalShortcut.register("Alt+W", () => sendGlobalPlaybackCommand("toggle-desktop-lyrics"));
   }
   if (globalLyricsRefreshShortcutEnabled) {
     globalShortcut.register("Alt+D", () => sendGlobalPlaybackCommand("refresh-lyrics"));
@@ -438,12 +465,24 @@ function startLyricsWindowTopGuard() {
   }, 2000);
 }
 
+function showLyricsWindowWhenReady(window) {
+  if (!window || window.isDestroyed()) return;
+  if (!lyricsWindowReady || window.webContents.isLoading()) {
+    lyricsWindowShowWhenReady = true;
+    return;
+  }
+  window.showInactive();
+  keepLyricsWindowOnTop(window);
+}
+
 function setLyricsWindowLocked(locked) {
   lyricsWindowLocked = Boolean(locked);
   const window = createLyricsWindow();
-  if (lyricsWindowLocked && !window.isVisible()) window.showInactive();
+  if (lyricsWindowLocked && !window.isVisible()) showLyricsWindowWhenReady(window);
   keepLyricsWindowOnTop(window);
-  window.setIgnoreMouseEvents(lyricsWindowLocked, { forward: true });
+  // Locked hover detection uses screen coordinates below. Forwarding mouse moves
+  // through the overlay is unnecessary and can interfere with native window drags.
+  window.setIgnoreMouseEvents(lyricsWindowLocked);
   window.webContents.send("lyrics-window:lock-state", lyricsWindowLocked);
   updateLyricsWindowPointerTracking();
   mainWindow?.webContents.send("lyrics-window:lock-state", lyricsWindowLocked);
@@ -495,13 +534,14 @@ function persistLyricsVisibilitySync(visible) {
 function setLyricsWindowVisible(visible, senderWindow) {
   const window = createLyricsWindow();
   if (visible) {
-    window.showInactive();
+    showLyricsWindowWhenReady(window);
     keepLyricsWindowOnTop(window);
     if (lastLyricsWindowPayload) window.webContents.send("lyrics-window:line", lastLyricsWindowPayload);
   } else {
+    lyricsWindowShowWhenReady = false;
     window.hide();
   }
-  const current = window.isVisible();
+  const current = Boolean(visible);
   persistLyricsVisibility(current);
   (senderWindow || mainWindow)?.webContents.send("lyrics-window:visibility", current);
   refreshTrayMenu();
@@ -512,7 +552,7 @@ async function restoreLyricsWindowVisibility() {
   const visible = await readSavedLyricsVisibility();
   if (visible) {
     const window = createLyricsWindow();
-    window.showInactive();
+    showLyricsWindowWhenReady(window);
     keepLyricsWindowOnTop(window);
     if (lastLyricsWindowPayload) window.webContents.send("lyrics-window:line", lastLyricsWindowPayload);
   }
@@ -581,10 +621,23 @@ function createTray() {
     : path.join(__dirname, "..", "build", "icon.ico");
   let trayImage = nativeImage.createFromPath(iconPath);
   if (trayImage.isEmpty()) trayImage = nativeImage.createEmpty();
-  tray = new Tray(trayImage.resize({ width: 16, height: 16 }));
+  const trayGuid = process.platform === "win32" ? WINDOWS_TRAY_GUID : undefined;
+  tray = new Tray(trayImage.resize({ width: 16, height: 16 }), trayGuid);
   tray.setToolTip("MedoMusic");
   refreshTrayMenu();
   tray.on("double-click", showMainWindow);
+}
+
+function destroyTray() {
+  if (!tray) return;
+  tray.destroy();
+  tray = null;
+}
+
+function setTrayEnabled(enabled) {
+  trayEnabled = Boolean(enabled);
+  if (trayEnabled) createTray();
+  else destroyTray();
 }
 
 function createLyricsWindow() {
@@ -612,14 +665,22 @@ function createLyricsWindow() {
       nodeIntegration: false
     }
   });
-  lyricsWindow.setIgnoreMouseEvents(lyricsWindowLocked, { forward: true });
-  keepLyricsWindowOnTop(lyricsWindow);
+  lyricsWindowReady = false;
+  lyricsWindowShowWhenReady = false;
+  lyricsWindow.setIgnoreMouseEvents(lyricsWindowLocked);
+  lyricsWindow.setAlwaysOnTop(true, "screen-saver");
   lyricsWindow.loadFile(path.join(__dirname, "lyrics.html"));
   lyricsWindow.webContents.on("did-finish-load", () => {
+    lyricsWindowReady = true;
     keepLyricsWindowOnTop(lyricsWindow);
     if (lastLyricsWindowPayload) lyricsWindow?.webContents.send("lyrics-window:line", lastLyricsWindowPayload);
     lyricsWindow?.webContents.send("lyrics-window:lock-state", lyricsWindowLocked);
     updateLyricsWindowPointerTracking();
+    if (lyricsWindowShowWhenReady && lyricsWindow && !lyricsWindow.isDestroyed()) {
+      lyricsWindowShowWhenReady = false;
+      lyricsWindow.showInactive();
+      keepLyricsWindowOnTop(lyricsWindow);
+    }
   });
   lyricsWindow.on("show", () => keepLyricsWindowOnTop(lyricsWindow));
   lyricsWindow.on("always-on-top-changed", (_event, isAlwaysOnTop) => {
@@ -631,6 +692,8 @@ function createLyricsWindow() {
     lyricsWindowPointerTimer = null;
     clearInterval(lyricsWindowTopTimer);
     lyricsWindowTopTimer = null;
+    lyricsWindowReady = false;
+    lyricsWindowShowWhenReady = false;
     lyricsWindow = null;
   });
   return lyricsWindow;
@@ -707,43 +770,7 @@ app.whenReady().then(() => {
     try {
       const filePath = new URL(request.url).searchParams.get("path");
       if (!filePath) return new Response("Missing media path", { status: 400 });
-      const stat = await fs.stat(filePath);
-      const range = request.headers.get("range");
-      let start = 0;
-      let end = stat.size - 1;
-      if (range) {
-        const match = range.match(/bytes=(\d*)-(\d*)/);
-        if (match) {
-          start = match[1] ? Number(match[1]) : start;
-          end = match[2] ? Math.min(Number(match[2]), end) : end;
-        }
-      }
-      if (start > end || start >= stat.size) {
-        return new Response(null, {
-          status: 416,
-          headers: { "Content-Range": `bytes */${stat.size}` }
-        });
-      }
-      const handle = await fs.open(filePath, "r");
-      const buffer = Buffer.alloc(end - start + 1);
-      try {
-        await handle.read(buffer, 0, buffer.length, start);
-      } finally {
-        await handle.close();
-      }
-      const mimeTypes = {
-        ".mp3": "audio/mpeg", ".flac": "audio/flac", ".wav": "audio/wav",
-        ".m4a": "audio/mp4", ".aac": "audio/aac", ".ogg": "audio/ogg",
-        ".opus": "audio/ogg", ".wma": "audio/x-ms-wma"
-      };
-      const headers = {
-        "Access-Control-Allow-Origin": "*",
-        "Accept-Ranges": "bytes",
-        "Content-Length": String(buffer.length),
-        "Content-Type": mimeTypes[path.extname(filePath).toLowerCase()] || "application/octet-stream"
-      };
-      if (range) headers["Content-Range"] = `bytes ${start}-${end}/${stat.size}`;
-      return new Response(buffer, { status: range ? 206 : 200, headers });
+      return await createMediaFileResponse(filePath, request.headers.get("range"));
     } catch {
       return new Response("Media file unavailable", { status: 404 });
     }
@@ -849,6 +876,10 @@ app.whenReady().then(() => {
     closeBehavior = value === "quit" ? "quit" : "background";
   });
 
+  ipcMain.on("app:set-tray-enabled", (_event, enabled) => {
+    setTrayEnabled(enabled);
+  });
+
   ipcMain.on("app:set-global-shortcuts", (_event, settings) => {
     applyGlobalShortcutSettings(settings);
   });
@@ -857,7 +888,8 @@ app.whenReady().then(() => {
     const filePath = typeof options === "string" ? options : options?.filePath;
     if (typeof filePath !== "string") return { text: "", source: null };
     const lrcPath = path.join(path.dirname(filePath), `${path.basename(filePath, path.extname(filePath))}.lrc`);
-    const onlineProviders = resolveOnlineLyricProviders(options?.mode, options?.artist);
+    const requireWordTiming = options?.mode === "network" || options?.requireWordTiming === true;
+    const onlineProviders = resolveOnlineLyricProviders(options?.mode, requireWordTiming);
     const preferLocal = options?.mode === "auto";
     let localFallback = null;
     let embeddedFallback = null;
@@ -878,41 +910,60 @@ app.whenReady().then(() => {
     }
     const fallbackResult = () => selectLocalLyrics(embeddedFallback?.text, localFallback?.text);
     const hasOrdinaryFallback = () => Boolean(localFallback || embeddedFallback);
-    if (!onlineProviders.length || (preferLocal && hasOrdinaryFallback())) return fallbackResult();
-    if (hasNativeWordTiming(embeddedFallback?.text) || hasNativeWordTiming(localFallback?.text)) return fallbackResult();
+    if (!onlineProviders.length || (preferLocal && !requireWordTiming && hasOrdinaryFallback())) return fallbackResult();
+    if (hasNativeWordTiming(embeddedFallback?.text)) return embeddedFallback;
+    if (hasNativeWordTiming(localFallback?.text)) return localFallback;
     const title = String(options.title || "").trim();
     const artist = String(options.artist || "").trim();
     const album = String(options.album || "").trim();
     const duration = Math.round(Number(options.duration) || 0);
     if (!title || !duration) return fallbackResult();
     const cache = await getOnlineLyricsCache();
+    let onlineLineFallback = null;
     try {
-      let networkLineFallback = null;
-      for (const onlineProvider of onlineProviders) {
-        const providerCacheKey = JSON.stringify([onlineProvider, title, artist, album, duration]);
-        let onlineLyrics = cache[providerCacheKey] && !options?.force ? cache[providerCacheKey] : null;
-        if (!onlineLyrics) {
-          try {
-            onlineLyrics = onlineProvider === "qq"
-              ? await fetchQqMusicLyrics(options)
-              : await fetchNeteaseLyrics(options);
-          } catch {}
+      const searchOnlineProviders = async (searchOptions) => {
+        let lineFallback = null;
+        const searchTitle = String(searchOptions.title || "").trim();
+        for (const onlineProvider of onlineProviders) {
+          const providerCacheKey = JSON.stringify([onlineProvider, searchTitle, artist, album, duration]);
+          const searchCacheKey = requireWordTiming ? `${providerCacheKey}:word-search-v2` : providerCacheKey;
+          let onlineLyrics = !options?.force ? cache[searchCacheKey] ||
+            (requireWordTiming && hasNativeWordTiming(cache[providerCacheKey]?.text) ? cache[providerCacheKey] : null) : null;
+          if (!onlineLyrics) {
+            try {
+              onlineLyrics = onlineProvider === "qq"
+                ? await fetchQqMusicLyrics({ ...searchOptions, requireWordTiming })
+                : await fetchNeteaseLyrics({ ...searchOptions, requireWordTiming });
+            } catch {}
+          }
+          if (!onlineLyrics) continue;
+          // Only native word results can satisfy future word searches from cache.
+          // A temporary provider failure must not permanently pin ordinary lyrics.
+          if (!requireWordTiming || hasNativeWordTiming(onlineLyrics.text)) cache[searchCacheKey] = onlineLyrics;
+          scheduleOnlineLyricsCacheWrite();
+          if (requireWordTiming && !hasNativeWordTiming(onlineLyrics.text)) {
+            lineFallback ||= onlineLyrics;
+            continue;
+          }
+          return { result: onlineLyrics, lineFallback };
         }
-        if (!onlineLyrics) continue;
-        cache[providerCacheKey] = onlineLyrics;
-        scheduleOnlineLyricsCacheWrite();
-        if (options?.mode === "network" && !hasNativeWordTiming(onlineLyrics.text)) {
-          networkLineFallback ||= onlineLyrics;
-          continue;
+        return { result: null, lineFallback };
+      };
+      const initialOnlineSearch = await searchOnlineProviders(options);
+      if (initialOnlineSearch.result) return initialOnlineSearch.result;
+      onlineLineFallback = initialOnlineSearch.lineFallback;
+      if (requireWordTiming) {
+        const chineseTitle = removeEnglishSuffixFromChineseTitle(title);
+        if (chineseTitle) {
+          const retry = await searchOnlineProviders({ ...options, title: chineseTitle });
+          if (retry.result) return retry.result;
+          onlineLineFallback ||= retry.lineFallback;
         }
-        return onlineLyrics;
       }
-      if (networkLineFallback) return networkLineFallback;
+      if (onlineLineFallback) return onlineLineFallback;
       if (hasOrdinaryFallback()) return fallbackResult();
       const retryTitle = removeLiveQualifier(title);
       const publicTitles = retryTitle ? [title, retryTitle] : [title];
-      const publicCacheKey = JSON.stringify(["lrclib", title, artist, album, duration]);
-      if (cache[publicCacheKey] && !options?.force) return cache[publicCacheKey];
       const requestJson = async (url) => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 5500);
@@ -949,55 +1000,74 @@ app.whenReady().then(() => {
           similarity(album, result.albumName) * .14 +
           durationScore * .1;
       };
-      let result = null;
-      let confidence = 0;
-      for (const searchTitle of publicTitles) {
-        const exactQuery = new URLSearchParams({
-          track_name: searchTitle,
-          artist_name: artist,
-          album_name: album,
-          duration: String(duration)
-        });
-        result = await requestJson(`https://lrclib.net/api/get?${exactQuery}`);
-        confidence = result ? scoreResult(result, searchTitle) : 0;
-        if (!result || confidence < .62) {
-          const searchQuery = new URLSearchParams({ track_name: searchTitle, artist_name: artist });
-          let candidates = await requestJson(`https://lrclib.net/api/search?${searchQuery}`);
-          if (!Array.isArray(candidates) || !candidates.length) {
-            const titleOnlyQuery = new URLSearchParams({ track_name: searchTitle });
-            candidates = await requestJson(`https://lrclib.net/api/search?${titleOnlyQuery}`);
-          }
-          if (Array.isArray(candidates) && candidates.length) {
-            const ranked = candidates.map((item) => ({ item, score: scoreResult(item, searchTitle) }))
-              .sort((left, right) => right.score - left.score);
-            if (ranked[0].score >= .56) {
-              result = ranked[0].item;
-              confidence = ranked[0].score;
+      const searchPublicLyrics = async (searchTitles, cacheTitle) => {
+        const publicCacheKey = JSON.stringify(["lrclib", cacheTitle, artist, album, duration]);
+        if (cache[publicCacheKey] && !options?.force) return cache[publicCacheKey];
+        let result = null;
+        let confidence = 0;
+        for (const searchTitle of searchTitles) {
+          const exactQuery = new URLSearchParams({
+            track_name: searchTitle,
+            artist_name: artist,
+            album_name: album,
+            duration: String(duration)
+          });
+          result = await requestJson(`https://lrclib.net/api/get?${exactQuery}`);
+          confidence = result ? scoreResult(result, searchTitle) : 0;
+          if (!result || confidence < .62) {
+            const searchQuery = new URLSearchParams({ track_name: searchTitle, artist_name: artist });
+            let candidates = await requestJson(`https://lrclib.net/api/search?${searchQuery}`);
+            if (!Array.isArray(candidates) || !candidates.length) {
+              const titleOnlyQuery = new URLSearchParams({ track_name: searchTitle });
+              candidates = await requestJson(`https://lrclib.net/api/search?${titleOnlyQuery}`);
+            }
+            if (Array.isArray(candidates) && candidates.length) {
+              const ranked = candidates.map((item) => ({ item, score: scoreResult(item, searchTitle) }))
+                .sort((left, right) => right.score - left.score);
+              if (ranked[0].score >= .56) {
+                result = ranked[0].item;
+                confidence = ranked[0].score;
+              }
             }
           }
+          if (result && confidence >= .56) break;
+          result = null;
+          confidence = 0;
         }
-        if (result && confidence >= .56) break;
-        result = null;
-        confidence = 0;
-      }
-      if (!result || confidence < .56) return fallbackResult();
-      const text = result.syncedLyrics || result.plainLyrics || "";
-      if (!text) return fallbackResult();
-      const value = {
-        text,
-        source: "lrclib",
-        confidence: Math.round(confidence * 100),
-        match: {
-          title: result.trackName,
-          artist: result.artistName,
-          album: result.albumName
-        }
+        if (!result || confidence < .56) return null;
+        const text = result.syncedLyrics || result.plainLyrics || "";
+        if (!text) return null;
+        const value = {
+          text,
+          source: "lrclib",
+          confidence: Math.round(confidence * 100),
+          match: {
+            title: result.trackName,
+            artist: result.artistName,
+            album: result.albumName
+          }
+        };
+        cache[publicCacheKey] = value;
+        scheduleOnlineLyricsCacheWrite();
+        return value;
       };
-      cache[publicCacheKey] = value;
-      scheduleOnlineLyricsCacheWrite();
-      return value;
-    } catch {
+      const initialPublicLyrics = await searchPublicLyrics(publicTitles, title);
+      if (initialPublicLyrics) return initialPublicLyrics;
+
+      const chineseTitle = removeEnglishSuffixFromChineseTitle(title);
+      if (chineseTitle && !requireWordTiming) {
+        const chineseOptions = { ...options, title: chineseTitle };
+        const chineseOnlineSearch = await searchOnlineProviders(chineseOptions);
+        if (chineseOnlineSearch.result) return chineseOnlineSearch.result;
+        if (chineseOnlineSearch.lineFallback) return chineseOnlineSearch.lineFallback;
+        const chineseLiveTitle = removeLiveQualifier(chineseTitle);
+        const chinesePublicTitles = chineseLiveTitle ? [chineseTitle, chineseLiveTitle] : [chineseTitle];
+        const chinesePublicLyrics = await searchPublicLyrics(chinesePublicTitles, chineseTitle);
+        if (chinesePublicLyrics) return chinesePublicLyrics;
+      }
       return fallbackResult();
+    } catch {
+      return onlineLineFallback || fallbackResult();
     }
   });
 
@@ -1422,7 +1492,7 @@ app.whenReady().then(() => {
   }).catch((error) => {
     console.error("[MyFirefly] Failed to start MedoMusic extension:", error);
   });
-  createTray();
+  setTrayEnabled(false);
   applyGlobalShortcutSettings();
   restoreLyricsWindowVisibility();
   app.on("activate", () => {

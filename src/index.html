@@ -115,8 +115,10 @@
         <button id="cancel-selection" class="selection-command"><span class="glyph">&#xE711;</span><span>取消</span></button>
         <span class="selection-divider"></span>
         <button id="play-selected" class="selection-command"><span class="glyph">&#xE768;</span><span>播放</span></button>
-        <button id="next-selected" class="selection-command"><span class="glyph">&#xE893;</span><span>播放下一首</span></button>
+        <button id="next-selected" class="selection-command"><span class="glyph">&#xE893;</span><span>下一首播放</span></button>
+        <button id="append-selected" class="selection-command"><span class="glyph">&#xE710;</span><span>添加到正在播放</span></button>
         <button id="queue-selected" class="selection-command"><span class="glyph">&#xE710;</span><span>添加到列表</span></button>
+        <button id="remove-selected" class="selection-command" hidden><span class="glyph">&#xE74D;</span><span>从列表中删除</span></button>
         <button id="select-all" class="selection-command"><span class="glyph">&#xE8B3;</span><span>全选</span></button>
         <strong id="selection-count">已选择 0 首</strong>
       </div>
@@ -256,7 +258,7 @@
           <div class="settings-heading">
             <div>
               <h2>全局快捷键</h2>
-              <p>即使 MedoMusic 不在前台，也可以控制播放和刷新歌词。</p>
+              <p>即使 MedoMusic 不在前台，也可以控制播放、显示或隐藏桌面歌词和刷新歌词。</p>
             </div>
           </div>
           <div class="display-setting global-play-shortcut-setting">
@@ -264,6 +266,13 @@
             <div class="segmented-control global-play-shortcut-options" role="radiogroup" aria-label="启用全局暂停快捷键">
               <button class="global-play-shortcut-option active" data-enabled="true" role="radio" aria-checked="true">启用</button>
               <button class="global-play-shortcut-option" data-enabled="false" role="radio" aria-checked="false">关闭</button>
+            </div>
+          </div>
+          <div class="display-setting global-desktop-lyrics-shortcut-setting">
+            <div><h3>启用全局桌面歌词快捷键</h3><p>启用显示或隐藏桌面歌词快捷键：Alt+W</p></div>
+            <div class="segmented-control global-desktop-lyrics-shortcut-options" role="radiogroup" aria-label="启用全局桌面歌词快捷键">
+              <button class="global-desktop-lyrics-shortcut-option active" data-enabled="true" role="radio" aria-checked="true">启用</button>
+              <button class="global-desktop-lyrics-shortcut-option" data-enabled="false" role="radio" aria-checked="false">关闭</button>
             </div>
           </div>
           <div class="display-setting global-lyrics-shortcut-setting">
@@ -297,8 +306,15 @@
             </div>
           </div>
           <div class="segmented-control close-behavior-options" role="radiogroup" aria-label="关闭行为">
-            <button class="close-behavior-option active" data-close-value="background" role="radio" aria-checked="true">最小化到后台</button>
+            <button class="close-behavior-option active" data-close-value="background" role="radio" aria-checked="true">最小化到托盘</button>
             <button class="close-behavior-option" data-close-value="quit" role="radio" aria-checked="false">直接退出软件</button>
+          </div>
+          <div id="tray-setting" class="display-setting">
+            <div><h3>显示系统托盘</h3><p>关闭后不再显示系统托盘图标。</p></div>
+            <div class="segmented-control tray-options" role="radiogroup" aria-label="显示系统托盘">
+              <button class="tray-option" data-tray-value="true" role="radio" aria-checked="false">启用</button>
+              <button class="tray-option active" data-tray-value="false" role="radio" aria-checked="true">关闭</button>
+            </div>
           </div>
         </div>
 
@@ -328,8 +344,11 @@
             <small id="detail-format"></small>
           </article>
           <section class="lyrics-stage" aria-label="歌词">
-            <div id="lyrics-lines" class="lyrics-lines">
-              <p class="lyrics-empty">正在查找歌词</p>
+            <button id="restore-lyric-follow" class="restore-lyric-follow" title="回到当前播放的歌词">回到当前句 <span aria-hidden="true">↩</span></button>
+            <div class="lyrics-viewport">
+              <div id="lyrics-lines" class="lyrics-lines">
+                <p class="lyrics-empty">正在查找歌词</p>
+              </div>
             </div>
           </section>
           <aside class="detail-queue">
@@ -352,8 +371,10 @@
 
     <footer class="player">
       <div class="song-info">
-        <button id="open-playback-detail" class="mini-cover-button" title="打开播放详情">
+        <button id="open-playback-detail" class="mini-cover-button" aria-label="请先选择歌曲" aria-expanded="false" aria-controls="playback-detail" disabled>
           <img id="mini-cover" src="../Groove/Assets/MissingAlbumArt.jpg" alt="">
+          <span class="mini-cover-overlay" aria-hidden="true"></span>
+          <span class="mini-cover-flash" aria-hidden="true"></span>
         </button>
         <div>
           <strong id="now-title">未选择歌曲</strong>

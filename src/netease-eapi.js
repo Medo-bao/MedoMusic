@@ -1,5 +1,6 @@
 const crypto = require("node:crypto");
 const { removeLiveQualifier } = require("./lyrics-source-priority");
+const { hasNativeWordTiming } = require("./lyrics-timing");
 
 const EAPI_URL = "https://interface3.music.163.com/eapi/song/lyric/v1";
 const EAPI_PATH = "/api/song/lyric/v1";
@@ -111,25 +112,35 @@ async function searchNeteaseSongs(options, fetchImplementation = fetch) {
 
 async function fetchNeteaseLyricsOnce(options, fetchImplementation) {
   const ranked = rankNeteaseSongs(await searchNeteaseSongs(options, fetchImplementation), options);
-  const best = ranked[0];
-  if (!best || best.score < .62 || !best.song.id) return null;
-  const payload = await fetchNeteaseNewLyrics(best.song.id, fetchImplementation);
-  const text = payload?.yrc?.lyric || payload?.lrc?.lyric || "";
-  if (!text) return null;
-  return {
-    text,
-    source: payload?.yrc?.lyric ? "netease-word" : "netease-line",
-    confidence: Math.round(best.score * 100),
-    match: { title: best.song.name, artist: best.artist }
-  };
+  const requireWords = options.requireWordTiming || options.mode === "network";
+  let fallback = null;
+  for (const best of ranked.filter(item => item.score >= .62 && item.song.id)) {
+    let payload;
+    try { payload = await fetchNeteaseNewLyrics(best.song.id, fetchImplementation); } catch { continue; }
+    const wordTimed = hasNativeWordTiming(payload?.yrc?.lyric);
+    const text = wordTimed ? payload.yrc.lyric : payload?.lrc?.lyric || "";
+    if (!text) continue;
+    const result = {
+      text,
+      source: wordTimed ? "netease-word" : "netease-line",
+      confidence: Math.round(best.score * 100),
+      match: { title: best.song.name, artist: best.artist }
+    };
+    if (!requireWords || wordTimed) return result;
+    fallback ||= result;
+  }
+  return fallback;
 }
 
 async function fetchNeteaseLyrics(options, fetchImplementation = fetch) {
-  const result = await fetchNeteaseLyricsOnce(options, fetchImplementation);
-  if (result) return result;
+  const result = await fetchNeteaseLyricsOnce(options, fetchImplementation).catch(() => null);
+  if (result && (!(options.requireWordTiming || options.mode === "network") || hasNativeWordTiming(result.text))) return result;
   const retryTitle = removeLiveQualifier(options?.title);
-  if (!retryTitle) return null;
-  return fetchNeteaseLyricsOnce({ ...options, title: retryTitle }, fetchImplementation);
+  if (!retryTitle) return result;
+  try {
+    const retry = await fetchNeteaseLyricsOnce({ ...options, title: retryTitle }, fetchImplementation);
+    return retry && hasNativeWordTiming(retry.text) ? retry : result || retry;
+  } catch { return result; }
 }
 
 module.exports = {

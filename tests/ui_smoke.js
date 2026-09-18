@@ -1,4 +1,5 @@
 const path = require("node:path");
+const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const { pathToFileURL } = require("node:url");
 const { chromium } = require("playwright");
@@ -98,22 +99,24 @@ async function run() {
       showTrackMenu: async () => null,
       showTrackProperties: async (filePath) => ({ name: "Demo.mp3", path: filePath, extension: "MP3", size: 1024 }),
       showTrackInFolder: async () => true,
-      toggleLyricsWindow: () => {},
+      toggleLyricsWindow: () => { window.__desktopLyricsVisible = !window.__desktopLyricsVisible; },
       translateLyrics: async () => [],
       updateLyricsWindow: () => {},
       setCloseBehavior: () => {},
+      setTrayEnabled: (enabled) => { window.__trayEnabled = enabled; },
       setGlobalShortcuts: (settings) => window.__globalShortcutSettings.push({ ...settings }),
       onLyricsWindowVisibility: () => () => {},
       onResolvedTheme: () => () => {},
       onOpenAudioFiles: () => () => {},
       onMyFireflyCommand: () => () => {},
       respondToMyFirefly: () => {},
-      onTrayCommand: () => () => {},
+      onTrayCommand: (callback) => { window.__trayCommand = callback; return () => {}; },
       loadPlaylist: async () => null,
       readMetadata: async () => null,
       setTitleBarTheme: () => {},
       minimizeWindow: () => {},
       toggleMaximizeWindow: () => {},
+      onWindowMaximized: (callback) => { window.__setMaximized = callback; },
       closeWindow: () => {},
       getAppInfo: async () => ({
         name: "MedoMusic",
@@ -151,6 +154,13 @@ async function run() {
 
   const navigationStarted = Date.now();
   await page.goto(pathToFileURL(path.join(root, "src", "index.html")).href);
+  await page.waitForFunction(() => typeof window.__setMaximized === "function");
+  await page.evaluate(() => window.__setMaximized(true));
+  assert.equal(await page.locator("#window-maximize").getAttribute("aria-label"), "还原");
+  assert.equal(await page.locator("#window-maximize").evaluate((button) => button.classList.contains("is-maximized")), true);
+  await page.evaluate(() => window.__setMaximized(false));
+  assert.equal(await page.locator("#window-maximize").getAttribute("aria-label"), "最大化");
+  assert.equal(await page.locator("#window-maximize").evaluate((button) => button.classList.contains("is-maximized")), false);
   if (startupOnly) {
     const snapshot = await page.evaluate(() => ({
       rows: document.querySelectorAll(".track-row").length,
@@ -223,6 +233,20 @@ async function run() {
     throw new Error("Global shortcut settings are incomplete");
   }
   await page.locator('.global-lyrics-shortcut-option[data-enabled="false"]').click();
+  assert.deepEqual(await page.locator('.global-shortcuts-group .display-setting h3').allTextContents(), [
+    "启用全局暂停快捷键", "启用全局桌面歌词快捷键", "启用全局歌词刷新快捷键",
+    "启用全局上一首歌快捷键", "启用全局下一首歌快捷键"
+  ]);
+  assert.equal(await page.evaluate(() => window.__globalShortcutSettings.at(-1).desktopLyrics), true);
+  await page.locator('.global-desktop-lyrics-shortcut-option[data-enabled="false"]').click();
+  assert.equal(await page.evaluate(() => localStorage.getItem("medo.globalDesktopLyricsShortcutEnabled")), "false");
+  assert.equal(await page.evaluate(() => window.__globalShortcutSettings.at(-1).desktopLyrics), false);
+  await page.locator('.global-desktop-lyrics-shortcut-option[data-enabled="true"]').click();
+  assert.equal(await page.evaluate(() => window.__globalShortcutSettings.at(-1).desktopLyrics), true);
+  await page.evaluate(() => window.__trayCommand({ command: "toggle-desktop-lyrics" }));
+  assert.equal(await page.evaluate(() => window.__desktopLyricsVisible), true);
+  await page.evaluate(() => window.__trayCommand({ command: "toggle-desktop-lyrics" }));
+  assert.equal(await page.evaluate(() => window.__desktopLyricsVisible), false);
   const shortcutSettings = await page.evaluate(() => window.__globalShortcutSettings.at(-1));
   if (shortcutSettings?.playPause !== true || shortcutSettings?.lyricsRefresh !== false ||
       shortcutSettings?.previous !== true || shortcutSettings?.next !== true) {
@@ -232,6 +256,23 @@ async function run() {
     throw new Error("System theme option missing");
   }
   if (await page.locator(".app-info > div").count() !== 2) throw new Error("About details mismatch");
+  if (!await page.locator("#tray-setting").isHidden() || await page.evaluate(() => window.__trayEnabled) !== true) {
+    throw new Error("Tray is not forced on while minimizing to tray");
+  }
+  await page.locator('.close-behavior-option[data-close-value="quit"]').click();
+  if (await page.locator("#tray-setting").isHidden()) throw new Error("Tray setting did not appear for quit behavior");
+  await page.locator('.tray-option[data-tray-value="true"]').click();
+  if (await page.evaluate(() => window.__trayEnabled) !== true || await page.locator('.tray-option[data-tray-value="true"]').getAttribute("aria-checked") !== "true") {
+    throw new Error("Tray enable setting failed");
+  }
+  await page.locator('.tray-option[data-tray-value="false"]').click();
+  if (await page.evaluate(() => window.__trayEnabled) !== false || await page.locator('.tray-option[data-tray-value="false"]').getAttribute("aria-checked") !== "true") {
+    throw new Error("Tray disable setting failed");
+  }
+  await page.locator('.close-behavior-option[data-close-value="background"]').click();
+  if (!await page.locator("#tray-setting").isHidden() || await page.evaluate(() => window.__trayEnabled) !== true) {
+    throw new Error("Minimize-to-tray did not force tray on and hide its setting");
+  }
 
   await page.locator('[data-theme-value="light"]').click();
   if (await page.locator("html").getAttribute("data-theme") !== "light") throw new Error("Light theme failed");
@@ -276,6 +317,44 @@ async function run() {
   await page.locator(".track-row").first().locator(".row-play").click();
   await page.locator("#open-playback-detail").click();
   if (!await page.locator("#playback-detail").isVisible()) throw new Error("Playback detail is hidden");
+  await page.locator("#lyrics-lines").evaluate((container) => {
+    window.__lyricsFixtureState = {
+      html: container.innerHTML,
+      className: container.className,
+      transform: container.style.transform
+    };
+    container.className = "lyrics-lines";
+    container.style.transform = "translateY(0px)";
+    container.innerHTML = Array.from({ length: 24 }, (_, index) =>
+      `<button class="lyric-line" data-start="${index}">滚动边界测试歌词 ${index + 1}</button>`
+    ).join("");
+  });
+  await page.locator(".lyrics-stage").dispatchEvent("wheel", { deltaY: 100000 });
+  await page.evaluate(() => lyricFollowAnimation?.finished);
+  const lastLyricCenterDelta = await page.locator(".lyrics-stage").evaluate((stage) => {
+    const line = stage.querySelector(".lyric-line:last-child");
+    const stageRect = stage.getBoundingClientRect();
+    const lineRect = line.getBoundingClientRect();
+    return Math.abs(lineRect.top + lineRect.height / 2 - (stageRect.top + stageRect.height / 2));
+  });
+  if (lastLyricCenterDelta > 2) throw new Error(`Last lyric cannot be fully reached: ${lastLyricCenterDelta}`);
+  await page.locator(".lyrics-stage").dispatchEvent("wheel", { deltaY: -100000 });
+  await page.evaluate(() => lyricFollowAnimation?.finished);
+  const firstLyricCenterDelta = await page.locator(".lyrics-stage").evaluate((stage) => {
+    const line = stage.querySelector(".lyric-line:first-child");
+    const stageRect = stage.getBoundingClientRect();
+    const lineRect = line.getBoundingClientRect();
+    return Math.abs(lineRect.top + lineRect.height / 2 - (stageRect.top + stageRect.height / 2));
+  });
+  if (firstLyricCenterDelta > 2) throw new Error(`First lyric cannot be fully reached: ${firstLyricCenterDelta}`);
+  await page.locator("#lyrics-lines .lyric-line:first-child").dblclick();
+  await page.locator("#lyrics-lines").evaluate((container) => {
+    const state = window.__lyricsFixtureState;
+    container.innerHTML = state.html;
+    container.className = state.className;
+    container.style.transform = state.transform;
+    delete window.__lyricsFixtureState;
+  });
   const queueItemCount = await page.locator(".queue-item").count();
   if (queueItemCount !== 20) throw new Error(`Playback queue window mismatch: ${queueItemCount}`);
   const queueRowsOverlap = await page.locator(".queue-item").evaluateAll((items) => items.some((item, index) => {
@@ -288,7 +367,7 @@ async function run() {
     throw new Error("Normal lyric mode did not prefer local lyrics before QQ Music fallback");
   }
   await page.locator('[data-word-lyrics-value="on"]').evaluate((element) => element.click());
-  await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "network" && window.__lyricRequests.at(-1)?.ignoreLocal === true);
+  await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "network" && window.__lyricRequests.at(-1)?.ignoreLocal === true && window.__lyricRequests.at(-1)?.requireWordTiming === true);
   await page.locator('[data-word-lyrics-value="off"]').evaluate((element) => element.click());
   await page.waitForFunction(() => window.__lyricRequests.at(-1)?.mode === "auto" && window.__lyricRequests.at(-1)?.ignoreLocal === false);
   await page.locator("#detail-refresh-lyrics").click();
@@ -393,6 +472,32 @@ async function run() {
   if (inactiveLyricColors.plain !== inactiveLyricColors.karaoke) {
     throw new Error(`Inactive karaoke color changed: ${JSON.stringify(inactiveLyricColors)}`);
   }
+  await page.evaluate(() => {
+    const stage = document.createElement("section");
+    stage.id = "inspection-hover-fixture";
+    stage.className = "lyrics-stage inspecting";
+    stage.innerHTML = '<div class="lyrics-lines"><button class="lyric-line past">上一句歌词</button><button class="lyric-line">鼠标指向的歌词</button><button class="lyric-line active">当前歌词</button></div>';
+    document.body.append(stage);
+  });
+  const inspectionLines = page.locator("#inspection-hover-fixture .lyric-line");
+  await inspectionLines.nth(1).hover();
+  await page.waitForTimeout(180);
+  const inspectionHover = await page.evaluate(() => {
+    const lines = [...document.querySelectorAll("#inspection-hover-fixture .lyric-line")];
+    const hovered = getComputedStyle(lines[1]);
+    const sibling = getComputedStyle(lines[0]);
+    return {
+      hoveredOpacity: Number(hovered.opacity),
+      siblingOpacity: Number(sibling.opacity),
+      background: hovered.backgroundColor,
+      shadow: hovered.boxShadow
+    };
+  });
+  await page.locator("#inspection-hover-fixture").evaluate((element) => element.remove());
+  if (inspectionHover.hoveredOpacity < .99 || inspectionHover.siblingOpacity >= inspectionHover.hoveredOpacity ||
+      inspectionHover.background === "rgba(0, 0, 0, 0)" || inspectionHover.shadow === "none") {
+    throw new Error(`Lyric inspection hover feedback is incomplete: ${JSON.stringify(inspectionHover)}`);
+  }
   const longLyricLayers = await page.evaluate(() => {
     const line = document.createElement("span");
     line.className = "lyric-line active";
@@ -449,6 +554,14 @@ async function run() {
     };
   });
   await lyricPage.goto(pathToFileURL(path.join(root, "src", "lyrics.html")).href);
+  const initialLyricsState = await lyricPage.evaluate(() => ({
+    opacity: getComputedStyle(document.querySelector(".lyrics-island")).opacity,
+    current: document.querySelector("#desktop-lyric").textContent,
+    next: document.querySelector("#desktop-next-lyric").textContent
+  }));
+  if (initialLyricsState.opacity !== "0" || initialLyricsState.current || initialLyricsState.next) {
+    throw new Error(`Desktop lyrics expose startup placeholders: ${JSON.stringify(initialLyricsState)}`);
+  }
   await lyricPage.evaluate(() => window.__lyricsLine({
     current: "这段缘分没有人转身转身",
     next: "下一句歌词",
@@ -456,6 +569,13 @@ async function run() {
     words: [{ start: 0, end: 4, text: "这段缘分没有人转身转身" }]
   }));
   await lyricPage.waitForTimeout(250);
+  const firstLyricsState = await lyricPage.evaluate(() => ({
+    ready: document.body.classList.contains("lyrics-ready"),
+    animationCount: window.__lyricAnimationCount
+  }));
+  if (!firstLyricsState.ready || firstLyricsState.animationCount !== 0) {
+    throw new Error(`Desktop lyrics animate or remain hidden on first render: ${JSON.stringify(firstLyricsState)}`);
+  }
   const lyricLayers = await lyricPage.evaluate(() => {
     const base = document.querySelector(".desktop-karaoke-base").getBoundingClientRect();
     const fill = document.querySelector(".desktop-karaoke-fill").getBoundingClientRect();
@@ -512,6 +632,11 @@ async function run() {
   }
   await lyricPage.screenshot({ path: path.join(artifacts, "desktop-lyrics-karaoke.png"), omitBackground: true });
   await lyricPage.close();
+
+  await require("./playback-experience")(page);
+  await require("./long-list-scroll")(page);
+  await require("./selection-playlists")(page);
+  await require("./navigation-restore")(page);
 
   console.log(
     `UI smoke passed; 1000-track library: ${timings.libraryMs.toFixed(1)}ms; ` +

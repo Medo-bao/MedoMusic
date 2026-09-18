@@ -10,6 +10,7 @@ let activeWords = [];
 let lyricLayoutFrame = null;
 let lastRequestedHeight = 0;
 let lastRequestedWidth = 0;
+let hasRenderedLyrics = false;
 
 function measureTextWidth(element) {
   const style = getComputedStyle(element);
@@ -171,9 +172,11 @@ window.medo.onLyricsWindowLine((payload = {}) => {
     next.classList.toggle("translation-karaoke", translationKaraoke);
     renderKaraokeText(next, nextLine, translationKaraoke);
     updateLyricLayout();
-    animateLyricChange();
+    if (hasRenderedLyrics) animateLyricChange();
   }
   updateWordProgress(payload.position);
+  hasRenderedLyrics = true;
+  document.body.classList.add("lyrics-ready");
 });
 
 window.medo.onLyricsWindowSize((size) => {

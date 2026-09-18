@@ -18,5 +18,7 @@ const gb18030 = Buffer.concat([
   Buffer.from([0xC4, 0xE3, 0xBA, 0xC3, 0xCA, 0xC0, 0xBD, 0xE7])
 ]);
 assert.equal(decodeTextBuffer(gb18030), lyric);
+const largeLyric = Buffer.alloc(2 * 1024 * 1024 + 1, 0x61);
+assert.equal(decodeTextBuffer(largeLyric).length, largeLyric.length);
 
 console.log("Text decoder tests passed");

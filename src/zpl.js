@@ -1,5 +1,5 @@
-const fs = require("node:fs/promises");
 const path = require("node:path");
+const fs = require("node:fs/promises");
 
 function decodePlaylist(buffer) {
   if (buffer[0] === 0xff && buffer[1] === 0xfe) {
@@ -23,17 +23,21 @@ function decodeXml(value) {
 }
 
 function resolvePlaylistPath(source, playlistPath) {
-  const decoded = decodeXml(source.trim());
+  let decoded = decodeXml(source.trim());
   if (/^file:/i.test(decoded)) {
+    let url;
     try {
-      return decodeURIComponent(new URL(decoded).pathname)
+      url = new URL(decoded);
+      decoded = decodeURIComponent(url.pathname)
         .replace(/^\/([A-Za-z]:)/, "$1")
         .replace(/\//g, path.sep);
     } catch {
-      return decoded;
+      throw new Error("invalid-playlist-path");
     }
+    if (url.host && url.hostname.toLowerCase() !== "localhost") throw new Error("remote-playlist-path");
   }
   const normalized = decoded.replace(/[\\/]/g, path.sep);
+  if (/^(?:\\\\|\\\?\\|\\\.\\|\\\?\?\\)/.test(normalized)) throw new Error("remote-playlist-path");
   return path.isAbsolute(normalized)
     ? path.normalize(normalized)
     : path.resolve(path.dirname(playlistPath), normalized);
@@ -48,7 +52,9 @@ async function parseZpl(playlistPath, trackFactory = (filePath) => ({ path: file
   const sources = [];
   const mediaPattern = /<(?:media|ref)\b[^>]*\bsrc\s*=\s*(["'])(.*?)\1[^>]*>/gi;
   let match;
-  while ((match = mediaPattern.exec(text))) sources.push(match[2]);
+  while ((match = mediaPattern.exec(text))) {
+    sources.push(match[2]);
+  }
 
   const tracks = sources.map((source) => {
     const track = trackFactory(resolvePlaylistPath(source, playlistPath));
