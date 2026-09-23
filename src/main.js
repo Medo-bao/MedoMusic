@@ -920,6 +920,18 @@ app.whenReady().then(() => {
     if (!title || !duration) return fallbackResult();
     const cache = await getOnlineLyricsCache();
     let onlineLineFallback = null;
+    let lyricNetworkFailed = false;
+    const lyricFetch = async (...args) => {
+      try {
+        const response = await fetch(...args);
+        if (!response.ok && response.status !== 404) lyricNetworkFailed = true;
+        return response;
+      } catch (error) { lyricNetworkFailed = true; throw error; }
+    };
+    const failedOrFallback = () => {
+      const fallback = fallbackResult();
+      return fallback?.text ? fallback : lyricNetworkFailed ? { text: "", error: "network" } : fallback;
+    };
     try {
       const searchOnlineProviders = async (searchOptions) => {
         let lineFallback = null;
@@ -932,8 +944,8 @@ app.whenReady().then(() => {
           if (!onlineLyrics) {
             try {
               onlineLyrics = onlineProvider === "qq"
-                ? await fetchQqMusicLyrics({ ...searchOptions, requireWordTiming })
-                : await fetchNeteaseLyrics({ ...searchOptions, requireWordTiming });
+                ? await fetchQqMusicLyrics({ ...searchOptions, requireWordTiming }, lyricFetch)
+                : await fetchNeteaseLyrics({ ...searchOptions, requireWordTiming }, lyricFetch);
             } catch {}
           }
           if (!onlineLyrics) continue;
@@ -968,7 +980,7 @@ app.whenReady().then(() => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 5500);
         try {
-          const response = await fetch(url, {
+          const response = await lyricFetch(url, {
             signal: controller.signal,
             headers: { "User-Agent": `MedoMusic/${app.getVersion()} (local Windows music player)` }
           });
@@ -1065,9 +1077,9 @@ app.whenReady().then(() => {
         const chinesePublicLyrics = await searchPublicLyrics(chinesePublicTitles, chineseTitle);
         if (chinesePublicLyrics) return chinesePublicLyrics;
       }
-      return fallbackResult();
+      return failedOrFallback();
     } catch {
-      return onlineLineFallback || fallbackResult();
+      return onlineLineFallback || failedOrFallback();
     }
   });
 

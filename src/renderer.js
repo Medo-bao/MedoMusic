@@ -102,8 +102,25 @@ let lastPreviousRestartAt = 0;
 let lastPreviousRestartTrackId = null;
 let desiredVolume = Number(volume.value);
 let outputAudioContext = null;
-let outputGainNode = null;
-let outputLimiterNode = null;
+let soundEngine = null;
+let soundCompare = false;
+let soundSettings = MedoSound.normalize(loadJson("medo.sound", {preset:"flat"}));
+const soundPresetRecords = loadJson("medo.soundPresets", {});
+const deletedSoundPresets = new Set(loadJson("medo.deletedSoundPresets", []));
+if (deletedSoundPresets.has(soundSettings.preset)) {
+  soundSettings = MedoSound.normalize({...savedSoundPreset("flat"),preset:"flat",enabled:soundSettings.enabled});
+}
+function soundPresetSnapshot(settings) {
+  const { enabled, preset, ...values } = MedoSound.normalize(settings);
+  return JSON.stringify(values);
+}
+function savedSoundPreset(id) {
+  return soundPresetRecords[id]?.settings || (id === "custom" ? loadJson("medo.soundCustom", {}) : MedoSound.presets[id]);
+}
+function saveSoundPresetRecords() {
+  localStorage.setItem("medo.soundPresets", JSON.stringify(soundPresetRecords));
+}
+
 let selectionActionsHideTimer = null;
 let volumeBubbleHideTimer = null;
 let volumePointerActive = false;
@@ -134,20 +151,23 @@ function loadJson(key, fallback) {
   }
 }
 
-function ensureOutputGain() {
+function ensureAudioProcessing() {
   if (!outputAudioContext) {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass) return;
     outputAudioContext = new AudioContextClass({ latencyHint: "playback" });
     const source = outputAudioContext.createMediaElementSource(audio);
-    outputGainNode = outputAudioContext.createGain();
-    outputLimiterNode = outputAudioContext.createDynamicsCompressor();
-    outputLimiterNode.threshold.value = -1;
-    outputLimiterNode.knee.value = 0;
-    outputLimiterNode.ratio.value = 20;
-    outputLimiterNode.attack.value = 0.003;
-    outputLimiterNode.release.value = 0.12;
-    source.connect(outputGainNode).connect(outputLimiterNode).connect(outputAudioContext.destination);
+    source.connect(outputAudioContext.destination);
+    MedoSound.prepare(outputAudioContext).then(() => {
+      source.disconnect(outputAudioContext.destination);
+      soundEngine = MedoSound.create(outputAudioContext, source, outputAudioContext.destination);
+      soundEngine.update(soundSettings, soundCompare, true);
+    }).catch(error => {
+      console.error('Sound processing initialization failed', error);
+      soundSettings.enabled = false;
+      updateSoundSettings();
+      document.querySelector('#sound-status').textContent = '声音增强初始化失败，请重新启动播放器';
+    });
   }
   if (outputAudioContext.state === "suspended") {
     outputAudioContext.resume().catch(() => {});
@@ -158,11 +178,319 @@ function ensureOutputGain() {
 function applyOutputVolume() {
   const normalizedVolume = Math.min(1, Math.max(0, desiredVolume));
   audio.volume = normalizedVolume;
-  if (outputGainNode) {
-    const boostProgress = Math.max(0, (normalizedVolume - 0.7) / 0.3);
-    outputGainNode.gain.value = 1 + boostProgress * 0.8;
-  }
 }
+
+function updateSoundSettings() {
+  soundSettings = MedoSound.normalize(soundSettings);
+  soundEngine?.update(soundSettings, soundCompare);
+  localStorage.setItem("medo.sound", JSON.stringify(soundSettings));
+  document.querySelector("#sound-enabled").checked = soundSettings.enabled;
+  document.querySelector("#sound-quick-enabled").checked = soundSettings.enabled;
+  const presetSelect = document.querySelector("#sound-preset");
+  for (const option of [...presetSelect.options]) {
+    if (option.value !== "flat" && deletedSoundPresets.has(option.value)) option.remove();
+  }
+  for (const [id, record] of Object.entries(soundPresetRecords)) {
+    if (id.startsWith("user-") && ![...presetSelect.options].some(option => option.value === id)) {
+      presetSelect.add(new Option(record.name, id));
+    }
+  }
+  const modified = soundPresetSnapshot(soundSettings) !== soundPresetSnapshot(savedSoundPreset(soundSettings.preset));
+  document.querySelector("#sound-save").disabled = !modified;
+  document.querySelector("#sound-save-as").disabled = !modified;
+  for (const option of presetSelect.options) {
+    const name = soundPresetRecords[option.value]?.name || MedoSound.presets[option.value]?.name || "自定义";
+    option.textContent = name + (option.value === soundSettings.preset && modified ? " *" : "");
+  }
+  presetSelect.value = soundSettings.preset;
+  document.querySelector("#sound-delete").disabled = soundSettings.preset === "flat";
+  const compare = document.querySelector("#sound-compare");
+  compare.disabled = !soundSettings.enabled;
+  compare.setAttribute("aria-pressed", String(soundCompare));
+  compare.textContent = soundCompare ? "返回增强" : "对比原声";
+  for (const key of ["clarity", "ambience", "surround", "dynamics", "bass"]) {
+    const percent = soundSettings[key] / (key === "bass" ? 6 : key === "clarity" ? 4 : 100) * 100;
+    document.querySelector(`#sound-${key}`).value = percent;
+    document.querySelector(`#sound-${key}`).style.setProperty("--fill", `${percent}%`);
+    document.querySelector(`#sound-${key}-value`).textContent = `${Math.round(percent)}%`;
+  }
+  document.querySelectorAll(".sound-band").forEach((label, i) => {
+    label.querySelector("input").value = soundSettings.eq[i];
+    label.querySelector("output").textContent = `${soundSettings.eq[i] > 0 ? "+" : ""}${soundSettings.eq[i]} dB`;
+    const hz = soundSettings.centers[i];
+    label.querySelector(".sound-frequency").textContent = `${hz} Hz`;
+    label.querySelector("input").setAttribute("aria-label", `${hz} Hz 增益`);
+    const knob = label.querySelector(".frequency-knob");
+    const [min, max] = MedoSound.frequencyRanges[i];
+    const center = MedoSound.frequencies[i];
+    const progress = hz <= center
+      ? .5 * (hz - min) / (center - min)
+      : .5 + .5 * (hz - center) / (max - center);
+    knob.setAttribute("aria-valuenow", hz);
+    knob.setAttribute("aria-valuetext", `${hz} Hz`);
+    knob.querySelector(".knob-value").setAttribute("stroke-dasharray", `${progress * (300 / 360 * 100)} 100`);
+    const angle = (120 + progress * 300) * Math.PI / 180;
+    knob.querySelector(".knob-dot").setAttribute("cx", 22 + 17 * Math.cos(angle));
+    knob.querySelector(".knob-dot").setAttribute("cy", 22 + 17 * Math.sin(angle));
+  });
+  document.querySelector("#sound-eq-line").setAttribute("points", soundSettings.eq.map((gain, i) => `${(i + .5) * 100},${90 - gain * 6.75}`).join(" "));
+  document.querySelector("#sound-entry-status").textContent = soundSettings.enabled ? "已启用" : "已关闭";
+  document.querySelector("#sound-settings-entry").dataset.enabled = String(soundSettings.enabled);
+  document.querySelector("#sound-status").textContent = !soundSettings.enabled ? "声音增强已关闭" : soundCompare ? "正在试听原声，音效设置已保留" : "声音增强已启用";
+}
+for (const [i, frequency] of MedoSound.frequencies.entries()) {
+  const label = document.createElement("div");
+  label.className = "sound-band";
+  const text = frequency >= 1000 ? `${frequency / 1000} kHz` : `${frequency} Hz`;
+  label.innerHTML = '<output></output><input type="range" min="-12" max="12" step="0.5"><span class="sound-frequency"></span>';
+  label.querySelector("span").textContent = text;
+  label.querySelector("input").setAttribute("aria-label", `${text} 增益`);
+  label.querySelector("input").addEventListener("input", event => {
+    soundSettings.eq[i] = Number(event.target.value); updateSoundSettings();
+  });
+  label.querySelector("input").addEventListener("dblclick", () => {
+    soundSettings.eq[i] = 0; updateSoundSettings();
+  });
+  const [min, max] = MedoSound.frequencyRanges[i];
+  const knob = document.createElement("button");
+  knob.type = "button";
+  knob.className = "frequency-knob";
+  knob.setAttribute("role", "slider");
+  knob.setAttribute("aria-label", `第 ${i + 1} 段中心频率`);
+  knob.setAttribute("aria-valuemin", min);
+  knob.setAttribute("aria-valuemax", max);
+  knob.dataset.soundHelp = `沿圆环拖动，按住 Shift 精细调节（${min}–${max} Hz），方向键调节，右键或双击恢复 ${frequency} Hz`;
+  knob.style.setProperty("--knob-gradient", `url(#sound-knob-gradient-${i})`);
+  knob.innerHTML = `<svg viewBox="0 0 44 44" aria-hidden="true"><defs><linearGradient id="sound-knob-gradient-${i}" x1="0" y1="0" x2="1" y2="1"><stop class="sound-gradient-start"/><stop class="sound-gradient-end" offset="1"/></linearGradient></defs><path class="knob-center-mark" d="M22 0v3"/><circle class="knob-face" cx="22" cy="22" r="11"/><circle class="knob-track" cx="22" cy="22" r="17" pathLength="100" stroke-dasharray="83.333 16.667" transform="rotate(120 22 22)"/><circle class="knob-value" cx="22" cy="22" r="17" pathLength="100" transform="rotate(120 22 22)"/><circle class="knob-dot" r="3.5"/></svg>`;
+  const setFrequency = value => {
+    soundSettings.centers[i] = Math.max(min, Math.min(max, Math.round(value)));
+    updateSoundSettings();
+  };
+  const frequencyText = label.querySelector(".sound-frequency");
+  frequencyText.tabIndex = 0;
+  frequencyText.setAttribute("role", "button");
+  frequencyText.setAttribute("aria-label", `编辑第 ${i + 1} 段频率`);
+  frequencyText.title = `双击输入频率（${min}–${max} Hz），回车确认，Esc 取消`;
+  const frequencyInput = document.createElement("input");
+  frequencyInput.type = "number";
+  frequencyInput.className = "sound-frequency-input";
+  frequencyInput.min = min;
+  frequencyInput.max = max;
+  frequencyInput.step = 1;
+  frequencyInput.required = true;
+  frequencyInput.hidden = true;
+  frequencyInput.setAttribute("aria-label", `第 ${i + 1} 段频率，${min} 至 ${max} Hz`);
+  frequencyText.after(frequencyInput);
+  const openFrequencyEditor = () => {
+    frequencyInput.value = soundSettings.centers[i];
+    frequencyText.hidden = true;
+    frequencyInput.hidden = false;
+    frequencyInput.focus(); frequencyInput.select();
+  };
+  const closeFrequencyEditor = (save, restoreFocus = false) => {
+    if (frequencyInput.hidden) return;
+    const valid = frequencyInput.validity.valid;
+    if (save && !valid && restoreFocus) { frequencyInput.reportValidity(); return; }
+    frequencyInput.hidden = true;
+    frequencyText.hidden = false;
+    if (save && valid) setFrequency(frequencyInput.valueAsNumber);
+    if (restoreFocus) frequencyText.focus();
+  };
+  frequencyText.addEventListener("dblclick", openFrequencyEditor);
+  frequencyText.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openFrequencyEditor(); }
+  });
+  frequencyInput.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === "Escape") {
+      event.preventDefault(); event.stopPropagation();
+      closeFrequencyEditor(event.key === "Enter", true);
+    }
+  });
+  frequencyInput.addEventListener("blur", () => closeFrequencyEditor(true));
+  let drag = null;
+  const pointerAngle = event => {
+    const rect = knob.getBoundingClientRect();
+    const x = event.clientX - rect.left - rect.width / 2;
+    const y = event.clientY - rect.top - rect.height / 2;
+    return Math.hypot(x,y) < 5 ? null : Math.atan2(y,x) * 180 / Math.PI;
+  };
+  const stopDrag = () => {
+    drag = null;
+    knob.classList.remove("is-dragging");
+    label.classList.remove("is-tuning");
+  };
+  knob.addEventListener("contextmenu", event => { event.preventDefault(); setFrequency(frequency); });
+  knob.addEventListener("pointerdown", event => {
+    if (event.button !== 0) return;
+    event.preventDefault(); knob.focus();
+    const hz = soundSettings.centers[i];
+    const progress = hz <= frequency ? .5 * (hz-min)/(frequency-min) : .5 + .5*(hz-frequency)/(max-frequency);
+    drag = {id:event.pointerId, lastAngle:pointerAngle(event), position:progress*300};
+    knob.setPointerCapture(event.pointerId);
+    knob.classList.add("is-dragging");
+    label.classList.add("is-tuning");
+  });
+  knob.addEventListener("pointermove", event => {
+    if (!drag || drag.id !== event.pointerId) return;
+    const angle = pointerAngle(event);
+    if (angle === null) return;
+    if (drag.lastAngle === null) { drag.lastAngle = angle; return; }
+    const delta = ((angle-drag.lastAngle+540)%360)-180;
+    drag.lastAngle = angle;
+    drag.position = Math.max(0,Math.min(300,drag.position + delta * (event.shiftKey ? .2 : 1)));
+    const position = !event.shiftKey && Math.abs(drag.position-150)<2 ? 150 : drag.position;
+    const progress = position/300;
+    setFrequency(progress <= .5 ? min+progress*2*(frequency-min) : frequency+(progress-.5)*2*(max-frequency));
+  });
+  for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) knob.addEventListener(name, stopDrag);
+  knob.addEventListener("dblclick", () => setFrequency(frequency));
+  knob.addEventListener("keydown", event => {
+    const directions = {ArrowUp:1, ArrowRight:1, ArrowDown:-1, ArrowLeft:-1};
+    if (directions[event.key]) { event.preventDefault(); setFrequency(soundSettings.centers[i] + directions[event.key] * (event.shiftKey ? 10 : 1)); }
+    else if (event.key === "Home" || event.key === "End") { event.preventDefault(); setFrequency(event.key === "Home" ? min : max); }
+  });
+  label.append(knob);
+  document.querySelector("#sound-bands").append(label);
+}
+for (const key of ["clarity", "ambience", "surround", "dynamics", "bass"]) {
+  document.querySelector(`#sound-${key}`).addEventListener("input", event => {
+    soundSettings[key] = Number(event.target.value) / 100 * (key === "bass" ? 6 : key === "clarity" ? 4 : 100); updateSoundSettings();
+  });
+}
+document.querySelectorAll("[data-sound-help]").forEach(element => {
+  element.title = element.dataset.soundHelp;
+});
+document.querySelectorAll("#sound-enabled, #sound-quick-enabled").forEach(input => input.addEventListener("change", event => {
+  soundSettings.enabled = event.target.checked; soundCompare = false; ensureAudioProcessing(); updateSoundSettings();
+}));
+document.querySelector("#sound-compare").addEventListener("click", () => { soundCompare = !soundCompare; updateSoundSettings(); });
+document.querySelector("#sound-preset").addEventListener("change", event => {
+  const preset = event.target.value;
+  const values = savedSoundPreset(preset);
+  soundSettings = MedoSound.normalize({...values, enabled: soundSettings.enabled, preset});
+  soundCompare = false; updateSoundSettings();
+});
+document.querySelector("#sound-save").addEventListener("click", () => {
+  const id = soundSettings.preset;
+  soundPresetRecords[id] = {name:soundPresetRecords[id]?.name || MedoSound.presets[id]?.name || "自定义", settings:MedoSound.normalize(soundSettings)};
+  saveSoundPresetRecords();
+  updateSoundSettings();
+  document.querySelector("#sound-status").textContent = "预设已保存";
+});
+const soundRenameDialog = document.querySelector("#sound-rename-dialog");
+let soundPresetNameMode = "rename";
+function openSoundPresetNameDialog(mode) {
+  soundPresetNameMode = mode;
+  const currentName = soundPresetRecords[soundSettings.preset]?.name || MedoSound.presets[soundSettings.preset]?.name || "自定义";
+  document.querySelector("#sound-rename-form h2").textContent = mode === "create" ? "另存为新预设" : "重命名预设";
+  document.querySelector('#sound-rename-form button[type="submit"]').textContent = mode === "create" ? "保存新预设" : "保存名称";
+  document.querySelector("#sound-preset-name").value = mode === "create" ? `${currentName.slice(0, 34)} 副本` : currentName;
+  document.querySelector("#sound-name-error").textContent = "";
+  soundRenameDialog.showModal();
+  document.querySelector("#sound-preset-name").select();
+}
+document.querySelector("#sound-rename").addEventListener("click", () => openSoundPresetNameDialog("rename"));
+document.querySelector("#sound-save-as").addEventListener("click", () => openSoundPresetNameDialog("create"));
+
+const soundDeleteDialog = document.querySelector("#sound-delete-dialog");
+let soundPresetToDelete = null;
+document.querySelector("#sound-delete").addEventListener("click", () => {
+  if (soundSettings.preset === "flat") return;
+  soundPresetToDelete = soundSettings.preset;
+  const name = soundPresetRecords[soundPresetToDelete]?.name || MedoSound.presets[soundPresetToDelete]?.name || "自定义";
+  document.querySelector("#sound-delete-message").textContent = `删除“${name}”？删除后将切换到默认预设。`;
+  soundDeleteDialog.showModal();
+});
+document.querySelector("#sound-delete-cancel").addEventListener("click", () => soundDeleteDialog.close());
+document.querySelector("#sound-delete-confirm").addEventListener("click", () => {
+  const id = soundPresetToDelete;
+  if (!id || id === "flat") return;
+  delete soundPresetRecords[id];
+  deletedSoundPresets.add(id);
+  if (id === "custom") localStorage.removeItem("medo.soundCustom");
+  saveSoundPresetRecords();
+  localStorage.setItem("medo.deletedSoundPresets", JSON.stringify([...deletedSoundPresets]));
+  soundSettings = MedoSound.normalize({...savedSoundPreset("flat"),preset:"flat",enabled:soundSettings.enabled});
+  soundCompare = false;
+  updateSoundSettings(); soundDeleteDialog.close();
+  document.querySelector("#sound-status").textContent = "预设已删除，已切换到默认预设";
+  document.querySelector("#sound-preset").focus();
+});
+soundDeleteDialog.addEventListener("close", () => { soundPresetToDelete = null; });
+
+const soundPresetMenu = document.querySelector("#sound-preset-menu");
+document.querySelector("#sound-preset").addEventListener("contextmenu", event => {
+  event.preventDefault();
+  const id = event.target.closest("option")?.value || soundSettings.preset;
+  if (id !== soundSettings.preset) {
+    soundSettings = MedoSound.normalize({...savedSoundPreset(id),preset:id,enabled:soundSettings.enabled});
+    soundCompare = false; updateSoundSettings();
+  }
+  soundPresetMenu.querySelector('[data-preset-action="delete"]').disabled = id === "flat";
+  soundPresetMenu.showModal();
+  const bounds = soundPresetMenu.getBoundingClientRect();
+  soundPresetMenu.style.left = `${Math.max(8,Math.min(event.clientX,window.innerWidth-bounds.width-8))}px`;
+  soundPresetMenu.style.top = `${Math.max(8,Math.min(event.clientY,window.innerHeight-bounds.height-8))}px`;
+});
+soundPresetMenu.addEventListener("click", event => {
+  const action = event.target.closest("[data-preset-action]")?.dataset.presetAction;
+  if (!action) {
+    const rect = soundPresetMenu.getBoundingClientRect();
+    if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) soundPresetMenu.close();
+    return;
+  }
+  soundPresetMenu.close();
+  if (action === "rename") openSoundPresetNameDialog("rename");
+  else if (action === "delete") document.querySelector("#sound-delete").click();
+  else if (action === "copy") {
+    const currentName = soundPresetRecords[soundSettings.preset]?.name || MedoSound.presets[soundSettings.preset]?.name || "自定义";
+    const names = new Set([...document.querySelector("#sound-preset").options].map(option => (soundPresetRecords[option.value]?.name || MedoSound.presets[option.value]?.name || "自定义").toLocaleLowerCase()));
+    const baseName = `${currentName.slice(0,30)} 副本`;
+    let name = baseName, number = 2;
+    while (names.has(name.toLocaleLowerCase())) name = `${baseName} ${number++}`;
+    const id = `user-${crypto.randomUUID()}`;
+    soundSettings = MedoSound.normalize({...soundSettings,preset:id});
+    soundPresetRecords[id] = {name,settings:MedoSound.normalize(soundSettings)};
+    saveSoundPresetRecords(); updateSoundSettings();
+    document.querySelector("#sound-status").textContent = `已复制为“${name}”`;
+  }
+});
+soundPresetMenu.addEventListener("keydown", event => {
+  if (!["ArrowDown","ArrowUp","Home","End"].includes(event.key)) return;
+  event.preventDefault();
+  const items = [...soundPresetMenu.querySelectorAll("button:not(:disabled)")];
+  const index = items.indexOf(document.activeElement);
+  const next = event.key === "Home" ? 0 : event.key === "End" ? items.length-1 : (index+(event.key === "ArrowDown" ? 1 : -1)+items.length)%items.length;
+  items[next].focus();
+});
+document.querySelector("#sound-rename-cancel").addEventListener("click", () => soundRenameDialog.close());
+document.querySelector("#sound-rename-form").addEventListener("submit", event => {
+  event.preventDefault();
+  const name = document.querySelector("#sound-preset-name").value.trim();
+  const id = soundPresetNameMode === "create" ? `user-${crypto.randomUUID()}` : soundSettings.preset;
+  const duplicate = [...document.querySelector("#sound-preset").options].some(option => option.value !== id && (soundPresetRecords[option.value]?.name || MedoSound.presets[option.value]?.name || "自定义").toLocaleLowerCase() === name.toLocaleLowerCase());
+  if (!name || duplicate) {
+    document.querySelector("#sound-name-error").textContent = !name ? "请输入预设名称" : "此名称已存在";
+    return;
+  }
+  soundPresetRecords[id] = {name, settings:MedoSound.normalize(soundPresetNameMode === "create" ? {...soundSettings, preset:id} : savedSoundPreset(id))};
+  if (soundPresetNameMode === "create") soundSettings.preset = id;
+  saveSoundPresetRecords(); updateSoundSettings(); soundRenameDialog.close();
+  document.querySelector("#sound-status").textContent = soundPresetNameMode === "create" ? `已另存为“${name}”` : "预设已重命名";
+});
+document.querySelector("#sound-reset").addEventListener("click", () => {
+  soundSettings = MedoSound.normalize({...MedoSound.presets.flat, enabled: soundSettings.enabled, preset:"flat"});
+  soundCompare = false; updateSoundSettings();
+});
+document.querySelector("#open-sound-settings").addEventListener("click", () => document.querySelector("#sound-dialog").showModal());
+document.querySelector("#close-sound-settings").addEventListener("click", () => document.querySelector("#sound-dialog").close());
+document.querySelector("#sound-dialog").addEventListener("close", () => {
+  soundCompare = false; updateSoundSettings(); document.querySelector("#open-sound-settings").focus();
+});
+document.querySelector("#sound-eq-reset").addEventListener("click", () => {
+  soundSettings.eq = Array(10).fill(0); soundSettings.centers = [...MedoSound.frequencies]; updateSoundSettings();
+});
+updateSoundSettings();
 
 function setBoundedCache(cache, key, value, limit = 160) {
   cache.delete(key);
@@ -580,7 +908,7 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
   const requestMode = modeOverride || (wordLyricsEnabled ? "network" : "auto");
   const networkOnlyRequest = wordLyricsEnabled || Boolean(modeOverride);
   const cachedLyrics = lyricsCache.get(track.id);
-  const compatibleCache = cachedLyrics && (!networkOnlyRequest || cachedLyrics.networkOnly === true);
+  const compatibleCache = cachedLyrics && !cachedLyrics.error && (!networkOnlyRequest || cachedLyrics.networkOnly === true);
   const existingRequest = lyricsRequests.get(track.id);
   const compatibleRequest = existingRequest && (!networkOnlyRequest || existingRequest.networkOnly === true);
   if (!force && (compatibleCache || compatibleRequest)) return existingRequest;
@@ -614,12 +942,13 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
         source: result?.source || null,
         confidence: result?.confidence || null,
         match: result?.match || null,
-        networkOnly: networkOnlyRequest
+        networkOnly: networkOnlyRequest,
+        error: result?.error || null
       });
       if (lyricTranslationEnabled) ensureLyricTranslation(track);
     })
     .catch(() => {
-      if (lyricsRequests.get(track.id) === request) setBoundedCache(lyricsCache, track.id, { synced: false, lines: [], networkOnly: networkOnlyRequest });
+      if (lyricsRequests.get(track.id) === request) setBoundedCache(lyricsCache, track.id, { synced: false, lines: [], networkOnly: networkOnlyRequest, error: "network" });
     })
     .finally(() => {
       if (lyricsRequests.get(track.id) !== request) return;
@@ -721,6 +1050,15 @@ function renderLyrics(track) {
   if (!lyrics.lines.length) {
     translationButton.hidden = true;
     container.innerHTML = '<p class="lyrics-empty"><strong>未找到歌词</strong><span>可将同名 .lrc 文件放在歌曲旁边</span></p>';
+    if (lyrics.error) {
+      container.querySelector("strong").textContent = "歌词加载失败";
+      container.querySelector("span").textContent = "网络或歌词服务暂时不可用，请稍后重试。";
+    }
+    const retry = document.createElement("button");
+    retry.className = "secondary-button lyric-retry";
+    retry.textContent = "重新查找";
+    retry.onclick = () => { ensureLyrics(track, true); renderLyrics(track); };
+    container.append(retry);
     window.medo.updateLyricsWindow({
       title: track.title,
       artist: track.artist,
@@ -742,6 +1080,12 @@ function renderLyrics(track) {
   if (lyricTranslationEnabled && translationAvailable && !translations) ensureLyricTranslation(track);
   container.classList.toggle("unsynced", !lyrics.synced);
   container.innerHTML = "";
+  if (wordLyricsEnabled && lyrics.level !== "word") {
+    const note = document.createElement("p");
+    note.className = "lyric-fallback-note";
+    note.textContent = "暂未找到逐字歌词，正在显示普通歌词";
+    container.append(note);
+  }
   lyrics.lines.forEach((line, lineIndex) => {
     const item = document.createElement(lyrics.synced ? "button" : "p");
     item.className = "lyric-line";
@@ -1527,8 +1871,54 @@ function applyViewShellState({ preservePlaybackDetailActive = false } = {}) {
   return { main, settingsOpen, playbackDetailOpen };
 }
 
+const pageScrollPositions = new Map();
+let renderedPageKey = null;
+let renderedSearch = "";
 function render() {
-  const savedScrollTop = document.querySelector("main").scrollTop;
+  const main = document.querySelector("main");
+  const key = JSON.stringify([currentView, currentPlaylist, currentSort, currentCollection]);
+  if (renderedPageKey !== null) pageScrollPositions.set(renderedPageKey, main.scrollTop);
+  const savedScrollTop = query !== renderedSearch ? 0 : (pageScrollPositions.get(key) || 0);
+  renderedPageKey = key;
+  renderedSearch = query;
+  if (!selectedTrackIds.size) multiSelectionMode = false;
+  renderPage(savedScrollTop);
+  main.scrollTop = savedScrollTop;
+}
+
+function renderEmptyState(count) {
+  emptyState.classList.toggle("hidden", count > 0);
+  const searching = Boolean(query) && currentView !== "playlists";
+  const states = {
+    favorites: ["还没有喜欢的歌曲", "点击歌曲旁的爱心，将它收藏到这里。"],
+    recent: ["还没有播放记录", "播放歌曲后，你可以在这里快速找到它。"],
+    now: ["正在播放列表为空", "播放歌曲，或将歌曲添加到正在播放。"],
+    playlists: ["还没有歌单", "创建歌单，或导入已有的播放列表。"]
+  };
+  const [title, detail] = searching ? ["没有匹配的歌曲", "试试其他关键词，或者清空搜索查看全部歌曲。"]
+    : currentPlaylist ? ["歌单尚未添加歌曲", "使用上方的添加歌曲按钮，充实这个歌单。"]
+    : states[currentView] || ["这里还没有音乐", "添加电脑上的歌曲，或者导入已有的播放列表。"];
+  emptyState.querySelector("h2").textContent = title;
+  emptyState.querySelector("p").textContent = detail;
+  emptyState.querySelector("#empty-add").hidden = searching || Boolean(currentPlaylist) || currentView !== "library";
+  emptyState.querySelector("#empty-zpl").hidden = searching || Boolean(currentPlaylist) || !["library", "playlists"].includes(currentView);
+  let clear = emptyState.querySelector(".clear-empty-search");
+  if (!clear) {
+    clear = document.createElement("button");
+    clear.className = "secondary-button clear-empty-search";
+    clear.textContent = "清空搜索";
+    clear.addEventListener("click", () => {
+      clearTimeout(searchTimer);
+      query = "";
+      document.querySelector("#search-input").value = "";
+      render();
+    });
+    emptyState.querySelector("div").append(clear);
+  }
+  clear.hidden = !searching;
+}
+
+function renderPage(savedScrollTop) {
   const { main, settingsOpen, playbackDetailOpen } = applyViewShellState();
   if (playbackDetailOpen) {
     document.querySelector("#back-button").disabled = false;
@@ -1580,7 +1970,7 @@ function render() {
     rootMargin: "240px 0px"
   });
   document.querySelector("#track-count").textContent = `${visible.length} 首歌曲`;
-  emptyState.classList.toggle("hidden", visible.length > 0);
+  renderEmptyState(currentView === "playlists" ? playlists.length : visible.length);
   trackList.innerHTML = "";
   trackList.className = "track-list";
   trackList.style.removeProperty("height");
@@ -1657,6 +2047,8 @@ function render() {
     playCount.hidden = currentView !== "recent";
     playCount.textContent = playCount.hidden ? "" : `${mergedPlayCount(track)} 次播放`;
     let longPressTimer = null;
+    let beginTrackDrag = null;
+    let dragReadyAt = 0;
     let pointerId = null;
     let dropTargetId = null;
     let dragPreview = null;
@@ -1704,12 +2096,13 @@ function render() {
       syncSelectionState();
     });
     row.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0 || event.target.closest("button")) return;
+      if (event.button !== 0 || event.target.closest("button, .row-leading")) return;
       clearTimeout(longPressTimer);
       pointerId = event.pointerId;
       dragPointerX = event.clientX;
       dragPointerY = event.clientY;
-      longPressTimer = setTimeout(() => {
+      dragReadyAt = performance.now() + 220;
+      beginTrackDrag = () => {
         draggedTrackId = track.id;
         row.classList.add("drag-ready");
         row.setPointerCapture(pointerId);
@@ -1729,9 +2122,18 @@ function render() {
         document.body.appendChild(dragPreview);
         document.body.classList.add("track-drag-active");
         navigator.vibrate?.(20);
-      }, 320);
+      };
     });
     row.addEventListener("pointermove", (event) => {
+      if (!(event.buttons & 1)) {
+        beginTrackDrag = null;
+        return;
+      }
+      if (event.pointerId === pointerId && draggedTrackId !== track.id && beginTrackDrag &&
+          Math.hypot(event.clientX - dragPointerX, event.clientY - dragPointerY) >= 6) {
+        if (performance.now() >= dragReadyAt) beginTrackDrag();
+        else beginTrackDrag = null;
+      }
       if (draggedTrackId !== track.id || event.pointerId !== pointerId) return;
       event.preventDefault();
       dragPointerX = event.clientX;
@@ -1774,6 +2176,7 @@ function render() {
     ["pointerup", "pointercancel"].forEach((eventName) => {
       row.addEventListener(eventName, (event) => {
         clearTimeout(longPressTimer);
+        beginTrackDrag = null;
         if (draggedTrackId === track.id) {
           suppressRowClickUntil = Date.now() + 350;
           if (eventName === "pointerup" && dropTargetId && dropTargetId !== track.id) {
@@ -1801,6 +2204,7 @@ function render() {
       const targetName = await window.medo.chooseTargetPlaylist(playlists.map((playlist) => playlist.name));
       const target = playlists.find((playlist) => playlist.name === targetName);
       if (!target) return;
+      showActionFeedback(target.trackIds?.includes(track.id) ? "歌曲已在该歌单中" : `已添加到“${target.name}”`);
       target.trackIds = [...new Set([...(target.trackIds || []), track.id])];
       track.playlists = [...new Set([...(track.playlists || []), target.name])];
       persist();
@@ -1825,16 +2229,19 @@ function render() {
         playbackQueueIds = playbackQueueIds.filter((id) => id !== track.id);
         const queueIndex = Math.max(-1, playbackQueueIds.indexOf(tracks[currentIndex]?.id));
         playbackQueueIds.splice(queueIndex + 1, 0, track.id);
+        showActionFeedback("已安排为下一首播放");
         schedulePersist();
         if (queueWasEmpty) playTrack(actualIndex, true);
       } else if (result.action === "add-to-queue") {
         const queueWasEmpty = !playbackQueueIds.some((id) => tracks.some((item) => item.id === id));
         playbackQueueIds = playbackQueueIds.filter((id) => id !== track.id);
         playbackQueueIds.push(track.id);
+        showActionFeedback("已添加到正在播放");
         schedulePersist();
         if (queueWasEmpty) playTrack(actualIndex, true);
       } else if (result.action === "add-to-playlist") {
         const playlist = playlists.find((item) => item.name === result.playlist);
+        if (playlist) showActionFeedback(playlist.trackIds?.includes(track.id) ? "歌曲已在该歌单中" : `已添加到“${playlist.name}”`);
         if (playlist && !playlist.trackIds?.includes(track.id)) {
           playlist.trackIds = [...(playlist.trackIds || []), track.id];
           track.playlists = [...new Set([...(track.playlists || []), playlist.name])];
@@ -2094,7 +2501,12 @@ async function chooseFolder() {
 }
 
 async function chooseFiles() {
-  mergeTracks(await window.medo.chooseFiles());
+  const incoming = await window.medo.chooseFiles();
+  if (!incoming.length) return;
+  const previousCount = tracks.length;
+  mergeTracks(incoming);
+  const added = tracks.length - previousCount;
+  showActionFeedback(`已导入 ${added} 首歌曲，重复跳过 ${incoming.length - added} 首`);
 }
 
 function reconcileCurrentTrack(currentId) {
@@ -2240,24 +2652,71 @@ async function choosePlaylist() {
 
 async function addSongsToCurrentPlaylist() {
   if (!currentPlaylist) return;
+  const targetName = currentPlaylist;
   const newTracks = await window.medo.chooseFiles();
   if (!newTracks.length) return;
-  const playlist = playlists.find((item) => item.name === currentPlaylist);
+  const playlist = playlists.find((item) => item.name === targetName);
   if (!playlist) return;
+  const previousIds = new Set(playlist.trackIds || []);
   newTracks.forEach((track) => {
-    track.playlists = [...new Set([...(track.playlists || []), currentPlaylist])];
+    track.playlists = [...new Set([...(track.playlists || []), targetName])];
   });
   mergeTracks(newTracks);
   playlist.trackIds = [...(playlist.trackIds || []), ...newTracks.map((track) => track.id)]
     .filter((id, index, values) => values.indexOf(id) === index);
+  const added = playlist.trackIds.filter(id => !previousIds.has(id)).length;
+  showActionFeedback(`已添加 ${added} 首到“${playlist.name}”，重复跳过 ${newTracks.length - added} 首`);
   persist();
   render();
 }
 
-function renamePlaylist(playlistName) {
+function confirmPlaylistAction(title, message) {
+  return new Promise(resolve => {
+    const dialog = document.createElement("dialog");
+    dialog.className = "track-info-dialog playlist-name-dialog";
+    dialog.setAttribute("aria-labelledby", "playlist-confirm-title");
+    dialog.innerHTML = '<form method="dialog"><header><h2 id="playlist-confirm-title"></h2></header><p></p><footer><button value="cancel" autofocus>取消</button><button class="primary" value="confirm">确认</button></footer></form>';
+    dialog.querySelector("h2").textContent = title;
+    dialog.querySelector("p").textContent = message;
+    dialog.addEventListener("close", () => { const confirmed = dialog.returnValue === "confirm"; dialog.remove(); resolve(confirmed); }, {once:true});
+    document.body.append(dialog); dialog.showModal();
+  });
+}
+
+function requestPlaylistName(title, initialName, excluded = null, allowExisting = false) {
+  return new Promise(resolve => {
+    const dialog = document.createElement("dialog");
+    dialog.className = "track-info-dialog playlist-name-dialog";
+    dialog.setAttribute("aria-labelledby", "playlist-name-title");
+    dialog.innerHTML = '<form><header><h2 id="playlist-name-title"></h2></header><label>歌单名称<input maxlength="100" aria-describedby="playlist-name-error" required></label><p id="playlist-name-error" role="alert"></p><footer><button type="button">取消</button><button class="primary" type="submit">保存</button></footer></form>';
+    dialog.querySelector("h2").textContent = title;
+    const input = dialog.querySelector("input");
+    input.value = initialName;
+    let value = null;
+    dialog.querySelector('button[type="button"]').onclick = () => dialog.close();
+    dialog.querySelector("form").onsubmit = event => {
+      event.preventDefault();
+      const name = input.value.trim();
+      const duplicate = !allowExisting && playlists.some(p => p !== excluded && p.name.toLocaleLowerCase() === name.toLocaleLowerCase());
+      const error = !name ? "请输入歌单名称" : duplicate ? "已有同名歌单，请换一个名称" : "";
+      dialog.querySelector("#playlist-name-error").textContent = error;
+      input.setAttribute("aria-invalid", String(Boolean(error)));
+      if (error) { input.focus(); return; }
+      value = name;
+      dialog.close();
+    };
+    dialog.addEventListener("close", () => { dialog.remove(); resolve(value); }, {once:true});
+    document.body.append(dialog);
+    dialog.showModal();
+    input.focus(); input.select();
+  });
+}
+
+async function renamePlaylist(playlistName) {
   const playlist = playlists.find((item) => item.name === playlistName);
   if (!playlist) return;
-  const nextName = window.prompt("输入新的播放列表名称", playlist.name)?.trim();
+  const nextName = await requestPlaylistName("重命名歌单", playlist.name, playlist);
+  if (!playlists.includes(playlist)) return;
   if (!nextName || nextName === playlist.name) return;
   const previousName = playlist.name;
   playlist.name = nextName;
@@ -2274,9 +2733,10 @@ function renameCurrentPlaylist() {
   renamePlaylist(currentPlaylist);
 }
 
-function deletePlaylist(playlistName) {
+async function deletePlaylist(playlistName) {
   const playlist = playlists.find((item) => item.name === playlistName);
-  if (!playlist || !window.confirm(`从 MedoMusic 中删除播放列表“${playlist.name}”？`)) return;
+  if (!playlist || !await confirmPlaylistAction("删除歌单", `删除“${playlist.name}”？本地歌曲文件不会删除。`)) return;
+  if (!playlists.includes(playlist)) return;
   const deletedName = playlist.name;
   playlists = playlists.filter((item) => item !== playlist);
   tracks.forEach((track) => {
@@ -2295,23 +2755,28 @@ function deleteCurrentPlaylist() {
   deletePlaylist(currentPlaylist);
 }
 
-function savePlaybackQueueAsPlaylist() {
+async function savePlaybackQueueAsPlaylist() {
   const date = new Date();
   const defaultName = `播放列表${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
-  const name = window.prompt("输入播放列表名称", defaultName)?.trim();
-  if (!name) return;
+
   const queueIds = playbackQueueIds.filter((id) => tracks.some((track) => track.id === id));
   if (!queueIds.length) {
-    window.alert("当前播放列表为空");
+    showActionFeedback("当前播放列表为空");
     return;
   }
-  const existing = playlists.find((playlist) => playlist.name === name);
+  const name = await requestPlaylistName("保存为歌单", defaultName, null, true);
+  if (!name) return;
+  const existing = playlists.find(playlist => playlist.name.toLocaleLowerCase() === name.toLocaleLowerCase());
   if (existing) {
-    if (!window.confirm(`播放列表“${name}”已存在，是否替换？`)) return;
+    if (!await confirmPlaylistAction("替换歌单", `“${existing.name}”已存在，是否用当前队列替换？`)) return;
+    if (!playlists.includes(existing)) return;
     existing.trackIds = [...queueIds];
-  } else {
-    playlists.push({ name, path: null, trackIds: [...queueIds] });
-  }
+    tracks.forEach(track => {
+      track.playlists = (track.playlists || []).filter(value => value !== existing.name);
+    });
+    existing.name = name;
+  } else playlists.push({ name, path: null, trackIds: [...queueIds] });
+  showActionFeedback(`已保存 ${queueIds.length} 首到“${name}”`);
   tracks.forEach((track) => {
     if (!queueIds.includes(track.id)) return;
     track.playlists = [...new Set([...(track.playlists || []), name])];
@@ -2374,6 +2839,30 @@ async function initializeDefaultLibrary() {
   }
 }
 
+function showActionFeedback(message, undo = null) {
+  let toast = document.querySelector("#action-feedback");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "action-feedback";
+    toast.className = "action-feedback";
+    toast.setAttribute("role", "status");
+    document.body.append(toast);
+  }
+  clearTimeout(showActionFeedback.timer);
+  toast.replaceChildren();
+  const label = document.createElement("span");
+  label.textContent = message;
+  toast.append(label);
+  if (undo) {
+    const button = document.createElement("button");
+    button.textContent = "撤销";
+    button.addEventListener("click", undo, { once: true });
+    toast.append(button);
+  }
+  toast.hidden = false;
+  showActionFeedback.timer = setTimeout(() => { toast.hidden = true; }, undo ? 8000 : 3500);
+}
+
 function showPlaybackError(track, message = "播放失败，已自动跳到下一首") {
   let toast = document.querySelector("#playback-error-toast");
   if (!toast) {
@@ -2410,7 +2899,7 @@ function recoverPlaybackFailure(track) {
 
 async function playTrack(index, preserveQueue = false, preservePreviousNavigation = false) {
   if (!tracks[index]) return;
-  ensureOutputGain();
+  ensureAudioProcessing();
   if (!preserveQueue) playbackFailedIds.clear();
   const generation = ++playbackGeneration;
   if (!preserveQueue && currentView !== "now") {
@@ -2816,7 +3305,7 @@ function togglePlayback() {
       playTrack(tracks.findIndex((track) => track.id === first.id), true);
     }
   } else if (audio.paused) {
-    ensureOutputGain();
+    ensureAudioProcessing();
     applyOutputVolume();
     const generation = playbackGeneration;
     const track = tracks[currentIndex];
@@ -3155,7 +3644,7 @@ async function handleMyFireflyCommand(payload = {}) {
         if (!Number.isFinite(nextVolume)) throw new Error("invalid-volume");
         desiredVolume = Math.min(1, Math.max(0, nextVolume));
         volume.value = desiredVolume;
-        ensureOutputGain();
+        ensureAudioProcessing();
         applyOutputVolume();
         updateVolumeDisplay();
       } else if (action === "set-muted") {
@@ -3537,6 +4026,7 @@ document.querySelector("#play-selected").addEventListener("click", () => {
   if (!selected.length) return;
   playbackQueueIds = selected.map((track) => track.id);
   selectedTrackIds.clear();
+  multiSelectionMode = false;
   playTrack(tracks.findIndex((track) => track.id === playbackQueueIds[0]), true);
   render();
 });
@@ -3547,6 +4037,7 @@ function queueSelectedTracks(playNext) {
   if (currentId && !remaining.includes(currentId)) remaining.unshift(currentId);
   const insertAt = playNext ? Math.max(0, remaining.indexOf(currentId) + 1) : remaining.length;
   remaining.splice(insertAt, 0, ...selected);
+  showActionFeedback(selected.length ? `已将 ${selected.length} 首歌曲${playNext ? "安排为下一首播放" : "添加到正在播放"}` : "所选歌曲已是当前播放歌曲");
   playbackQueueIds = remaining;
   selectedTrackIds.clear();
   multiSelectionMode = false;
@@ -3570,7 +4061,9 @@ document.querySelector("#queue-selected").addEventListener("click", () => {
     button.textContent = playlist.name;
     button.addEventListener("click", () => {
       if (!playlists.includes(playlist)) return;
+      const addedCount = selected.filter(track => !(playlist.trackIds || []).includes(track.id)).length;
       playlist.trackIds = [...new Set([...(playlist.trackIds || []), ...selected.map(track => track.id)])];
+      showActionFeedback(addedCount ? `已添加 ${addedCount} 首到“${playlist.name}”` : "所选歌曲已在该歌单中");
       selected.forEach(track => { track.playlists = [...new Set([...(track.playlists || []), playlist.name])]; });
       selectedTrackIds.clear();
       multiSelectionMode = false;
@@ -3588,6 +4081,20 @@ document.querySelector("#remove-selected").addEventListener("click", () => {
   const playlist = playlists.find(item => item.name === currentPlaylist);
   if (!playlist) return;
   const ids = new Set(visibleTracks().filter(track => selectedTrackIds.has(track.id)).map(track => track.id));
+  const originalOrder = [...(playlist.trackIds || [])];
+  showActionFeedback(`已从列表中移除 ${ids.size} 首歌曲`, () => {
+    if (!playlists.includes(playlist)) return;
+    const existing = new Set(playlist.trackIds || []);
+    const valid = new Set(tracks.map(track => track.id));
+    playlist.trackIds = [...originalOrder.filter(id => valid.has(id) && (ids.has(id) || existing.has(id))),
+      ...(playlist.trackIds || []).filter(id => !originalOrder.includes(id))];
+    tracks.forEach(track => {
+      if (ids.has(track.id)) track.playlists = [...new Set([...(track.playlists || []), playlist.name])];
+    });
+    persist();
+    render();
+    showActionFeedback("已恢复移除的歌曲");
+  });
   playlist.trackIds = (playlist.trackIds || []).filter(id => !ids.has(id));
   tracks.forEach(track => {
     if (ids.has(track.id)) track.playlists = (track.playlists || []).filter(name => name !== playlist.name);
@@ -4125,7 +4632,7 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
     desiredVolume = Math.round(Math.max(0, Math.min(1, desiredVolume + volumeOffset)) * 100) / 100;
     volume.value = desiredVolume;
-    ensureOutputGain();
+    ensureAudioProcessing();
     applyOutputVolume();
     updateVolumeDisplay();
     showVolumeBubble(true);
@@ -4223,7 +4730,7 @@ progress.addEventListener("input", () => {
 });
 volume.addEventListener("input", () => {
   desiredVolume = Number(volume.value);
-  ensureOutputGain();
+  ensureAudioProcessing();
   applyOutputVolume();
   updateVolumeDisplay();
   showVolumeBubble(!volumePointerActive);
@@ -4379,7 +4886,7 @@ window.medo.onTrayCommand(({ command, value }) => {
   if (command === "volume-up" || command === "volume-down") {
     desiredVolume = Math.max(0, Math.min(1, desiredVolume + (command === "volume-up" ? 0.05 : -0.05)));
     volume.value = desiredVolume;
-    ensureOutputGain();
+    ensureAudioProcessing();
     applyOutputVolume();
     updateVolumeDisplay();
   } else if (command === "toggle-mute") {

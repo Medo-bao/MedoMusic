@@ -11,6 +11,8 @@ async function run() {
   fs.mkdirSync(artifacts, { recursive: true });
   const browser = await chromium.launch({
     headless: true,
+    // Match Electron's local file origin so AudioWorklet blob modules can load.
+    args: ['--allow-file-access-from-files'],
     executablePath: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
   });
   const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
@@ -637,6 +639,9 @@ async function run() {
   await require("./long-list-scroll")(page);
   await require("./selection-playlists")(page);
   await require("./navigation-restore")(page);
+  await require("./page-experience")(page);
+  await require("./interaction-upgrades")(page);
+  await require("./sound-enhancement")(page);
 
   console.log(
     `UI smoke passed; 1000-track library: ${timings.libraryMs.toFixed(1)}ms; ` +

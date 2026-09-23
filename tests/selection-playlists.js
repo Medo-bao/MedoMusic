@@ -35,6 +35,7 @@ module.exports = async function checkSelectionPlaylists(page) {
   await page.evaluate(() => { selectedTrackIds = new Set(['a','b']); multiSelectionMode = true; render(); });
   await page.locator('#append-selected').click();
   assert.deepEqual(await page.evaluate(() => playbackQueueIds), ['c','a','b']);
+  assert.match(await page.locator('#action-feedback').textContent(), /2 首歌曲.*添加到正在播放/);
   await page.evaluate(() => {playbackQueueIds = ['a','c','b']; selectedTrackIds = new Set(['a','c']); multiSelectionMode = true; render();});
   await page.locator('#next-selected').click();
   assert.deepEqual(await page.evaluate(() => playbackQueueIds), ['c','a','b'], 'Insert next while retaining the current song');
@@ -45,6 +46,7 @@ module.exports = async function checkSelectionPlaylists(page) {
   await page.locator('#queue-selected').click();
   await page.locator('.playlist-picker-options button').filter({hasText:'Target <safe>'}).click();
   assert.deepEqual(await page.evaluate(() => playlists[1].trackIds),['a','b']);
+  assert.match(await page.locator('#action-feedback').textContent(), /已添加 1 首/);
   assert.deepEqual(await page.evaluate(() => playbackQueueIds),['c']);
   await page.evaluate(() => { selectedTrackIds = new Set(['a','b']); multiSelectionMode = true; render(); });
   await page.setViewportSize({width:960,height:720});
@@ -55,6 +57,12 @@ module.exports = async function checkSelectionPlaylists(page) {
   await page.locator('#remove-selected').click();
   assert.deepEqual(await page.evaluate(() => ({source:playlists[0].trackIds,target:playlists[1].trackIds,tracks:tracks.length,queue:playbackQueueIds,playing:tracks[currentIndex].id})),
     {source:['c'],target:['a','b'],tracks:3,queue:['c'],playing:'c'});
+  await page.locator('#action-feedback button').click();
+  assert.deepEqual(await page.evaluate(() => playlists[0].trackIds), ['a','b','c'], 'Undo restores original playlist order');
+  assert.equal(await page.evaluate(() => tracks[0].playlists.includes('Source')), true);
+  await page.evaluate(() => { selectedTrackIds = new Set(['a','b']); multiSelectionMode = true; render(); });
+  await page.locator('#play-selected').click();
+  assert.equal(await page.evaluate(() => multiSelectionMode), false, 'Playing selection exits multi-select');
   await page.evaluate(() => {currentPlaylist = null; selectedTrackIds = new Set(['a']); render();});
   assert.equal(await page.locator('#remove-selected').isVisible(),false);
   await page.setViewportSize({width:1280,height:820});

@@ -172,6 +172,13 @@
           <div id="folder-list" class="folder-list"></div>
         </div>
 
+        <div class="settings-group sound-entry" id="sound-settings-entry">
+          <button id="open-sound-settings" class="sound-entry-open" aria-haspopup="dialog">
+          <span class="sound-entry-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 4v6m0 4v6M12 4v10m0 4v2M19 4v2m0 4v10"/><path d="M2.5 10h5v4h-5zm7 4h5v4h-5zm7-8h5v4h-5z"/></svg></span><span><strong>声音增强<span class="sound-experimental">（实验功能）</span></strong></span><svg class="sound-entry-chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m8 5 5 5-5 5"/></svg>
+          </button>
+          <label class="sound-switch sound-entry-toggle"><span id="sound-entry-status">已关闭</span><input id="sound-quick-enabled" type="checkbox" aria-label="启用声音增强"></label>
+        </div>
+
         <div class="settings-group">
           <div class="settings-heading">
             <div>
@@ -411,7 +418,39 @@
     </footer>
   </div>
   <audio id="audio"></audio>
+  <dialog id="sound-dialog" class="sound-dialog" aria-labelledby="sound-heading">
+    <header class="sound-dialog-header"><div><h2 id="sound-heading">声音增强</h2></div><button id="close-sound-settings" aria-label="关闭声音增强">✕</button></header>
+    <div class="sound-dialog-body">
+      <div class="sound-toolbar">
+        <label class="sound-switch"><input id="sound-enabled" type="checkbox">启用声音增强</label>
+        <button id="sound-compare" aria-pressed="false" disabled>对比原声</button>
+        <button id="sound-reset">重置全部</button>
+      </div>
+      <div class="sound-preset-row"><label for="sound-preset">预设</label><select id="sound-preset"><option value="flat">默认</option><option value="recommended">作者推荐</option><option value="custom">自定义</option></select><button id="sound-save">保存</button><button id="sound-save-as">另存为新预设</button><button id="sound-rename">重命名</button><button id="sound-delete">删除</button></div>
+      <div class="sound-workspace">
+      <section class="sound-card" aria-labelledby="effects-heading"><div class="sound-card-heading"><h3 id="effects-heading">音效处理</h3></div>
+        <div class="sound-controls">
+          <label data-sound-help="提升声音清晰度"><span>清晰度</span><output id="sound-clarity-value"></output><input id="sound-clarity" type="range" min="0" max="100" step="1" value="0"></label>
+          <label data-sound-help="模拟空间混响"><span>环境</span><output id="sound-ambience-value"></output><input id="sound-ambience" type="range" min="0" max="100" step="1" value="0"></label>
+          <label data-sound-help="拓宽声场"><span>环绕</span><output id="sound-surround-value"></output><input id="sound-surround" type="range" min="0" max="100" step="1" value="0"></label>
+          <label data-sound-help="提升响度"><span>动态</span><output id="sound-dynamics-value"></output><input id="sound-dynamics" type="range" min="0" max="100" step="1" value="0"></label>
+          <label data-sound-help="增强低频"><span>低音</span><output id="sound-bass-value"></output><input id="sound-bass" type="range" min="0" max="100" step="1" value="0"></label>
+        </div>
+      </section>
+      <section class="sound-card sound-equalizer" aria-labelledby="equalizer-heading">
+        <div class="sound-card-heading"><h3 id="equalizer-heading">均衡器</h3><button id="sound-eq-reset" aria-label="重置均衡器">↻ 重置</button></div>
+        <div class="sound-eq-scroll"><div class="sound-eq-plot"><svg class="sound-eq-curve" viewBox="0 0 1000 180" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id="sound-eq-gradient" gradientUnits="userSpaceOnUse" x1="0" y1="90" x2="1000" y2="90"><stop class="sound-gradient-start"/><stop class="sound-gradient-end" offset="1"/></linearGradient></defs><path class="sound-zero" d="M0 90H1000"/><polyline id="sound-eq-line"/></svg><div id="sound-bands" class="sound-bands"></div></div></div>
+      </section>
+      </div>
+      <footer class="sound-footer"><p id="sound-status" class="sound-status" role="status"></p></footer>
+    </div>
+  </dialog>
   <script src="./lyrics-timing.js"></script>
+  <dialog id="sound-rename-dialog"><form id="sound-rename-form"><h2>重命名预设</h2><label for="sound-preset-name">预设名称</label><input id="sound-preset-name" maxlength="40" required><p id="sound-name-error" role="alert"></p><div><button type="button" id="sound-rename-cancel">取消</button><button type="submit">保存名称</button></div></form></dialog>
+  <dialog id="sound-delete-dialog" aria-labelledby="sound-delete-heading"><h2 id="sound-delete-heading">删除预设</h2><p id="sound-delete-message"></p><div><button id="sound-delete-cancel" autofocus>取消</button><button id="sound-delete-confirm">删除</button></div></dialog>
+  <dialog id="sound-preset-menu" aria-label="预设操作"><div role="menu"><button role="menuitem" data-preset-action="rename">重命名</button><button role="menuitem" data-preset-action="copy">复制</button><button role="menuitem" data-preset-action="delete">删除</button></div></dialog>
+  <script src="./fxsound-core.js"></script>
+  <script src="./sound-enhancement.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>
