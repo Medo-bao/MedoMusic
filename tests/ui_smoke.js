@@ -354,20 +354,28 @@ async function run() {
   await page.evaluate(() => lyricFollowAnimation?.finished);
   const lastLyricCenterDelta = await page.locator(".lyrics-stage").evaluate((stage) => {
     const line = stage.querySelector(".lyric-line:last-child");
-    const stageRect = stage.querySelector('.lyrics-viewport').getBoundingClientRect();
     const lineRect = line.getBoundingClientRect();
-    return Math.abs(lineRect.top + lineRect.height / 2 - (stageRect.top + stageRect.height / 2));
+    return Math.abs(lineRect.top + lineRect.height / 2 - window.innerHeight / 2);
   });
   if (lastLyricCenterDelta > 2) throw new Error(`Last lyric cannot be fully reached: ${lastLyricCenterDelta}`);
   await page.locator(".lyrics-stage").dispatchEvent("wheel", { deltaY: -100000 });
   await page.evaluate(() => lyricFollowAnimation?.finished);
   const firstLyricCenterDelta = await page.locator(".lyrics-stage").evaluate((stage) => {
     const line = stage.querySelector(".lyric-line:first-child");
-    const stageRect = stage.querySelector('.lyrics-viewport').getBoundingClientRect();
     const lineRect = line.getBoundingClientRect();
-    return Math.abs(lineRect.top + lineRect.height / 2 - (stageRect.top + stageRect.height / 2));
+    return Math.abs(lineRect.top + lineRect.height / 2 - window.innerHeight / 2);
   });
   if (firstLyricCenterDelta > 2) throw new Error(`First lyric cannot be fully reached: ${firstLyricCenterDelta}`);
+  const lyricTestViewport = page.viewportSize();
+  for (const viewport of [{width:960,height:720},{width:1280,height:820},{width:1920,height:1080}]) {
+    await page.setViewportSize(viewport);
+    const anchorDelta = await page.locator('#lyrics-lines').evaluate(lines => {
+      const viewportTop = lines.parentElement.getBoundingClientRect().top;
+      return Math.abs(viewportTop + parseFloat(getComputedStyle(lines).top) - window.innerHeight / 2);
+    });
+    if (anchorDelta > 1) throw new Error(`Lyric anchor is not window-centered at ${viewport.width}x${viewport.height}: ${anchorDelta}`);
+  }
+  await page.setViewportSize(lyricTestViewport);
   await page.locator("#lyrics-lines .lyric-line:first-child").dblclick();
   await page.locator("#lyrics-lines").evaluate((container) => {
     const state = window.__lyricsFixtureState;
