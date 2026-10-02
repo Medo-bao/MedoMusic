@@ -16,6 +16,7 @@
     })();
   </script>
   <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./appearance.css">
 </head>
 <body>
   <div class="window-titlebar" aria-label="窗口控制">
@@ -67,7 +68,6 @@
         <button id="playlist-art" class="playlist-art" title="更换封面" aria-label="更换封面">
           <img id="playlist-cover" alt="">
           <span class="glyph">&#xE8FD;</span>
-          <i></i><i></i><i></i>
           <span class="cover-edit glyph">&#xE70F;</span>
         </button>
         <div class="playlist-overview">
@@ -341,10 +341,14 @@
       </section>
 
       <section id="playback-detail" class="playback-detail" aria-label="歌曲播放详情">
-        <div id="detail-backdrop" class="detail-backdrop"></div>
+        <div id="detail-backdrop" class="detail-backdrop" aria-hidden="true">
+          <div class="detail-artwork-base"></div>
+          <div class="detail-artwork-incoming"></div>
+        </div>
+        <div class="detail-atmosphere" aria-hidden="true"><div class="detail-glow"></div><div class="detail-glow detail-glow-secondary"></div></div>
         <div class="detail-layout">
           <article class="detail-track">
-            <img id="detail-cover" src="../Groove/Assets/MissingAlbumArt.jpg" alt="">
+            <div class="detail-cover-frame"><img id="detail-cover" src="../Groove/Assets/MissingAlbumArt.jpg" alt=""></div>
             <h1 id="detail-title">未选择歌曲</h1>
             <strong id="detail-artist">未知艺术家</strong>
             <span id="detail-album">未知专辑</span>
@@ -449,8 +453,10 @@
   <dialog id="sound-rename-dialog"><form id="sound-rename-form"><h2>重命名预设</h2><label for="sound-preset-name">预设名称</label><input id="sound-preset-name" maxlength="40" required><p id="sound-name-error" role="alert"></p><div><button type="button" id="sound-rename-cancel">取消</button><button type="submit">保存名称</button></div></form></dialog>
   <dialog id="sound-delete-dialog" aria-labelledby="sound-delete-heading"><h2 id="sound-delete-heading">删除预设</h2><p id="sound-delete-message"></p><div><button id="sound-delete-cancel" autofocus>取消</button><button id="sound-delete-confirm">删除</button></div></dialog>
   <dialog id="sound-preset-menu" aria-label="预设操作"><div role="menu"><button role="menuitem" data-preset-action="rename">重命名</button><button role="menuitem" data-preset-action="copy">复制</button><button role="menuitem" data-preset-action="delete">删除</button></div></dialog>
+  <script src="./glass-menus.js"></script>
   <script src="./fxsound-core.js"></script>
   <script src="./sound-enhancement.js"></script>
+  <script src="./appearance.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

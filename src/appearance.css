@@ -1,0 +1,362 @@
+/* Shared material and lighting. Layout and interaction geometry remain in styles.css. */
+@property --cover-tone { syntax: '<color>'; inherits: true; initial-value: #7a89a8; }
+:root {
+  --background: #12151c;
+  --sidebar: rgba(23, 27, 37, .78);
+  --text: #f0f3fa;
+  --secondary: #a8b2c5;
+  --tertiary: #7e8a9e;
+  --ambient-fallback: #7a89a8;
+  --glass-panel: rgba(27, 32, 44, .78);
+  --solid-panel: #202633;
+  --glass-edge: rgba(227, 237, 255, .14);
+  --glass-highlight: rgba(241, 246, 255, .17);
+  --glass-shadow: rgba(3, 8, 20, .24);
+  --detail-base: #141a24;
+  --detail-reading: rgba(15, 20, 30, .82);
+  --detail-edge: rgba(15, 20, 30, .56);
+  --detail-text: #f2f5fb;
+  --art-opacity: .40;
+  --glow-opacity: .24;
+  --material-theme: color-mix(in srgb, var(--accent) 65%, var(--accent-secondary));
+  --material-base: color-mix(in srgb, #171d29 88%, var(--material-theme));
+  --module-edge: color-mix(in srgb, var(--accent) 30%, transparent);
+  --list-reading: color-mix(in srgb, var(--material-base) 48%, transparent);
+  --player-material: linear-gradient(110deg, color-mix(in srgb, var(--accent) 10%, transparent), transparent 50%, color-mix(in srgb, var(--accent-secondary) 5%, transparent)), var(--glass-panel);
+  --player-blur: blur(20px) saturate(1.15);
+  --settings-material: color-mix(in srgb, var(--material-base) 64%, transparent);
+  --popup-material: color-mix(in srgb, var(--material-base) 88%, transparent);
+  --control-material: color-mix(in srgb, var(--material-base) 40%, transparent);
+  --sidebar-material: var(--sidebar);
+  --accent-ink: var(--accent-readable, #879eff);
+  --accent-ink-secondary: var(--accent-secondary-readable, #df85f4);
+  --accent-text-gradient: linear-gradient(105deg, var(--accent-ink), var(--accent-ink-secondary));
+  transition: --cover-tone 440ms ease;
+}
+[data-theme="light"] {
+  color-scheme: light;
+  --background: #f1f3f8;
+  --sidebar: rgba(245, 247, 252, .76);
+  --text: #222c3d;
+  --secondary: #546279;
+  --tertiary: #6c7a90;
+  --ambient-fallback: #8d9bb7;
+  --glass-panel: rgba(250, 252, 255, .82);
+  --solid-panel: #f8faff;
+  --glass-edge: rgba(79, 97, 128, .16);
+  --glass-highlight: rgba(255, 255, 255, .92);
+  --glass-shadow: rgba(55, 71, 104, .10);
+  --detail-base: #edf1f7;
+  --detail-reading: rgba(242, 245, 250, .86);
+  --detail-edge: rgba(237, 242, 250, .64);
+  --detail-text: #233047;
+  --art-opacity: .40;
+  --glow-opacity: .16;
+  --material-base: color-mix(in srgb, #f8faff 91%, var(--material-theme));
+  --module-edge: color-mix(in srgb, var(--accent) 20%, transparent);
+  --list-reading: color-mix(in srgb, var(--material-base) 48%, transparent);
+}
+body {
+  background:
+    radial-gradient(ellipse at 82% -18%, color-mix(in srgb, var(--accent) 17%, transparent), transparent 55%),
+    radial-gradient(ellipse at 2% 80%, color-mix(in srgb, var(--accent-secondary) 9%, transparent), transparent 48%),
+    var(--background);
+}
+body.settings-view {
+  background: radial-gradient(ellipse at 88% 0%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 56%), var(--background);
+}
+/* Native DWM blur supplies the actual desktop behind this tint. Do not use
+   window opacity: the artwork, labels and controls must remain fully opaque. */
+:root[data-window-material="blur"], :root[data-window-material="acrylic"] {
+  --desktop-tint: color-mix(in srgb, var(--material-base) 82%, transparent);
+  --desktop-sidebar: color-mix(in srgb, var(--material-base) 40%, transparent);
+  --sidebar-material: var(--desktop-sidebar);
+  --desktop-player: color-mix(in srgb, var(--material-base) 68%, transparent);
+  --player-material: var(--desktop-player);
+  --player-blur: none;
+  --secondary: #c1cadb;
+  --tertiary: #b0bcd0;
+}
+:root[data-theme="light"][data-window-material="blur"],
+:root[data-theme="light"][data-window-material="acrylic"] {
+  --secondary: #42516a;
+  --tertiary: #46556d;
+}
+:root:is([data-window-material="blur"], [data-window-material="acrylic"]) body {
+  background: linear-gradient(125deg, color-mix(in srgb, var(--accent) 5%, transparent), transparent 55%, color-mix(in srgb, var(--accent-secondary) 4%, transparent)), var(--desktop-tint);
+}
+:root:is([data-window-material="blur"], [data-window-material="acrylic"]) .sidebar {
+  box-shadow: none;
+  backdrop-filter: none;
+}
+.sidebar, [data-theme="light"] .sidebar {
+  margin-top: 38px;
+  padding-top: 0;
+  isolation: isolate;
+  background: transparent;
+  border-right-color: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+.sidebar-resizer { top: 0; }
+.side-search { background: color-mix(in srgb, var(--text) 5%, transparent); border: 1px solid var(--glass-edge); }
+.nav-item.active, .playlist-item.active { background: color-mix(in srgb, var(--accent) 10%, var(--surface)); color: var(--accent-ink); }
+.nav-item.active > span, .playlist-title.active > span,
+.playlist-item.active .playlist-item-name, .playlist-item.active .playlist-count,
+.sort-value, .playlist-kicker, #recent-play-count-sort.active {
+  background: var(--accent-text-gradient); background-clip: text; -webkit-background-clip: text;
+}
+:root .window-titlebar, :root .playback-detail-active .window-titlebar {
+  border-bottom: 0;
+  background: transparent;
+  backdrop-filter: none;
+  box-shadow: none;
+}
+.sidebar::before {
+  content: ''; position: absolute; inset: 0; z-index: -1;
+  pointer-events: none;
+  background: var(--sidebar-material);
+  mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent), linear-gradient(to bottom, transparent, #000 24px);
+  mask-composite: intersect;
+}
+.pivot-bar { border-bottom-color: transparent; margin-bottom: 12px; }
+.playlist-hero {
+  background: linear-gradient(125deg, color-mix(in srgb, var(--accent) 9%, transparent), color-mix(in srgb, var(--accent-secondary) 3%, transparent) 75%), color-mix(in srgb, var(--material-base) 70%, transparent);
+  border-color: var(--module-edge);
+  box-shadow: 0 6px 18px var(--glass-shadow);
+}
+.track-list.virtual-track-list:has(> .track-row) {
+  background: var(--list-reading);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px var(--module-edge);
+}
+.track-row .row-artist, .track-row .row-album-name { font-size: 13px; }
+.row-cover { border-radius: 6px; box-shadow: 0 2px 6px var(--glass-shadow); }
+.track-row:not(.active):not(.selected):hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.collection-cover, .playlist-overview-cover, .playlist-art {
+  box-shadow: 0 12px 26px var(--glass-shadow), 0 0 0 1px var(--glass-edge);
+}
+.collection-card:hover .collection-cover, .playlist-overview-item:hover .playlist-overview-cover {
+  transform: translateY(-3px);
+  box-shadow: 0 16px 32px color-mix(in srgb, var(--accent) 18%, transparent), 0 0 0 1px var(--glass-highlight);
+}
+.track-row.active:not(.selected) {
+  background: linear-gradient(105deg, color-mix(in srgb, var(--accent) 9%, transparent), color-mix(in srgb, var(--accent-secondary) 3%, transparent));
+  border-color: transparent;
+}
+.track-row.active:not(.selected):hover { background-color: var(--surface); }
+.track-row.selected {
+  background: linear-gradient(105deg, color-mix(in srgb, var(--accent) 15%, var(--background)), color-mix(in srgb, var(--accent-secondary) 9%, var(--background)));
+  border-color: color-mix(in srgb, var(--accent-ink) 52%, var(--line));
+  box-shadow: none;
+}
+.track-row.active .track-title, .track-row.active.selected .track-title { background: var(--accent-text-gradient); background-clip: text; -webkit-background-clip: text; }
+.track-row.active .row-artist, .track-row.active .row-album-name,
+.track-row.active.selected .row-artist, .track-row.active.selected .row-album-name { color: var(--secondary); background: none; }
+.now-playing-indicator i { animation-play-state: paused; }
+body.is-playing:not(.background-mode) .track-row.active .now-playing-indicator i { animation-play-state: running; }
+
+/* Both pages share the body's desktop material; do not tint it a second time.
+   Hide the sidebar itself so its contents cannot show through the lyrics. */
+.playback-detail { isolation: isolate; background: transparent; }
+.playback-detail-active .sidebar { visibility: hidden; pointer-events: none; }
+.playback-detail-exiting .sidebar { visibility: visible; pointer-events: auto; }
+.detail-backdrop, .detail-atmosphere { display: none; }
+.detail-backdrop, [data-theme="light"] .detail-backdrop, .background-mode .detail-backdrop {
+  z-index: -3; inset: -40px; opacity: 1; filter: none; transform: none; will-change: auto;
+}
+.detail-artwork-base, .detail-artwork-incoming {
+  position: absolute; inset: 0; background-size: cover; background-position: center;
+  filter: blur(54px) saturate(.9); transform: scale(1.16);
+}
+.detail-artwork-incoming { opacity: 0; }
+.detail-backdrop { mask-image: linear-gradient(rgba(0,0,0,var(--art-opacity)), rgba(0,0,0,var(--art-opacity))); }
+.detail-atmosphere { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: -2; }
+.detail-glow {
+  position: absolute; width: 76%; height: 100%; left: -25%; top: -20%; opacity: var(--glow-opacity);
+  background: radial-gradient(ellipse, var(--cover-tone), transparent 67%);
+  animation: atmosphere-drift 26s ease-in-out infinite alternate; animation-play-state: paused;
+}
+.detail-glow-secondary {
+  left: auto; right: -30%; top: 15%; width: 80%; height: 115%;
+  background: radial-gradient(ellipse, color-mix(in srgb, var(--cover-tone) 76%, var(--detail-base)), transparent 66%);
+  animation-duration: 23s; animation-delay: -9s; animation-direction: alternate-reverse;
+}
+body.playback-detail-active.is-playing:not(.background-mode):not(.playback-detail-exiting) .detail-glow { animation-play-state: running; }
+@keyframes atmosphere-drift { from { transform: translate3d(-2%, -2%, 0) scale(.97); } to { transform: translate3d(8%, 5%, 0) scale(1.06); } }
+.playback-detail::after, [data-theme="light"] .playback-detail::after {
+  content: none;
+}
+.detail-cover-frame { position: relative; isolation: isolate; width: min(100%, 270px, calc(100vh - 280px)); margin-inline: auto; }
+.detail-cover-frame::before {
+  content: ''; position: absolute; inset: 7%; z-index: -1; border-radius: 24px;
+  background: var(--cover-tone); filter: blur(34px); opacity: .32; transform: translateY(14px) scale(1.12);
+}
+.detail-track .detail-cover-frame img {
+  display: block; width: 100%; border-radius: 14px;
+  box-shadow: 0 18px 40px var(--glass-shadow);
+}
+.detail-track h1 {
+  font-size: clamp(23px, 2.3vw, 31px); line-height: 1.25;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  white-space: normal; overflow-wrap: anywhere; text-wrap: balance;
+}
+.detail-layout, [data-theme="light"] .detail-layout { color: var(--detail-text); }
+.detail-track span, .detail-track small, [data-theme="light"] .detail-track span, [data-theme="light"] .detail-track small { color: var(--secondary); }
+.detail-queue, [data-theme="light"] .detail-queue {
+  background: color-mix(in srgb, var(--material-base) 70%, transparent);
+  border-color: var(--module-edge); box-shadow: 0 10px 28px var(--glass-shadow);
+  backdrop-filter: blur(16px) saturate(1.1);
+}
+.detail-queue header, [data-theme="light"] .detail-queue header { border-bottom-color: var(--glass-edge); }
+.detail-queue-title > span:first-child, #detail-queue-count { white-space: nowrap; }
+.queue-item.active { background: linear-gradient(110deg, color-mix(in srgb, var(--cover-tone) 20%, transparent), color-mix(in srgb, var(--cover-tone) 5%, transparent)); }
+.queue-item.active::before { background: var(--accent-ink); }
+/* Lyric colors and karaoke gradients inherit the original theme rules in styles.css. */
+
+/* The control console keeps the same material when entering or leaving lyrics. */
+.player, [data-theme="light"] .player, .playback-detail-active .player, [data-theme="light"] .playback-detail-active .player {
+  background: var(--player-material);
+  border-top-color: var(--module-edge);
+  box-shadow: 0 -8px 24px var(--glass-shadow);
+  backdrop-filter: var(--player-blur);
+}
+.controls .play-button, .playback-detail-active .controls .play-button {
+  color: var(--on-accent, white); background: var(--accent-gradient);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.4), 0 5px 16px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+.controls .play-button:hover, .playback-detail-active .controls .play-button:hover {
+  color: var(--on-accent, white);
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.5), 0 7px 22px color-mix(in srgb, var(--accent) 33%, transparent);
+}
+[data-theme="light"] .playback-detail-active .player .controls .play-button { color: var(--on-accent, white); }
+#desktop-lyrics-button.active, body.playback-detail-active #toggle-detail-track.active,
+body.playback-detail-active #toggle-detail-queue.active, body.playback-detail-active #lyric-translation-toggle.active {
+  color: white !important; background: var(--accent-gradient);
+  background-clip: border-box; -webkit-background-clip: border-box;
+  box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+.controls .play-mode-button.active, [data-theme="light"] .playback-detail-active .player .play-mode-button.active {
+  color: var(--accent-ink); background: color-mix(in srgb, var(--accent) 10%, transparent); background-clip: border-box; -webkit-background-clip: border-box;
+}
+#progress, #volume {
+  background: linear-gradient(to right, var(--accent) 0%, color-mix(in srgb, var(--accent) 46%, var(--accent-secondary)) var(--range-mid, 0%), var(--accent-secondary) var(--range-progress, 0%), var(--line-strong) var(--range-progress, 0%), var(--line-strong) 100%);
+}
+#progress::-webkit-slider-thumb, #volume::-webkit-slider-thumb { box-shadow: 0 2px 9px color-mix(in srgb, var(--accent) 28%, transparent); }
+#progress:hover::-webkit-slider-thumb, #volume:hover::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--accent-soft), 0 3px 12px color-mix(in srgb, var(--accent) 30%, transparent); }
+.primary-button, .primary-button:hover, .playlist-actions .playlist-primary, .playlist-actions .playlist-primary:hover { color: var(--on-accent, white); }
+.playlist-actions .playlist-primary:disabled { opacity: .4; cursor: default; box-shadow: none; transform: none; background: var(--accent-gradient); }
+
+/* Settings and secondary surfaces share the theme glass, with denser popup tint. */
+.settings-group {
+  background: var(--settings-material);
+  border-color: var(--module-edge); box-shadow: 0 6px 18px var(--glass-shadow);
+}
+.settings-heading p { max-width: 65ch; line-height: 1.6; }
+.settings-action:hover { transform: translateY(-1px); box-shadow: 0 8px 20px var(--glass-shadow); }
+.settings-action:hover { background: color-mix(in srgb, var(--accent) 8%, var(--control-material)); }
+.sound-entry.settings-group:hover, .sound-entry.settings-group:active {
+  background: linear-gradient(color-mix(in srgb, var(--accent) 5%, transparent), color-mix(in srgb, var(--accent) 5%, transparent)), var(--settings-material);
+  border-color: var(--module-edge); box-shadow: 0 6px 18px var(--glass-shadow);
+}
+.theme-option.active { color: var(--accent-ink); }
+.display-option.active, .close-behavior-option.active, .tray-option.active, .lyric-translation-option.active,
+.word-lyrics-option.active, .desktop-lyric-lock-option.active, .global-play-shortcut-option.active,
+.global-desktop-lyrics-shortcut-option.active, .global-lyrics-shortcut-option.active, .global-previous-shortcut-option.active,
+.global-next-shortcut-option.active {
+  color: var(--on-accent, white); box-shadow: 0 5px 16px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.sound-dialog, [data-theme="light"] .sound-dialog {
+  --sound-panel: var(--popup-material);
+  --sound-card: var(--control-material);
+  --sound-track: color-mix(in srgb, var(--solid-panel) 74%, var(--text));
+  background: var(--sound-panel); border-color: var(--glass-edge);
+  box-shadow: inset 0 1px var(--glass-highlight), 0 24px 70px var(--glass-shadow);
+}
+.sound-dialog #sound-preset, .sound-dialog option { color: var(--text); background: var(--sound-card); }
+.sound-dialog button:disabled { opacity: .55; }
+.sound-band output, .sound-band span { color: var(--secondary); font-variant-numeric: tabular-nums; }
+.action-feedback, .context-menu, .playlist-picker, .playlist-name-dialog, .track-info-dialog, .track-properties-dialog {
+  color: var(--text); background: var(--solid-panel); border-color: var(--glass-edge);
+  box-shadow: inset 0 1px var(--glass-highlight), 0 16px 40px var(--glass-shadow);
+}
+.selection-actions { background: var(--glass-panel); border-color: var(--glass-edge); box-shadow: inset 0 1px var(--glass-highlight), 0 12px 32px var(--glass-shadow); }
+button:focus-visible, input:not([type="range"]):focus-visible, select:focus-visible {
+  background-color: color-mix(in srgb, var(--accent) 15%, var(--solid-panel));
+  box-shadow: inset 0 0 0 1px var(--accent-ink);
+}
+.sound-dialog .frequency-knob:focus-visible { background: transparent; box-shadow: none; }
+.sound-dialog .frequency-knob:focus-visible .knob-track { stroke: var(--accent-ink); }
+
+/* Use one material for menus, property/edit dialogs and sound subdialogs. */
+:root :is(dialog, .action-feedback, .selection-actions, .glass-menu, #sound-rename-dialog, #sound-delete-dialog, #sound-preset-menu) {
+  color: var(--text); background: var(--popup-material); border-color: var(--module-edge);
+  box-shadow: 0 12px 36px var(--glass-shadow);
+  backdrop-filter: blur(18px) saturate(1.1);
+}
+:root dialog::backdrop { background: rgba(9, 14, 25, .18); backdrop-filter: blur(3px); }
+:root #sound-preset-menu::backdrop { background: transparent; backdrop-filter: none; }
+.settings-action, .folder-row, .theme-option:not(.active), .display-option:not(.active),
+.sound-card, .sound-dialog select, :root .track-info-dialog input,
+:root .track-info-dialog footer button:not(.primary), #sound-preset-name {
+  background: var(--control-material); border-color: var(--glass-edge);
+}
+.glass-menu {
+  position: fixed; inset: auto; margin: 0; padding: 6px;
+  width: max-content; min-width: 172px; max-width: min(320px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px); overflow: auto;
+  border: 1px solid; border-radius: 12px; font: inherit;
+}
+.glass-menu::backdrop { background: transparent; }
+.glass-menu button {
+  position: relative; display: block; width: 100%; padding: 9px 32px 9px 14px;
+  border: 0; border-radius: 7px; color: inherit; background: transparent;
+  font: inherit; text-align: left; overflow-wrap: anywhere; cursor: default;
+  transform: none; transition: background-color 100ms ease;
+}
+.glass-menu button:is(:hover, :focus-visible), .glass-menu button[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--accent) 14%, transparent); outline: none; box-shadow: none;
+}
+.glass-menu button:disabled { opacity: .42; background: transparent; }
+.glass-menu button[aria-haspopup]::after { content: '›'; position: absolute; right: 12px; top: 6px; font-size: 20px; }
+.glass-menu button.checked::after { content: '✓'; position: absolute; right: 10px; color: var(--accent-ink); }
+.glass-menu [role="separator"] { height: 1px; margin: 5px 7px; background: var(--glass-edge); }
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  :root { --settings-material: var(--solid-panel); --popup-material: var(--solid-panel); --control-material: var(--surface); }
+  :root :is(dialog, .action-feedback, .selection-actions, .glass-menu, #sound-rename-dialog, #sound-delete-dialog, #sound-preset-menu) { backdrop-filter: none; }
+}
+
+@media (max-width: 1050px) {
+  .player, .playback-detail-active .player { grid-template-columns: minmax(170px, 1fr) minmax(300px, 1.35fr) minmax(200px, 1fr); padding-inline: 18px; }
+  .detail-track strong { font-size: 16px; }
+  .detail-track span { font-size: 14px; }
+  .detail-queue header { padding-inline: 10px; }
+  .detail-queue header .detail-queue-title { gap: 5px; }
+  .detail-queue header .detail-queue-meta { gap: 2px; }
+  .detail-queue-title > span:first-child { font-size: 14px; }
+  #detail-refresh-lyrics, #detail-clear-queue { width: 25px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { transition: none; }
+  .detail-glow, body.playback-detail-active.is-playing .detail-glow { animation: none; }
+  .now-playing-indicator i { animation: none; }
+  .collection-card:hover .collection-cover, .playlist-overview-item:hover .playlist-overview-cover { transform: none; }
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root:is([data-window-material="blur"], [data-window-material="acrylic"]) body { background: var(--background); }
+  .sidebar, [data-theme="light"] .sidebar, .player, [data-theme="light"] .player,
+  .playback-detail-active .player, [data-theme="light"] .playback-detail-active .player,
+  .detail-queue, [data-theme="light"] .detail-queue, .selection-actions { background: var(--solid-panel); backdrop-filter: none; }
+  .detail-backdrop, .detail-atmosphere { display: none; }
+  .playback-detail::after, [data-theme="light"] .playback-detail::after { background: var(--detail-base); }
+}
+@media (prefers-contrast: more) {
+  :root:is([data-window-material="blur"], [data-window-material="acrylic"]) body { background: var(--background); }
+  :root { --secondary: #d5deec; --glass-edge: #8794a8; }
+  [data-theme="light"] { --secondary: #374359; --glass-edge: #637189; }
+  .sidebar, [data-theme="light"] .sidebar, .player, [data-theme="light"] .player,
+  .playback-detail-active .player, [data-theme="light"] .playback-detail-active .player,
+  .detail-queue, [data-theme="light"] .detail-queue { background: var(--solid-panel); backdrop-filter: none; border-color: var(--glass-edge); }
+  .detail-atmosphere { display: none; }
+  .lyric-line, [data-theme="light"] .lyric-line { color: var(--detail-text); opacity: 1; }
+}

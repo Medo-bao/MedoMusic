@@ -12,6 +12,7 @@ const { fetchNeteaseLyrics } = require("./netease-eapi");
 const { fetchQqMusicLyrics } = require("./qq-music");
 const { resolveOnlineLyricProviders, selectLocalLyrics, removeLiveQualifier, removeEnglishSuffixFromChineseTitle } = require("./lyrics-source-priority");
 const { startMyFireflyExtension } = require("./myfirefly-extension");
+const { attachWindowMaterial } = require("./window-material");
 
 const WINDOWS_APP_USER_MODEL_ID = "com.medomusic.desktop";
 const WINDOWS_TRAY_GUID = "8c33d388-8b65-4e7c-a54d-1af447cd8bfa";
@@ -337,12 +338,20 @@ function createWindow() {
   });
 
   mainWindow = window;
+  window.desktopMaterial = attachWindowMaterial(window, nativeTheme);
   const sendMaximizedState = () => {
     if (!window.isDestroyed()) window.webContents.send("window:maximized", window.isMaximized());
   };
   window.on("maximize", sendMaximizedState);
   window.on("unmaximize", sendMaximizedState);
   window.webContents.on("did-finish-load", sendMaximizedState);
+  // backgroundThrottling is disabled for desktop lyrics, so Chromium's page
+  // visibility alone cannot describe a minimized/hidden native window.
+  const sendWindowVisibility = () => {
+    if (!window.isDestroyed()) window.webContents.send("window:visibility", window.isVisible() && !window.isMinimized());
+  };
+  for (const event of ["show", "hide", "minimize", "restore"]) window.on(event, sendWindowVisibility);
+  window.webContents.on("did-finish-load", sendWindowVisibility);
   window.loadFile(path.join(__dirname, "index.html"));
   window.once("ready-to-show", () => {
     if (!window.isDestroyed()) window.show();
@@ -854,8 +863,10 @@ app.whenReady().then(() => {
 
   ipcMain.on("theme:set-titlebar", (_event, theme) => {
     nativeTheme.themeSource = ["system", "light", "dark"].includes(theme) ? theme : "system";
+    mainWindow?.desktopMaterial?.update();
     _event.sender.send("theme:resolved", nativeTheme.shouldUseDarkColors ? "dark" : "light");
   });
+  ipcMain.handle("window:get-material", (event) => BrowserWindow.fromWebContents(event.sender)?.desktopMaterial?.get() || "none");
 
   ipcMain.on("window:minimize", (event) => {
     const window = BrowserWindow.fromWebContents(event.sender);

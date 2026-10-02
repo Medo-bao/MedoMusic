@@ -15,6 +15,7 @@ async function run() {
     args: ['--allow-file-access-from-files'],
     executablePath: "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
   });
+  try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 820 } });
   const errors = [];
   page.on("console", (message) => {
@@ -96,6 +97,7 @@ async function run() {
       resetLyricsWindowPosition: () => {},
       resolveMediaSource: async () => "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=",
       setLyricsWindowSize: () => {},
+      onWindowVisibility: (callback) => { window.__windowVisibility = callback; return () => {}; },
       setTrayMuted: () => {},
       showPlaylistMenu: async () => null,
       showTrackMenu: async () => null,
@@ -155,8 +157,25 @@ async function run() {
   }
 
   const navigationStarted = Date.now();
-  await page.goto(pathToFileURL(path.join(root, "src", "index.html")).href);
+  await page.goto(pathToFileURL(path.join(process.env.MEDO_BENCHMARK_ROOT || root, "src", "index.html")).href);
   await page.waitForFunction(() => typeof window.__setMaximized === "function");
+  if (process.env.MEDO_BENCHMARK_ONLY === "1") {
+    await require("./appearance-performance")(page);
+    return;
+  }
+  if (process.env.MEDO_MENUS_ONLY === "1") {
+    page.on("pageerror", error => console.error(error));
+    await require("./glass-menus")(page);
+    if (errors.length) throw new Error(errors.join(" | "));
+    return;
+  }
+  if (process.env.MEDO_APPEARANCE_ONLY === "1") {
+    await require("./appearance-visual")(page);
+    await require("./glass-menus")(page);
+    if (errors.length) throw new Error(`Appearance browser errors: ${errors.join(" | ")}`);
+    await browser.close();
+    return;
+  }
   await page.evaluate(() => window.__setMaximized(true));
   assert.equal(await page.locator("#window-maximize").getAttribute("aria-label"), "还原");
   assert.equal(await page.locator("#window-maximize").evaluate((button) => button.classList.contains("is-maximized")), true);
@@ -335,7 +354,7 @@ async function run() {
   await page.evaluate(() => lyricFollowAnimation?.finished);
   const lastLyricCenterDelta = await page.locator(".lyrics-stage").evaluate((stage) => {
     const line = stage.querySelector(".lyric-line:last-child");
-    const stageRect = stage.getBoundingClientRect();
+    const stageRect = stage.querySelector('.lyrics-viewport').getBoundingClientRect();
     const lineRect = line.getBoundingClientRect();
     return Math.abs(lineRect.top + lineRect.height / 2 - (stageRect.top + stageRect.height / 2));
   });
@@ -344,7 +363,7 @@ async function run() {
   await page.evaluate(() => lyricFollowAnimation?.finished);
   const firstLyricCenterDelta = await page.locator(".lyrics-stage").evaluate((stage) => {
     const line = stage.querySelector(".lyric-line:first-child");
-    const stageRect = stage.getBoundingClientRect();
+    const stageRect = stage.querySelector('.lyrics-viewport').getBoundingClientRect();
     const lineRect = line.getBoundingClientRect();
     return Math.abs(lineRect.top + lineRect.height / 2 - (stageRect.top + stageRect.height / 2));
   });
@@ -642,12 +661,17 @@ async function run() {
   await require("./page-experience")(page);
   await require("./interaction-upgrades")(page);
   await require("./sound-enhancement")(page);
+  await require("./appearance-visual")(page);
+  await require("./glass-menus")(page);
 
+  if (errors.length) throw new Error(`Browser errors: ${errors.join(" | ")}`);
   console.log(
     `UI smoke passed; 1000-track library: ${timings.libraryMs.toFixed(1)}ms; ` +
     `settings entry: ${timings.settingsMs.toFixed(1)}ms`
   );
-  await browser.close();
+  } finally {
+    await browser.close();
+  }
 }
 
 run().catch((error) => {

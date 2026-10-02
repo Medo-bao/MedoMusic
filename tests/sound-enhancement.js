@@ -285,7 +285,7 @@ module.exports = async function(page) {
   assert.equal(await page.locator('#sound-delete').isDisabled(),true);
   assert.equal(await page.locator(`#sound-preset option[value="${newId}"]`).count(),0);
   await page.locator('#sound-preset').click();
-  await page.locator('#sound-preset option[value="recommended"]').click({button:'right'});
+  await page.getByRole('menuitemradio', {name:'作者推荐', exact:true}).click({button:'right'});
   await page.locator('#sound-preset-menu').waitFor({state:'visible'});
   await page.locator('[data-preset-action="copy"]').click();
   const copiedId = await page.locator('#sound-preset').inputValue();

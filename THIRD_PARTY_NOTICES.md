@@ -1,5 +1,11 @@
 # Third-party notices
 
+## Koffi
+
+Windows 10 desktop glass uses [Koffi](https://koffi.dev/) 3.3.2 to call the
+Windows composition API from the main process. Koffi is MIT licensed;
+the license is included in `src/licenses/Koffi-MIT.txt`.
+
 ## FxSound algorithm port
 
 `src/fxsound-core.js` is derived from FxSound LLC's 2025 sources, pinned to

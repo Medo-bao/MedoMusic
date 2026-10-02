@@ -159,6 +159,14 @@ module.exports = async function checkPlaybackExperience(page) {
     return masks;
   });
   assert.ok(restoreMask.every(mask => mask === "none"), "Return button must remain outside the changing lyric mask");
+  const restoreLayout = await page.locator('#restore-lyric-follow').evaluate(button => {
+    const bounds = button.getBoundingClientRect();
+    const viewport = document.querySelector('.lyrics-viewport').getBoundingClientRect();
+    const stage = button.parentElement.getBoundingClientRect();
+    return { gap: bounds.top - viewport.bottom, bottomSpace: stage.bottom - bounds.bottom };
+  });
+  assert.ok(restoreLayout.gap >= 4 && restoreLayout.bottomSpace >= 4,
+    'Return button occupies its own space below the clipped lyric viewport');
   await page.locator('#restore-lyric-follow').click();
 
   const motion = await page.evaluate(async () => {

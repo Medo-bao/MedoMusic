@@ -10,6 +10,7 @@ const missingArt = "../Groove/Assets/MissingAlbumArt.jpg";
 const { completeWordTimings, resolveYrcWordStart } = window.MedoLyricsTiming;
 
 function updatePlayButtonState(playing) {
+  document.body.classList.toggle("is-playing", playing);
   const action = playing ? "暂停" : "播放";
   playButton.innerHTML = playing ? "&#xE769;" : "&#xE768;";
   playButton.title = action;
@@ -93,6 +94,7 @@ let desktopLyricsLocked = false;
 const INITIAL_TRACK_RENDER_LIMIT = 48;
 let disposeTrackWindow = () => {};
 let backgroundMode = document.hidden;
+let nativeWindowVisible = true;
 let lastBackgroundUiUpdate = 0;
 let lastMediaSessionUpdate = 0;
 let playbackGeneration = 0;
@@ -138,7 +140,10 @@ let shuffleRemainingIds = [];
 let shuffleHistoryIds = [];
 let shuffleHistoryIndex = -1;
 let shuffleQueueSignature = "";
-const coverColorCache = new Map();
+const coverAtmosphere = window.MedoAppearance.create({
+  getCurrentCover: () => tracks[currentIndex]?.cover || missingArt,
+  missingArt
+});
 const favoriteMetadataPrimed = new Set();
 const restoredPlaybackState = loadJson("medo.playbackState", {});
 let lastPlaybackStateSave = 0;
@@ -619,6 +624,7 @@ function applyTheme(nextTheme) {
     : theme;
   document.documentElement.dataset.theme = resolvedTheme;
   document.documentElement.dataset.themePreference = theme;
+  updateThemeInkColors();
   window.medo.setTitleBarTheme(theme);
   document.querySelectorAll(".theme-option").forEach((button) => {
     const active = button.dataset.themeValue === theme;
@@ -635,16 +641,43 @@ function applyTheme(nextTheme) {
   }
 }
 
+function updateThemeInkColors() {
+  const root = document.documentElement;
+  const light = root.dataset.theme === "light";
+  const channels = (hex) => hex.slice(1).match(/../g).map(value => parseInt(value, 16));
+  const luminance = (rgb) => rgb.reduce((sum, value, index) => {
+    const channel = value / 255;
+    return sum + (channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4) * [.2126, .7152, .0722][index];
+  }, 0);
+  const contrast = (a, b) => (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
+  const desktopGlass = ["blur", "acrylic"].includes(root.dataset.windowMaterial);
+  // Bound contrast against a black desktop in light mode and a white desktop
+  // in dark mode after the 82% reading tint; no desktop pixels are sampled.
+  const readingBase = desktopGlass ? (light ? "#c8cbce" : "#3d4148") : (light ? "#edf1f7" : "#1b2230");
+  const background = luminance(channels(readingBase));
+  const colors = [themePrimaryColor, themeSecondaryColor].map(value => channels(/^#[0-9a-f]{6}$/i.test(value) ? value : "#2864ff"));
+  colors.forEach((rgb, index) => {
+    let ink = rgb;
+    for (let mix = 0; mix <= 1 && contrast(luminance(ink), background) < 5.2; mix += .04) {
+      ink = rgb.map(value => Math.round(value * (1 - mix) + (light ? 20 : 245) * mix));
+    }
+    root.style.setProperty(index ? "--accent-secondary-readable" : "--accent-readable", `rgb(${ink.join(" ")})`);
+  });
+  const contrastWith = value => Math.min(...colors.map(rgb => contrast(luminance(rgb), value)));
+  root.style.setProperty("--on-accent", contrastWith(1) >= contrastWith(.012) ? "#ffffff" : "#1c2330");
+}
+
 function applyThemeColors(primary = themePrimaryColor, secondary = themeSecondaryColor, save = false) {
   const validColor = /^#[0-9a-f]{6}$/i;
   themePrimaryColor = validColor.test(primary) ? primary : "#2864ff";
   themeSecondaryColor = validColor.test(secondary) ? secondary : "#d934ff";
+  updateThemeInkColors();
   const root = document.documentElement;
   root.style.setProperty("--accent", themePrimaryColor);
   root.style.setProperty("--accent-secondary", themeSecondaryColor);
   root.style.setProperty("--accent-soft", `color-mix(in srgb, ${themePrimaryColor} 15%, transparent)`);
   root.style.setProperty("--accent-gradient", `linear-gradient(105deg, ${themePrimaryColor} 0%, color-mix(in srgb, ${themePrimaryColor} 46%, ${themeSecondaryColor}) 50%, ${themeSecondaryColor} 100%)`);
-  root.style.setProperty("--accent-gradient-hover", `linear-gradient(105deg, color-mix(in srgb, ${themePrimaryColor} 84%, white) 0%, #8657ff 48%, color-mix(in srgb, ${themeSecondaryColor} 84%, white) 100%)`);
+  root.style.setProperty("--accent-gradient-hover", `linear-gradient(105deg, color-mix(in srgb, ${themePrimaryColor} 84%, white) 0%, color-mix(in srgb, ${themePrimaryColor} 46%, ${themeSecondaryColor}) 48%, color-mix(in srgb, ${themeSecondaryColor} 84%, white) 100%)`);
   document.querySelector("#theme-primary-color").value = themePrimaryColor;
   document.querySelector("#theme-secondary-color").value = themeSecondaryColor;
   if (save) {
@@ -1371,7 +1404,7 @@ function renderPlaylists() {
   });
   liked.addEventListener("contextmenu", (event) => {
     event.preventDefault();
-    showPlaylistContextMenu(null, true);
+    showPlaylistContextMenu(null, true, event);
   });
   favoriteSlot.append(liked);
   playlists.forEach((playlist) => {
@@ -1393,7 +1426,7 @@ function renderPlaylists() {
     });
     button.addEventListener("contextmenu", (event) => {
       event.preventDefault();
-      showPlaylistContextMenu(playlist.name, false);
+      showPlaylistContextMenu(playlist.name, false, event);
     });
     attachPlaylistDrag(button, playlist.name);
     container.append(button);
@@ -1496,17 +1529,17 @@ function attachPlaylistDrag(button, playlistName) {
   });
 }
 
-async function showPlaylistContextMenu(playlistName, favoritesList) {
+async function showPlaylistContextMenu(playlistName, favoritesList, event) {
   const sourceIds = favoritesList
     ? tracks.filter((track) => favorites.has(track.id)).map((track) => track.id)
     : [...(playlists.find((playlist) => playlist.name === playlistName)?.trackIds || [])];
   const validIds = sourceIds.filter((id) => tracks.some((track) => track.id === id));
-  const result = await window.medo.showPlaylistMenu({
+  const result = await window.MedoMenus.playlist({
     favorites: favoritesList,
     playlists: playlists
       .map((playlist) => playlist.name)
       .filter((name) => favoritesList || name !== playlistName)
-  });
+  }, event);
   if (!result || !validIds.length && ["play", "play-next", "add-to-playlist"].includes(result.action)) return;
   if (result.action === "play") {
     playbackQueueIds = [...validIds];
@@ -1622,6 +1655,7 @@ function setSelectionActionsVisible(visible) {
 }
 
 function formatCollectionDuration(tracksInView) {
+  if (!tracksInView.length) return "0 分钟";
   const seconds = tracksInView.reduce((total, track) => total + (track.duration || 0), 0);
   if (!seconds) return "时长读取中";
   const hours = Math.floor(seconds / 3600);
@@ -1649,6 +1683,7 @@ function renderPlaylistHero(tracksInView) {
     currentCollection?.type === "artists" ? "艺术家" : currentCollection?.type === "albums" ? "专辑" : "播放列表";
   document.querySelector("#playlist-meta").textContent =
     `${tracksInView.length} 首歌曲 · ${formatCollectionDuration(tracksInView)}`;
+  document.querySelector("#playlist-play-all").disabled = tracksInView.length === 0;
   document.querySelector("#playlist-add-songs").hidden = Boolean(currentCollection || favoritesOpen);
   document.querySelector("#playlist-rename").hidden = Boolean(currentCollection || favoritesOpen);
   document.querySelector("#playlist-delete").hidden = Boolean(currentCollection || favoritesOpen);
@@ -1868,6 +1903,7 @@ function applyViewShellState({ preservePlaybackDetailActive = false } = {}) {
     document.body.classList.toggle("playback-detail-active", playbackDetailOpen);
   }
   document.body.classList.toggle("settings-view", settingsOpen);
+  if (!playbackDetailOpen) coverAtmosphere.finish();
   return { main, settingsOpen, playbackDetailOpen };
 }
 
@@ -1991,6 +2027,7 @@ function renderPage(savedScrollTop) {
     items.forEach((item) => {
       const button = document.createElement("button");
       button.className = "playlist-overview-item";
+      button.title = item.name;
       if (item.firstTrackId) button.dataset.trackId = item.firstTrackId;
     button.innerHTML = '<img class="playlist-overview-cover" alt="" loading="lazy" decoding="async"><strong></strong><small></small>';
       button.querySelector("img").src = item.cover;
@@ -2201,7 +2238,7 @@ function renderPage(savedScrollTop) {
     });
     row.querySelector(".row-queue").addEventListener("click", async (event) => {
       event.stopPropagation();
-      const targetName = await window.medo.chooseTargetPlaylist(playlists.map((playlist) => playlist.name));
+      const targetName = await window.MedoMenus.chooseTarget(playlists.map((playlist) => playlist.name), event.currentTarget);
       const target = playlists.find((playlist) => playlist.name === targetName);
       if (!target) return;
       showActionFeedback(target.trackIds?.includes(track.id) ? "歌曲已在该歌单中" : `已添加到“${target.name}”`);
@@ -2213,14 +2250,15 @@ function renderPage(savedScrollTop) {
     row.querySelector(".row-favorite").addEventListener("click", (event) => {
       event.stopPropagation();
       toggleFavorite(track.id);
+      if (event.detail) animateTransportControl(event.currentTarget);
     });
     row.addEventListener("contextmenu", async (event) => {
       event.preventDefault();
-      const result = await window.medo.showTrackMenu({
+      const result = await window.MedoMenus.track({
         trackId: track.id,
         playlists: playlists.map((item) => item.name),
         currentPlaylist
-      });
+      }, event);
       if (!result) return;
       if (result.action === "play") {
         playTrack(actualIndex);
@@ -2310,7 +2348,7 @@ function renderPage(savedScrollTop) {
   const rows = new Map();
   let frame = null;
   trackList.classList.add("virtual-track-list");
-  trackList.style.height = `${14 + Math.max(0, visible.length * stride - 2)}px`;
+  trackList.style.height = `${Math.max(0, visible.length * stride - 2)}px`;
   main.scrollTop = savedScrollTop;
   const renderWindow = () => {
     frame = null;
@@ -2334,7 +2372,7 @@ function renderPage(savedScrollTop) {
       if (rows.has(index)) continue;
       const track = visible[index];
       const row = createTrackRow(track);
-      row.style.top = `${14 + index * stride}px`;
+      row.style.top = `${index * stride}px`;
       row.style.height = `${rowHeight}px`;
       const next = [...rows.keys()].filter((key) => key > index).sort((a, b) => a - b)[0];
       trackList.insertBefore(row, rows.get(next) || null);
@@ -3056,46 +3094,12 @@ function detailFormat(track) {
 }
 
 async function applyCoverTheme(cover) {
-  if (!cover) return;
-  if (coverColorCache.has(cover)) {
-    const [red, green, blue] = coverColorCache.get(cover);
-    document.documentElement.style.setProperty("--detail-theme", `rgb(${red} ${green} ${blue})`);
-    document.documentElement.style.setProperty("--detail-theme-rgb", `${red}, ${green}, ${blue}`);
-    return;
-  }
-  try {
-    const image = new Image();
-    image.src = cover;
-    await image.decode();
-    const canvas = document.createElement("canvas");
-    canvas.width = 24;
-    canvas.height = 24;
-    const context = canvas.getContext("2d", { willReadFrequently: true });
-    context.drawImage(image, 0, 0, 24, 24);
-    const pixels = context.getImageData(0, 0, 24, 24).data;
-    let red = 0;
-    let green = 0;
-    let blue = 0;
-    let weight = 0;
-    for (let index = 0; index < pixels.length; index += 4) {
-      const brightness = (pixels[index] + pixels[index + 1] + pixels[index + 2]) / 3;
-      const range = Math.max(pixels[index], pixels[index + 1], pixels[index + 2]) -
-        Math.min(pixels[index], pixels[index + 1], pixels[index + 2]);
-      if (pixels[index + 3] < 180 || brightness < 30 || brightness > 232) continue;
-      const pixelWeight = 1 + range / 80;
-      red += pixels[index] * pixelWeight;
-      green += pixels[index + 1] * pixelWeight;
-      blue += pixels[index + 2] * pixelWeight;
-      weight += pixelWeight;
-    }
-    if (!weight) return;
-    const color = [red, green, blue].map((value) => Math.round(value / weight));
-    setBoundedCache(coverColorCache, cover, color, 96);
-    if ((tracks[currentIndex]?.cover || missingArt) !== cover) return;
-    document.documentElement.style.setProperty("--detail-theme", `rgb(${color[0]} ${color[1]} ${color[2]})`);
-    document.documentElement.style.setProperty("--detail-theme-rgb", color.join(", "));
-  } catch {
-    // Keep the default detail theme when artwork cannot be sampled.
+  const available = await coverAtmosphere.setCover(cover);
+  if ((tracks[currentIndex]?.cover || missingArt) !== cover) return;
+  const resolved = available ? cover : missingArt;
+  for (const id of ["detail-cover", "mini-cover"]) {
+    const image = document.getElementById(id);
+    if (image.getAttribute("src") !== resolved) image.src = resolved;
   }
 }
 
@@ -3218,9 +3222,8 @@ function renderPlaybackDetail() {
   document.querySelector("#toggle-detail-queue").hidden = false;
   const cover = track.cover || missingArt;
   applyCoverTheme(cover);
-  document.querySelector("#detail-cover").src = cover;
-  document.querySelector("#detail-backdrop").style.backgroundImage = `url("${cover.replace(/"/g, '\\"')}")`;
   document.querySelector("#detail-title").textContent = track.title;
+  document.querySelector("#detail-title").title = track.title;
   document.querySelector("#detail-artist").textContent = track.artist || "未知艺术家";
   document.querySelector("#detail-album").textContent = track.album || "未知专辑";
   document.querySelector("#detail-format").textContent = detailFormat(track);
@@ -3324,6 +3327,7 @@ function clearCurrentPlayback() {
   audio.removeAttribute("src");
   audio.load();
   currentIndex = -1;
+  applyCoverTheme(missingArt);
   updateMiniCoverState();
   activeLyricIndex = -1;
   renderedLyricsState = null;
@@ -3835,7 +3839,7 @@ function animatePlaybackDetail(entering) {
         { duration: entering ? 340 : 180, easing, fill: "forwards" }
       ),
       ...(entering ? [backdrop.animate(
-        [{ opacity: interrupted ? backdropStyle.opacity : 0 }, { opacity: 0.52 }],
+        [{ opacity: interrupted ? backdropStyle.opacity : 0 }, { opacity: 1 }],
         { duration: 380, easing, fill: "forwards" }
       )] : [])
     );
@@ -4170,6 +4174,72 @@ document.querySelector("#collection-back").addEventListener("click", () => {
   animateViewSurface();
 });
 playButton.addEventListener("click", togglePlayback);
+
+const transportAnimations = new WeakMap();
+function animateTransportControl(button) {
+  if (!button || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const from = getComputedStyle(button).transform;
+  transportAnimations.get(button)?.cancel();
+  const resting = getComputedStyle(button).transform;
+  if (button === playButton) {
+    const scale = button.matches(':hover') ? 1.045 : 1;
+    const animation = button.animate([
+      {transform:from,easing:'cubic-bezier(.2,.8,.3,1)'},
+      {transform:`scale(${scale + .03})`,offset:.48,easing:'cubic-bezier(.4,0,.2,1)'},
+      {transform:`scale(${scale - .008})`,offset:.78,easing:'cubic-bezier(.2,0,.2,1)'},
+      {transform:`scale(${scale})`}
+    ],{duration:260,easing:'linear'});
+    transportAnimations.set(button,animation);
+    return;
+  }
+  const direction = button.id === 'previous-button' ? -1 : button.id === 'next-button' ? 1 : 0;
+  if (direction) {
+    const hover = button.matches(':hover');
+    const y = hover ? -2 : 0;
+    const scale = hover ? 1.1 : 1;
+    const animation = button.animate([
+      {transform:from,easing:'cubic-bezier(.2,.8,.3,1)'},
+      {transform:`translate(${direction * 4}px,${y}px) scale(${scale - .03})`,offset:.38,easing:'cubic-bezier(.4,0,.2,1)'},
+      {transform:`translate(${-direction * .5}px,${y}px) scale(${scale})`,offset:.76,easing:'cubic-bezier(.2,0,.2,1)'},
+      {transform:`translateY(${y}px) scale(${scale})`}
+    ],{duration:240,easing:'linear'});
+    transportAnimations.set(button,animation);
+    return;
+  }
+  if (button.id === 'play-mode-button') {
+    const hover = button.matches(':hover');
+    const y = hover ? -2 : 0;
+    const scale = hover ? 1.1 : 1;
+    const animation = button.animate([
+      {transform:from,easing:'cubic-bezier(.2,.8,.3,1)'},
+      {transform:`translateY(${y}px) scale(${scale + .015}) rotate(12deg)`,offset:.4,easing:'cubic-bezier(.4,0,.2,1)'},
+      {transform:`translateY(${y}px) scale(${scale}) rotate(-1deg)`,offset:.78,easing:'cubic-bezier(.2,0,.2,1)'},
+      {transform:`translateY(${y}px) scale(${scale}) rotate(0deg)`}
+    ],{duration:250,easing:'linear'});
+    transportAnimations.set(button,animation);
+    return;
+  }
+  const accent = button.matches('.heart-button,.row-favorite') ? 'scale(1.23) rotate(-9deg)' : 'scale(1.13)';
+  const animation = button.animate([
+    {transform:from},
+    {transform:'scale(.9)',offset:.18},
+    {transform:accent,offset:.52},
+    {transform:resting}
+  ],{duration:280,easing:'cubic-bezier(.22,1,.36,1)'});
+  transportAnimations.set(button,animation);
+}
+playButton.addEventListener('pointerdown', event => {
+  if (event.button !== 0 || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const from = getComputedStyle(playButton).transform;
+  transportAnimations.get(playButton)?.cancel();
+  transportAnimations.set(playButton,playButton.animate(
+    [{transform:from},{transform:'scale(.94)'}],
+    {duration:85,easing:'cubic-bezier(.2,.8,.3,1)'}
+  ));
+});
+document.querySelector('.controls').addEventListener('click', event => {
+  if (event.detail) animateTransportControl(event.target.closest('button'));
+});
 document.querySelector("#previous-button").addEventListener("click", () => nextTrack(-1));
 document.querySelector("#next-button").addEventListener("click", () => nextTrack(1));
 favoriteButton.addEventListener("click", () => toggleFavorite());
@@ -4612,6 +4682,15 @@ window.medo.onResolvedTheme((resolvedTheme) => {
   if (theme !== "system" || !["light", "dark"].includes(resolvedTheme)) return;
   document.documentElement.dataset.theme = resolvedTheme;
 });
+const applyWindowMaterial = (material) => {
+  document.documentElement.dataset.windowMaterial = ["blur", "acrylic"].includes(material) ? material : "none";
+  // index.html paints an opaque startup color before styles load. It must be
+  // cleared as well as the body background to expose the native backdrop.
+  document.documentElement.style.backgroundColor = document.documentElement.dataset.windowMaterial === "none" ? "var(--background)" : "transparent";
+  updateThemeInkColors();
+};
+window.medo.onWindowMaterial?.(applyWindowMaterial);
+window.medo.getWindowMaterial?.().then(applyWindowMaterial);
 document.addEventListener("keydown", (event) => {
   if (document.querySelector("dialog[open]") || event.defaultPrevented) return;
   if (event.key === "Escape") {
@@ -4652,21 +4731,11 @@ document.addEventListener("keydown", (event) => {
 });
 
 audio.addEventListener("play", () => {
-  const completedTrackSwitch = switchingPlaybackGeneration !== 0;
   switchingPlaybackGeneration = 0;
   updatePlayButtonState(true);
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
   activeLyricIndex = -1;
   updateLyricsAtTime();
-  if (!completedTrackSwitch && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-    playButton.animate(
-      [
-        { opacity: 0.65, transform: "scale(0.92)" },
-        { opacity: 1, transform: "scale(1)" }
-      ],
-      { duration: 150, easing: "cubic-bezier(0.23, 1, 0.32, 1)" }
-    );
-  }
 });
 audio.addEventListener("pause", () => {
   if (switchingPlaybackGeneration !== 0) return;
@@ -4675,15 +4744,6 @@ audio.addEventListener("pause", () => {
   activeLyricIndex = -1;
   updateLyricsAtTime();
   schedulePersist();
-  if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-    playButton.animate(
-      [
-        { opacity: 0.65, transform: "scale(0.92)" },
-        { opacity: 1, transform: "scale(1)" }
-      ],
-      { duration: 150, easing: "cubic-bezier(0.23, 1, 0.32, 1)" }
-    );
-  }
 });
 audio.addEventListener("timeupdate", () => {
   if (backgroundMode) updateLyricsAtTime();
@@ -4786,9 +4846,10 @@ async function restorePlaybackState() {
 
 window.addEventListener("beforeunload", persist);
 
-document.addEventListener("visibilitychange", () => {
-  backgroundMode = document.hidden;
+function updateBackgroundMode() {
+  backgroundMode = document.hidden || !nativeWindowVisible;
   document.body.classList.toggle("background-mode", backgroundMode);
+  if (backgroundMode) coverAtmosphere.finish();
   if (!backgroundMode) {
     lastBackgroundUiUpdate = 0;
     if (currentView === "player") {
@@ -4796,6 +4857,11 @@ document.addEventListener("visibilitychange", () => {
       renderPlaybackDetail();
     }
   }
+}
+document.addEventListener("visibilitychange", updateBackgroundMode);
+window.medo.onWindowVisibility((visible) => {
+  nativeWindowVisible = visible;
+  updateBackgroundMode();
 });
 
 if ("mediaSession" in navigator) {

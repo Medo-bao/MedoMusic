@@ -57,8 +57,15 @@ contextBridge.exposeInMainWorld("medo", {
     return () => openAudioListeners.delete(callback);
   },
   setTitleBarTheme: (theme) => ipcRenderer.send("theme:set-titlebar", theme),
+  getWindowMaterial: () => ipcRenderer.invoke("window:get-material"),
+  onWindowMaterial: (callback) => ipcRenderer.on("window:material", (_event, material) => callback(material)),
   onResolvedTheme: (callback) => ipcRenderer.on("theme:resolved", (_event, theme) => callback(theme)),
   minimizeWindow: () => ipcRenderer.send("window:minimize"),
+  onWindowVisibility: (callback) => {
+    const listener = (_event, visible) => callback(visible);
+    ipcRenderer.on("window:visibility", listener);
+    return () => ipcRenderer.removeListener("window:visibility", listener);
+  },
   toggleMaximizeWindow: () => ipcRenderer.send("window:toggle-maximize"),
   onWindowMaximized: (callback) => {
     const listener = (_event, maximized) => callback(maximized);
