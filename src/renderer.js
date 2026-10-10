@@ -23,6 +23,19 @@ let musicFolders = loadJson("medo.musicFolders", []);
 let favorites = new Set(loadJson("medo.favorites", []));
 let recent = loadJson("medo.recent", []);
 let playStats = loadJson("medo.playStats", {});
+const storedListeningStats = loadJson("medo.listeningStats", {});
+let listeningDailyMs = normalizeListeningDays(storedListeningStats.dailyMs);
+let listeningTimeMs = Object.values(listeningDailyMs).reduce((sum, milliseconds) => sum + milliseconds, 0);
+let listeningFractionalMs = 0;
+let listeningStatsSaveFailed = false;
+let listeningPosition = null;
+let listeningPlaybackRate = 1;
+let listeningCalendarMonth = listeningDateKey(new Date()).slice(0, 7);
+let listeningSelectedDate = listeningDateKey(new Date());
+let listeningCalendarToday = listeningSelectedDate;
+let listeningCalendarSignature = "";
+let listeningCalendarRolloverTimer = null;
+let listeningPickerYear = Number(listeningCalendarMonth.slice(0, 4));
 let currentIndex = -1;
 let playMode = localStorage.getItem("medo.playMode") || "sequence";
 let currentView = "library";
@@ -39,11 +52,13 @@ let metadataRenderTimer = null;
 let theme = localStorage.getItem("medo.theme") || "system";
 let themePrimaryColor = localStorage.getItem("medo.themePrimaryColor") || "#2864ff";
 let themeSecondaryColor = localStorage.getItem("medo.themeSecondaryColor") || "#d934ff";
+let inactiveLyricColor = localStorage.getItem("medo.inactiveLyricColor");
 let desktopLyricPrimaryColor = localStorage.getItem("medo.desktopLyricPrimaryColor") || "#2864ff";
 let desktopLyricSecondaryColor = localStorage.getItem("medo.desktopLyricSecondaryColor") || "#d934ff";
 let displayMode = localStorage.getItem("medo.displayMode") || "thumbnail";
 let closeBehavior = localStorage.getItem("medo.closeBehavior") || "background";
 let trayEnabled = localStorage.getItem("medo.trayEnabled") === "true";
+let autoCheckUpdates = localStorage.getItem("medo.autoCheckUpdates") !== "false";
 let globalPlayPauseShortcutEnabled = localStorage.getItem("medo.globalPlayPauseShortcutEnabled") !== "false";
 let globalDesktopLyricsShortcutEnabled = localStorage.getItem("medo.globalDesktopLyricsShortcutEnabled") !== "false";
 let globalLyricsRefreshShortcutEnabled = localStorage.getItem("medo.globalLyricsRefreshShortcutEnabled") !== "false";
@@ -73,6 +88,9 @@ const lyricsCache = new Map();
 const lyricsRequests = new Map();
 const lyricRefreshProviders = new Map();
 const automaticFolderScans = new Map();
+const folderScanTickets = new Map();
+let nextFolderScanTicket = 0;
+let libraryFolderRevision = 0;
 const lyricTranslations = new Map();
 const lyricTranslationRequests = new Map();
 const hiddenLyricTranslations = new Set();
@@ -104,6 +122,11 @@ let lastPreviousRestartAt = 0;
 let lastPreviousRestartTrackId = null;
 let desiredVolume = Number(volume.value);
 let outputAudioContext = null;
+let outputFadeGain = null;
+let playbackFadeEnabled = localStorage.getItem("medo.playbackFadeEnabled") === "true";
+let playbackFadeEnvelope = null;
+let playbackPausePending = false;
+let playbackFadePauseTimer = null;
 let soundEngine = null;
 let soundCompare = false;
 let soundSettings = MedoSound.normalize(loadJson("medo.sound", {preset:"flat"}));
@@ -148,24 +171,17 @@ const favoriteMetadataPrimed = new Set();
 const restoredPlaybackState = loadJson("medo.playbackState", {});
 let lastPlaybackStateSave = 0;
 
-function loadJson(key, fallback) {
-  try {
-    return JSON.parse(localStorage.getItem(key)) ?? fallback;
-  } catch {
-    return fallback;
-  }
-}
-
 function ensureAudioProcessing() {
   if (!outputAudioContext) {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass) return;
     outputAudioContext = new AudioContextClass({ latencyHint: "playback" });
     const source = outputAudioContext.createMediaElementSource(audio);
-    source.connect(outputAudioContext.destination);
+    outputFadeGain = outputAudioContext.createGain();
+    source.connect(outputFadeGain).connect(outputAudioContext.destination);
     MedoSound.prepare(outputAudioContext).then(() => {
-      source.disconnect(outputAudioContext.destination);
-      soundEngine = MedoSound.create(outputAudioContext, source, outputAudioContext.destination);
+      source.disconnect(outputFadeGain);
+      soundEngine = MedoSound.create(outputAudioContext, source, outputFadeGain);
       soundEngine.update(soundSettings, soundCompare, true);
     }).catch(error => {
       console.error('Sound processing initialization failed', error);
@@ -184,6 +200,25 @@ function applyOutputVolume() {
   const normalizedVolume = Math.min(1, Math.max(0, desiredVolume));
   audio.volume = normalizedVolume;
 }
+
+function applyPlaybackFadeSetting(enabled) {
+  playbackFadeEnabled = Boolean(enabled);
+  localStorage.setItem("medo.playbackFadeEnabled", String(playbackFadeEnabled));
+  document.querySelectorAll(".playback-fade-option").forEach(button => {
+    const selected = (button.dataset.playbackFadeValue === "on") === playbackFadeEnabled;
+    button.classList.toggle("active", selected);
+    button.setAttribute("aria-checked", String(selected));
+  });
+  if (!playbackFadeEnabled) {
+    const shouldPause = playbackPausePending;
+    resetPlaybackFade();
+    if (shouldPause) audio.pause();
+  }
+}
+
+document.querySelectorAll(".playback-fade-option").forEach(button => {
+  button.addEventListener("click", () => applyPlaybackFadeSetting(button.dataset.playbackFadeValue === "on"));
+});
 
 function updateSoundSettings() {
   soundSettings = MedoSound.normalize(soundSettings);
@@ -503,38 +538,6 @@ function setBoundedCache(cache, key, value, limit = 160) {
   while (cache.size > limit) cache.delete(cache.keys().next().value);
 }
 
-function persist() {
-  persistNavigation();
-  const storedTracks = tracks
-    .filter((track) => !track.transient)
-    .map(({ transient, ...track }) => track);
-  localStorage.setItem("medo.tracks", JSON.stringify(storedTracks));
-  localStorage.setItem("medo.playlists", JSON.stringify(playlists));
-  localStorage.setItem("medo.musicFolders", JSON.stringify(musicFolders));
-  localStorage.setItem("medo.favorites", JSON.stringify([...favorites]));
-  localStorage.setItem("medo.recent", JSON.stringify(recent));
-  localStorage.setItem("medo.playStats", JSON.stringify(playStats));
-  localStorage.setItem("medo.theme", theme);
-  localStorage.setItem("medo.displayMode", displayMode);
-  const persistentTrackIds = new Set(storedTracks.map((track) => track.id));
-  localStorage.setItem("medo.playbackQueue", JSON.stringify(
-    playbackQueueIds.filter((id) => persistentTrackIds.has(id))
-  ));
-  localStorage.setItem("medo.librarySort", librarySort);
-  localStorage.setItem("medo.recentSortByPlays", String(recentSortByPlays));
-  localStorage.setItem("medo.sidebarCollapsed", String(sidebarCollapsed));
-  localStorage.setItem("medo.playMode", playMode);
-  const currentTrack = tracks[currentIndex];
-  const persistPlaybackState = currentTrack && !currentTrack.transient;
-  localStorage.setItem("medo.playbackState", JSON.stringify({
-    trackId: persistPlaybackState ? currentTrack.id : null,
-    currentTime: persistPlaybackState ? (Number(audio.currentTime) || 0) : 0,
-    playing: Boolean(persistPlaybackState && audio.src && !audio.paused),
-    volume: desiredVolume,
-    muted: audio.muted
-  }));
-}
-
 function normalizedSongIdentity(track) {
   return [
     String(track?.title || "").trim().toLocaleLowerCase("zh-CN"),
@@ -570,27 +573,41 @@ function preferredRecentVersion(track) {
 }
 
 function normalizeRecentVersions() {
-  const normalized = [];
-  const seen = new Set();
-  recent.forEach((id) => {
-    const track = tracks.find((candidate) => candidate.id === id && !candidate.transient);
-    if (!track) return;
+  const byId = new Map();
+  const preferred = new Map();
+  for (const track of tracks) {
+    if (track.transient) continue;
+    byId.set(track.id, track);
     const identity = normalizedSongIdentity(track);
-    if (seen.has(identity)) return;
+    if (!preferred.has(identity) || String(track.format).toUpperCase() === "FLAC" &&
+        String(preferred.get(identity).format).toUpperCase() !== "FLAC") preferred.set(identity, track);
+  }
+  const seen = new Set();
+  recent = recent.flatMap(id => {
+    const track = byId.get(id);
+    if (!track) return [];
+    const identity = normalizedSongIdentity(track);
+    if (seen.has(identity)) return [];
     seen.add(identity);
-    normalized.push(preferredRecentVersion(track).id);
-  });
-  recent = normalized.slice(0, 100);
+    return [preferred.get(identity).id];
+  }).slice(0, 100);
 }
+
+document.addEventListener("error", event => {
+  const image = event.target;
+  if (!(image instanceof HTMLImageElement) || !image.src.startsWith("medo-media://local/cover?")) return;
+  const affected = tracks.filter(track => track.cover === image.src);
+  image.src = missingArt;
+  for (const track of affected) {
+    track.cover = null;
+    track.metadataLoaded = false;
+    loadMetadata(track).catch(() => {});
+  }
+}, true);
 
 function scheduleMetadataRender() {
   clearTimeout(metadataRenderTimer);
   metadataRenderTimer = setTimeout(render, 240);
-}
-
-function schedulePersist() {
-  clearTimeout(persistTimer);
-  persistTimer = setTimeout(persist, 300);
 }
 
 function acquireMetadataSlot() {
@@ -625,6 +642,7 @@ function applyTheme(nextTheme) {
   document.documentElement.dataset.theme = resolvedTheme;
   document.documentElement.dataset.themePreference = theme;
   updateThemeInkColors();
+  applyInactiveLyricColor();
   window.medo.setTitleBarTheme(theme);
   document.querySelectorAll(".theme-option").forEach((button) => {
     const active = button.dataset.themeValue === theme;
@@ -650,7 +668,7 @@ function updateThemeInkColors() {
     return sum + (channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4) * [.2126, .7152, .0722][index];
   }, 0);
   const contrast = (a, b) => (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
-  const desktopGlass = ["blur", "acrylic"].includes(root.dataset.windowMaterial);
+  const desktopGlass = ["transparent", "blur", "acrylic"].includes(root.dataset.windowMaterial);
   // Bound contrast against a black desktop in light mode and a white desktop
   // in dark mode after the 82% reading tint; no desktop pixels are sampled.
   const readingBase = desktopGlass ? (light ? "#c8cbce" : "#3d4148") : (light ? "#edf1f7" : "#1b2230");
@@ -691,7 +709,7 @@ function applyDisplayMode(nextMode) {
   const main = document.querySelector("main");
   main.classList.toggle("display-compact", displayMode === "compact");
   main.classList.toggle("display-thumbnail", displayMode === "thumbnail");
-  document.querySelectorAll(".display-option").forEach((button) => {
+  document.querySelectorAll("[data-display-value]").forEach((button) => {
     const active = button.dataset.displayValue === displayMode;
     button.classList.toggle("active", active);
     button.setAttribute("aria-checked", String(active));
@@ -799,7 +817,9 @@ function applyLyricTranslationSetting(enabled) {
 function applyDesktopLyricSize(value) {
   desktopLyricSize = Math.min(64, Math.max(16, Number(value) || 34));
   localStorage.setItem("medo.desktopLyricSize", String(desktopLyricSize));
-  document.querySelector("#desktop-lyric-size").value = desktopLyricSize;
+  const input = document.querySelector("#desktop-lyric-size");
+  input.value = desktopLyricSize;
+  updateRangeGradient(input, (desktopLyricSize - Number(input.min)) / (Number(input.max) - Number(input.min)));
   document.querySelector("#desktop-lyric-size-value").textContent = `${desktopLyricSize} px`;
   window.medo.setLyricsWindowSize(desktopLyricSize);
 }
@@ -821,11 +841,29 @@ function applyDesktopLyricColors(primary = desktopLyricPrimaryColor, secondary =
   });
 }
 
+function applyInactiveLyricColor(value = inactiveLyricColor, save = false) {
+  inactiveLyricColor = /^#[0-9a-f]{6}$/i.test(value || "") ? value.toLowerCase() : null;
+  const root = document.documentElement;
+  root.toggleAttribute("data-custom-lyric-color", Boolean(inactiveLyricColor));
+  if (inactiveLyricColor) {
+    const channels = inactiveLyricColor.slice(1).match(/../g).map(value => parseInt(value, 16));
+    root.style.setProperty("--inactive-lyric-custom-rgb", channels.join(", "));
+  } else root.style.removeProperty("--inactive-lyric-custom-rgb");
+  document.querySelector("#inactive-lyric-color").value = inactiveLyricColor || getComputedStyle(root).getPropertyValue("--inactive-lyric-default").trim();
+  document.querySelector("#reset-inactive-lyric-color").disabled = !inactiveLyricColor;
+  if (save) {
+    if (inactiveLyricColor) localStorage.setItem("medo.inactiveLyricColor", inactiveLyricColor);
+    else localStorage.removeItem("medo.inactiveLyricColor");
+  }
+}
+
 function applyDetailLyricSize(value) {
   detailLyricSize = Math.min(38, Math.max(18, Number(value) || 26));
   localStorage.setItem("medo.detailLyricSize", String(detailLyricSize));
   document.documentElement.style.setProperty("--detail-lyric-size", `${detailLyricSize}px`);
-  document.querySelector("#detail-lyric-size").value = detailLyricSize;
+  const input = document.querySelector("#detail-lyric-size");
+  input.value = detailLyricSize;
+  updateRangeGradient(input, (detailLyricSize - Number(input.min)) / (Number(input.max) - Number(input.min)));
   document.querySelector("#detail-lyric-size-value").textContent = `${detailLyricSize} px`;
 }
 
@@ -1286,14 +1324,17 @@ function visibleTracks() {
   // A playlist is an explicitly ordered sequence. Never apply library sorting
   // to it, otherwise the order stored in Groove's ZPL file is lost.
   if (currentView === "now") {
-    result = playbackQueueIds.map((id) => result.find((track) => track.id === id)).filter(Boolean);
+    const visibleById = new Map(result.map(track => [track.id, track]));
+    result = playbackQueueIds.map(id => visibleById.get(id)).filter(Boolean);
   } else if (currentView === "recent") {
-    result = recent.map((id) => result.find((track) => track.id === id)).filter(Boolean);
+    const visibleById = new Map(result.map(track => [track.id, track]));
+    result = recent.map(id => visibleById.get(id)).filter(Boolean);
     if (recentSortByPlays) {
       result.sort((left, right) => mergedPlayCount(right) - mergedPlayCount(left));
     }
   } else if (!currentPlaylist && !currentCollection && currentView === "library") {
     const comparators = {
+      manual: () => 0,
       added: (a, b) => (b.createdAt || b.addedAt || 0) - (a.createdAt || a.addedAt || 0),
       az: (a, b) => a.title.localeCompare(b.title, "zh-CN"),
       artist: (a, b) => (a.artist || "").localeCompare(b.artist || "", "zh-CN"),
@@ -1529,52 +1570,6 @@ function attachPlaylistDrag(button, playlistName) {
   });
 }
 
-async function showPlaylistContextMenu(playlistName, favoritesList, event) {
-  const sourceIds = favoritesList
-    ? tracks.filter((track) => favorites.has(track.id)).map((track) => track.id)
-    : [...(playlists.find((playlist) => playlist.name === playlistName)?.trackIds || [])];
-  const validIds = sourceIds.filter((id) => tracks.some((track) => track.id === id));
-  const result = await window.MedoMenus.playlist({
-    favorites: favoritesList,
-    playlists: playlists
-      .map((playlist) => playlist.name)
-      .filter((name) => favoritesList || name !== playlistName)
-  }, event);
-  if (!result || !validIds.length && ["play", "play-next", "add-to-playlist"].includes(result.action)) return;
-  if (result.action === "play") {
-    playbackQueueIds = [...validIds];
-    const firstIndex = tracks.findIndex((track) => track.id === validIds[0]);
-    if (firstIndex >= 0) playTrack(firstIndex, true);
-  } else if (result.action === "play-next") {
-    const queueWasEmpty = !playbackQueueIds.some((id) => tracks.some((track) => track.id === id));
-    const currentId = tracks[currentIndex]?.id;
-    const remaining = playbackQueueIds.filter((id) => !validIds.includes(id));
-    const insertAt = currentId ? Math.max(0, remaining.indexOf(currentId) + 1) : 0;
-    remaining.splice(insertAt, 0, ...validIds);
-    playbackQueueIds = remaining;
-    schedulePersist();
-    if (queueWasEmpty) {
-      const firstIndex = tracks.findIndex((track) => track.id === validIds[0]);
-      if (firstIndex >= 0) playTrack(firstIndex, true);
-    }
-  } else if (result.action === "add-to-playlist") {
-    const target = playlists.find((playlist) => playlist.name === result.playlist);
-    if (!target) return;
-    target.trackIds = [...new Set([...(target.trackIds || []), ...validIds])];
-    tracks.forEach((track) => {
-      if (validIds.includes(track.id)) {
-        track.playlists = [...new Set([...(track.playlists || []), target.name])];
-      }
-    });
-    persist();
-    renderPlaylists();
-  } else if (result.action === "rename") {
-    renamePlaylist(playlistName);
-  } else if (result.action === "delete") {
-    deletePlaylist(playlistName);
-  }
-}
-
 function renderFolders() {
   const container = document.querySelector("#folder-list");
   const summary = document.querySelector("#folder-summary");
@@ -1640,6 +1635,7 @@ function setSelectionActionsVisible(visible) {
   for (const id of ["play-selected", "next-selected", "append-selected", "queue-selected", "remove-selected"]) {
     document.getElementById(id).disabled = selectedTrackIds.size === 0;
   }
+  updatePlaylistSaveControls();
   document.querySelector("#remove-selected").hidden = !playlists.some(playlist => playlist.name === currentPlaylist);
   const actions = document.querySelector("#selection-actions");
   clearTimeout(selectionActionsHideTimer);
@@ -1727,7 +1723,8 @@ function renderCollectionCards(visible) {
       groups.push({ name, tracks: formatTracks, format });
     });
   }
-  trackList.classList.add("collection-grid", `collection-${currentSort}`);
+  const compact = displayMode === "compact";
+  trackList.classList.add(compact ? "collection-list" : "collection-grid", `collection-${currentSort}`);
   for (const group of groups) {
     const { name, tracks: groupTracks, format } = group;
     const representative = groupTracks.find((track) => track.cover) || groupTracks[0];
@@ -1735,15 +1732,26 @@ function renderCollectionCards(visible) {
     card.className = "collection-card";
     card.dataset.trackId = representative.id;
     const subtitle = currentSort === "artists"
-      ? `${groupTracks.length} 首歌曲`
+      ? compact ? `${new Set(groupTracks.map(track => track.album || "未知专辑")).size} 张专辑` : `${groupTracks.length} 首歌曲`
       : `${representative.artist || "未知艺术家"}${format ? ` · ${format}` : ""}`;
-    card.innerHTML = `<img class="collection-cover" alt=""><strong></strong><small></small>`;
+    card.innerHTML = `<img class="collection-cover" alt="" loading="lazy" decoding="async"><strong></strong><small></small>`;
     card.querySelector("img").src = representative.cover || missingArt;
     card.querySelector("strong").textContent = name;
     const totalPlays = groupTracks.reduce((total, track) => total + (track.playCount || 0), 0);
     card.querySelector("small").textContent = currentView === "recent"
       ? `${subtitle} · ${totalPlays} 次播放`
       : subtitle;
+    if (compact) {
+      const count = document.createElement("span");
+      count.className = "collection-count";
+      count.textContent = `${groupTracks.length} 首歌曲`;
+      const arrow = document.createElement("span");
+      arrow.className = "collection-open glyph";
+      arrow.setAttribute("aria-hidden", "true");
+      arrow.textContent = "\uE76C";
+      card.append(count, arrow);
+    }
+    card.title = name;
     card.addEventListener("click", () => {
       currentCollection = { type: currentSort, name, format };
       render();
@@ -1876,12 +1884,12 @@ function reorderTrack(draggedId, targetId) {
   } else if (currentView === "recent") {
     recent = moveBefore(recent);
   } else {
-    const orderedIds = moveBefore(tracks.map((track) => track.id));
+    const visibleIds = visibleTracks().map(track => track.id);
+    const visibleSet = new Set(visibleIds);
+    const orderedIds = [...moveBefore(visibleIds), ...tracks.filter(track => !visibleSet.has(track.id)).map(track => track.id)];
     const byId = new Map(tracks.map((track) => [track.id, track]));
     tracks = orderedIds.map((id) => byId.get(id)).filter(Boolean);
-    const stamp = Date.now();
-    tracks.forEach((track, index) => { track.addedAt = stamp - index; });
-    librarySort = "added";
+    librarySort = "manual";
   }
   reconcileCurrentTrack(currentId);
   persist();
@@ -1903,6 +1911,8 @@ function applyViewShellState({ preservePlaybackDetailActive = false } = {}) {
     document.body.classList.toggle("playback-detail-active", playbackDetailOpen);
   }
   document.body.classList.toggle("settings-view", settingsOpen);
+  document.querySelector("#recent-listening-summary").hidden = currentView !== "recent" || Boolean(currentPlaylist || currentCollection);
+  updateListeningTimeDisplay();
   if (!playbackDetailOpen) coverAtmosphere.finish();
   return { main, settingsOpen, playbackDetailOpen };
 }
@@ -1911,6 +1921,7 @@ const pageScrollPositions = new Map();
 let renderedPageKey = null;
 let renderedSearch = "";
 function render() {
+  updatePlaylistSaveControls();
   const main = document.querySelector("main");
   const key = JSON.stringify([currentView, currentPlaylist, currentSort, currentCollection]);
   if (renderedPageKey !== null) pageScrollPositions.set(renderedPageKey, main.scrollTop);
@@ -2010,6 +2021,8 @@ function renderPage(savedScrollTop) {
   trackList.innerHTML = "";
   trackList.className = "track-list";
   trackList.style.removeProperty("height");
+  const compactHeading = document.querySelector("#compact-track-heading");
+  compactHeading.hidden = true;
 
   if (currentView === "playlists") {
     trackList.className = "track-list playlist-overview-list";
@@ -2049,19 +2062,22 @@ function renderPage(savedScrollTop) {
   }
 
   if (!currentPlaylist && !currentCollection && (currentView === "library" || currentView === "recent") &&
-      displayMode === "thumbnail" && (currentSort === "artists" || currentSort === "albums")) {
+      (currentSort === "artists" || currentSort === "albums")) {
     renderCollectionCards(visible);
     return;
   }
 
   const trackIndexes = new Map(tracks.map((track, index) => [track.id, index]));
-  const createTrackRow = (track) => {
+  compactHeading.hidden = displayMode !== "compact" || !visible.length;
+  compactHeading.classList.toggle("with-play-count", currentView === "recent");
+  compactHeading.querySelector(".heading-play-count").hidden = currentView !== "recent";
+  const createTrackRow = (track, rowIndex) => {
     const actualIndex = trackIndexes.get(track.id) ?? -1;
     const row = document.createElement("div");
     row.className = `track-row${actualIndex === currentIndex ? " active" : ""}${selectedTrackIds.has(track.id) ? " selected" : ""}`;
     row.dataset.trackId = track.id;
     row.innerHTML = `
-      <span class="row-leading"><img class="row-cover" src="${track.cover || missingArt}" alt="" loading="lazy" decoding="async"><span class="selection-check glyph">&#xE73E;</span></span>
+      <span class="row-leading" title="选择歌曲"><span class="row-number" aria-hidden="true">${rowIndex + 1}</span><img class="row-cover" src="${track.cover || missingArt}" alt="" loading="lazy" decoding="async"><span class="selection-check glyph">&#xE73E;</span></span>
       <div class="track-copy">
         <div class="track-title-line">
           <span class="now-playing-indicator" aria-hidden="true"><i></i><i></i><i></i></span>
@@ -2236,14 +2252,20 @@ function renderPage(savedScrollTop) {
       event.stopPropagation();
       playTrack(actualIndex);
     });
+    row.querySelector(".row-queue").disabled = Boolean(track.transient);
+    if (track.transient) row.querySelector(".row-queue").title = "外部歌曲无法保存到歌单，请先导入音乐库";
     row.querySelector(".row-queue").addEventListener("click", async (event) => {
       event.stopPropagation();
-      const targetName = await window.MedoMenus.chooseTarget(playlists.map((playlist) => playlist.name), event.currentTarget);
-      const target = playlists.find((playlist) => playlist.name === targetName);
+      if (!canSavePlaylistTracks([track])) return;
+      const result = await window.MedoMenus.chooseTarget(playlists.map((playlist) => playlist.name), event.currentTarget);
+      if (result?.action === "create-playlist") {
+        await createPlaylistWithTracks([track.id]);
+        return;
+      }
+      const target = playlists.find((playlist) => playlist.name === result?.playlist);
       if (!target) return;
       showActionFeedback(target.trackIds?.includes(track.id) ? "歌曲已在该歌单中" : `已添加到“${target.name}”`);
-      target.trackIds = [...new Set([...(target.trackIds || []), track.id])];
-      track.playlists = [...new Set([...(track.playlists || []), target.name])];
+      if (!addTracksToPlaylist(target, [track.id])) return;
       persist();
       renderPlaylists();
     });
@@ -2256,6 +2278,7 @@ function renderPage(savedScrollTop) {
       event.preventDefault();
       const result = await window.MedoMenus.track({
         trackId: track.id,
+        canSave: !track.transient,
         playlists: playlists.map((item) => item.name),
         currentPlaylist
       }, event);
@@ -2277,12 +2300,14 @@ function renderPage(savedScrollTop) {
         showActionFeedback("已添加到正在播放");
         schedulePersist();
         if (queueWasEmpty) playTrack(actualIndex, true);
+      } else if (result.action === "create-playlist") {
+        await createPlaylistWithTracks([track.id]);
       } else if (result.action === "add-to-playlist") {
+        if (!canSavePlaylistTracks([track])) return;
         const playlist = playlists.find((item) => item.name === result.playlist);
         if (playlist) showActionFeedback(playlist.trackIds?.includes(track.id) ? "歌曲已在该歌单中" : `已添加到“${playlist.name}”`);
         if (playlist && !playlist.trackIds?.includes(track.id)) {
-          playlist.trackIds = [...(playlist.trackIds || []), track.id];
-          track.playlists = [...new Set([...(track.playlists || []), playlist.name])];
+          if (!addTracksToPlaylist(playlist, [track.id])) return;
           persist();
           renderPlaylists();
         }
@@ -2293,7 +2318,7 @@ function renderPage(savedScrollTop) {
         persist();
         render();
       } else if (result.action === "remove-from-library") {
-        if (!window.confirm(`从 MedoMusic 音乐库中删除“${track.title}”？\n不会删除本地音频文件。`)) return;
+        if (!await confirmPlaylistAction("删除歌曲", `从 MedoMusic 音乐库中删除“${track.title}”？\n不会删除本地音频文件。`)) return;
         const currentId = tracks[currentIndex]?.id;
         tracks = tracks.filter((item) => item.id !== track.id);
         playbackQueueIds = playbackQueueIds.filter((id) => id !== track.id);
@@ -2371,7 +2396,7 @@ function renderPage(savedScrollTop) {
     for (let index = start; index < end; index += 1) {
       if (rows.has(index)) continue;
       const track = visible[index];
-      const row = createTrackRow(track);
+      const row = createTrackRow(track, index);
       row.style.top = `${index * stride}px`;
       row.style.height = `${rowHeight}px`;
       const next = [...rows.keys()].filter((key) => key > index).sort((a, b) => a - b)[0];
@@ -2393,491 +2418,7 @@ function renderPage(savedScrollTop) {
   };
 }
 
-function trackFileKey(track) {
-  const source = String(track?.path || track?.url || "").replaceAll("/", "\\").toLowerCase();
-  return `${source.split("\\").pop() || source}|${String(track?.format || "").toLowerCase()}`;
-}
-
-function removeRedundantMusicFolders() {
-  const normalized = musicFolders.map((folder) => folder.replaceAll("/", "\\").replace(/[\\]+$/, ""));
-  const filtered = normalized.filter((folder, index) => !normalized.some((parent, parentIndex) =>
-    parentIndex !== index && folder.toLowerCase().startsWith(`${parent.toLowerCase()}\\`)
-  ));
-  if (filtered.length !== musicFolders.length) {
-    musicFolders = filtered;
-    persist();
-    syncMusicFolderWatchers();
-  }
-}
-
-function syncMusicFolderWatchers() {
-  window.medo.setWatchedMusicFolders(musicFolders);
-}
-
-async function scanManagedFoldersIncrementally() {
-  if (!musicFolders.length) return;
-  let changed = false;
-  for (const folder of musicFolders) {
-    const result = await window.medo.scanFolder(folder);
-    if (!result) continue;
-    applyFolderScan(result, false);
-    changed = true;
-  }
-  if (changed) {
-    persist();
-    render();
-  }
-}
-
-function scheduleAutomaticFolderScan(folder) {
-  const normalized = normalizedWindowsPath(folder);
-  const managedFolder = musicFolders.find((item) => normalizedWindowsPath(item) === normalized);
-  if (!managedFolder) return;
-  clearTimeout(automaticFolderScans.get(normalized));
-  automaticFolderScans.set(normalized, setTimeout(async () => {
-    automaticFolderScans.delete(normalized);
-    const result = await window.medo.scanFolder(managedFolder);
-    if (result) applyFolderScan(result);
-  }, 500));
-}
-
-function tracksReferToSameFile(left, right) {
-  return Boolean(left?.id === right?.id || (trackFileKey(left) && trackFileKey(left) === trackFileKey(right)));
-}
-
-function normalizedWindowsPath(value) {
-  return String(value || "").replaceAll("/", "\\").replace(/[\\]+$/, "").toLocaleLowerCase();
-}
-
-function managedFolderForFile(filePath) {
-  const normalizedFile = normalizedWindowsPath(filePath);
-  return musicFolders.find((folder) => {
-    const normalizedFolder = normalizedWindowsPath(folder);
-    return normalizedFile === normalizedFolder || normalizedFile.startsWith(`${normalizedFolder}\\`);
-  }) || null;
-}
-
-async function openExternalAudioFiles(filePaths) {
-  const incomingTracks = await window.medo.getExternalTracks(filePaths);
-  if (!incomingTracks?.length) return;
-
-  // Temporary files from an earlier shell-open session never leak into the
-  // next queue. Files under a managed folder are promoted into the library
-  // immediately, even when that folder has not indexed them yet.
-  const currentId = tracks[currentIndex]?.id;
-  tracks = tracks.filter((track) => !track.transient);
-  reconcileCurrentTrack(currentId);
-  const queueIds = [];
-  for (const incoming of incomingTracks) {
-    let existing = tracks.find((track) => tracksReferToSameFile(track, incoming));
-    const managedFolder = managedFolderForFile(incoming.path);
-    if (existing) {
-      existing.transient = false;
-      if (managedFolder) existing.sourceDirectory = managedFolder;
-      queueIds.push(existing.id);
-      continue;
-    }
-    incoming.addedAt ||= Date.now();
-    if (managedFolder) {
-      incoming.sourceDirectory = managedFolder;
-      incoming.transient = false;
-    } else {
-      incoming.transient = true;
-    }
-    tracks.push(incoming);
-    queueIds.push(incoming.id);
-  }
-
-  playbackQueueIds = queueIds;
-  playMode = "sequence";
-  shuffleQueueSignature = "";
-  shuffleRemainingIds = [];
-  shuffleHistoryIds = [];
-  shuffleHistoryIndex = -1;
-  updatePlayModeButton();
-  persist();
-  const firstIndex = tracks.findIndex((track) => track.id === queueIds[0]);
-  if (firstIndex >= 0) await playTrack(firstIndex, true);
-}
-
-function mergeTracks(newTracks, commit = true) {
-  for (const incoming of newTracks) {
-    const existing = tracks.find((track) => tracksReferToSameFile(track, incoming));
-    if (existing) {
-      const audioFileChanged = Number(existing.modifiedAt) !== Number(incoming.modifiedAt) ||
-        Number(existing.fileSize) !== Number(incoming.fileSize);
-      existing.path = incoming.path;
-      existing.url = incoming.url;
-      if (incoming.createdAt) existing.createdAt = incoming.createdAt;
-      if (incoming.modifiedAt) existing.modifiedAt = incoming.modifiedAt;
-      if (incoming.fileSize) existing.fileSize = incoming.fileSize;
-      if (audioFileChanged) {
-        existing.metadataLoaded = false;
-        existing.cover = null;
-      }
-      if (!existing.artist && incoming.artist) existing.artist = incoming.artist;
-      if (incoming.artist && existing.title.includes(" - ")) existing.title = incoming.title;
-      existing.playlists = [...new Set([
-        ...(existing.playlists || []),
-        ...(incoming.playlists || [])
-      ])];
-      existing.sourceDirectory ||= incoming.sourceDirectory;
-    } else {
-      incoming.addedAt ||= Date.now();
-      tracks.push(incoming);
-    }
-  }
-  if (commit) {
-    persist();
-    render();
-  }
-}
-
-async function chooseFolder() {
-  const result = await window.medo.chooseFolder();
-  if (result) applyFolderScan(result);
-}
-
-async function chooseFiles() {
-  const incoming = await window.medo.chooseFiles();
-  if (!incoming.length) return;
-  const previousCount = tracks.length;
-  mergeTracks(incoming);
-  const added = tracks.length - previousCount;
-  showActionFeedback(`已导入 ${added} 首歌曲，重复跳过 ${incoming.length - added} 首`);
-}
-
-function reconcileCurrentTrack(currentId) {
-  const validIds = new Set(tracks.map((track) => track.id));
-  playbackQueueIds = playbackQueueIds.filter((id) => validIds.has(id));
-  currentIndex = tracks.findIndex((track) => track.id === currentId);
-  if (currentId && currentIndex < 0) {
-    clearCurrentPlayback();
-    if (currentView === "player") closePlaybackDetail();
-  }
-}
-
-function applyFolderScan(result, commit = true) {
-  if (!result?.folder || !Array.isArray(result.tracks)) return;
-  const currentId = tracks[currentIndex]?.id;
-  const folderKey = result.folder.toLowerCase();
-  tracks = tracks.filter((track) => {
-    const fromFolder = track.sourceDirectory?.toLowerCase() === folderKey;
-    const removedFromDisk = fromFolder && !result.tracks.some((incoming) => tracksReferToSameFile(track, incoming));
-    return !removedFromDisk || track.playlists?.length;
-  });
-  if (!musicFolders.some((folder) => folder.toLowerCase() === folderKey)) {
-    musicFolders.push(result.folder);
-    syncMusicFolderWatchers();
-  }
-  mergeTracks(result.tracks, false);
-  reconcileCurrentTrack(currentId);
-  if (commit) {
-    persist();
-    render();
-  }
-}
-
-async function rescanFolder(folder) {
-  const result = await window.medo.scanFolder(folder);
-  if (result) applyFolderScan(result);
-}
-
-async function refreshMusicLibrary() {
-  const button = document.querySelector("#refresh-library");
-  const originalText = button.textContent;
-  button.disabled = true;
-  button.textContent = "正在刷新…";
-  try {
-    for (const folder of musicFolders) {
-      const result = await window.medo.scanFolder(folder);
-      if (result) applyFolderScan(result, false);
-    }
-    tracks.forEach((track) => {
-      track.metadataLoaded = false;
-      track.cover = null;
-    });
-    metadataRequests.clear();
-    persist();
-    render();
-  } finally {
-    button.disabled = false;
-    button.textContent = originalText;
-  }
-}
-
-async function rebuildMusicLibraryIndex() {
-  const button = document.querySelector("#refresh-library");
-  const originalText = button.textContent;
-  button.disabled = true;
-  button.textContent = "正在重建索引…";
-  try {
-    await window.medo.clearMetadataCache();
-    const previousTracks = [...tracks];
-    const rebuilt = [];
-    for (const folder of musicFolders) {
-      const result = await window.medo.scanFolder(folder);
-      if (!result) continue;
-      result.tracks.forEach((incoming) => {
-        const previous = previousTracks.find((track) => tracksReferToSameFile(track, incoming));
-        rebuilt.push({
-          ...incoming,
-          id: previous?.id || incoming.id,
-          addedAt: previous?.addedAt || Date.now(),
-          playCount: previous?.playCount || 0,
-          playlists: previous?.playlists || incoming.playlists || []
-        });
-      });
-    }
-    const managedFolders = musicFolders.map((folder) => folder.toLowerCase());
-    const manualTracks = tracks.filter((track) =>
-      !track.sourceDirectory || !managedFolders.includes(track.sourceDirectory.toLowerCase())
-    ).map((track) => ({ ...track, metadataLoaded: false, cover: null }));
-    const currentId = tracks[currentIndex]?.id;
-    tracks = [...new Map([...rebuilt, ...manualTracks].map((track) => [track.id, track])).values()];
-    reconcileCurrentTrack(currentId);
-    metadataRequests.clear();
-    lyricsCache.clear();
-    lyricsRequests.clear();
-    persist();
-    render();
-  } finally {
-    button.disabled = false;
-    button.textContent = originalText;
-  }
-}
-
-function removeFolder(folder) {
-  const currentId = tracks[currentIndex]?.id;
-  const folderKey = folder.toLowerCase();
-  musicFolders = musicFolders.filter((item) => item.toLowerCase() !== folderKey);
-  syncMusicFolderWatchers();
-  tracks = tracks.filter((track) => {
-    const fromFolder = track.sourceDirectory?.toLowerCase() === folderKey;
-    return !fromFolder || track.playlists?.length;
-  });
-  const validIds = new Set(tracks.map((track) => track.id));
-  favorites = new Set([...favorites].filter((id) => validIds.has(id)));
-  recent = recent.filter((id) => validIds.has(id));
-  reconcileCurrentTrack(currentId);
-  persist();
-  render();
-}
-
-async function choosePlaylist() {
-  const result = await window.medo.choosePlaylist();
-  if (!result) return;
-  const existing = playlists.find((item) => item.path === result.path);
-  mergeTracks(result.tracks);
-  const trackIds = result.tracks.map((track) => track.id);
-  if (existing) {
-    existing.name = result.name;
-    existing.trackIds = trackIds;
-  } else {
-    playlists.push({ name: result.name, path: result.path, trackIds });
-  }
-  currentPlaylist = result.name;
-  currentCollection = null;
-  currentView = "library";
-  currentSort = "songs";
-  document.querySelectorAll(".pivot").forEach((item) => {
-    item.classList.toggle("active", item.dataset.sort === "songs");
-  });
-  setActiveNav(null);
-  persist();
-  render();
-}
-
-async function addSongsToCurrentPlaylist() {
-  if (!currentPlaylist) return;
-  const targetName = currentPlaylist;
-  const newTracks = await window.medo.chooseFiles();
-  if (!newTracks.length) return;
-  const playlist = playlists.find((item) => item.name === targetName);
-  if (!playlist) return;
-  const previousIds = new Set(playlist.trackIds || []);
-  newTracks.forEach((track) => {
-    track.playlists = [...new Set([...(track.playlists || []), targetName])];
-  });
-  mergeTracks(newTracks);
-  playlist.trackIds = [...(playlist.trackIds || []), ...newTracks.map((track) => track.id)]
-    .filter((id, index, values) => values.indexOf(id) === index);
-  const added = playlist.trackIds.filter(id => !previousIds.has(id)).length;
-  showActionFeedback(`已添加 ${added} 首到“${playlist.name}”，重复跳过 ${newTracks.length - added} 首`);
-  persist();
-  render();
-}
-
-function confirmPlaylistAction(title, message) {
-  return new Promise(resolve => {
-    const dialog = document.createElement("dialog");
-    dialog.className = "track-info-dialog playlist-name-dialog";
-    dialog.setAttribute("aria-labelledby", "playlist-confirm-title");
-    dialog.innerHTML = '<form method="dialog"><header><h2 id="playlist-confirm-title"></h2></header><p></p><footer><button value="cancel" autofocus>取消</button><button class="primary" value="confirm">确认</button></footer></form>';
-    dialog.querySelector("h2").textContent = title;
-    dialog.querySelector("p").textContent = message;
-    dialog.addEventListener("close", () => { const confirmed = dialog.returnValue === "confirm"; dialog.remove(); resolve(confirmed); }, {once:true});
-    document.body.append(dialog); dialog.showModal();
-  });
-}
-
-function requestPlaylistName(title, initialName, excluded = null, allowExisting = false) {
-  return new Promise(resolve => {
-    const dialog = document.createElement("dialog");
-    dialog.className = "track-info-dialog playlist-name-dialog";
-    dialog.setAttribute("aria-labelledby", "playlist-name-title");
-    dialog.innerHTML = '<form><header><h2 id="playlist-name-title"></h2></header><label>歌单名称<input maxlength="100" aria-describedby="playlist-name-error" required></label><p id="playlist-name-error" role="alert"></p><footer><button type="button">取消</button><button class="primary" type="submit">保存</button></footer></form>';
-    dialog.querySelector("h2").textContent = title;
-    const input = dialog.querySelector("input");
-    input.value = initialName;
-    let value = null;
-    dialog.querySelector('button[type="button"]').onclick = () => dialog.close();
-    dialog.querySelector("form").onsubmit = event => {
-      event.preventDefault();
-      const name = input.value.trim();
-      const duplicate = !allowExisting && playlists.some(p => p !== excluded && p.name.toLocaleLowerCase() === name.toLocaleLowerCase());
-      const error = !name ? "请输入歌单名称" : duplicate ? "已有同名歌单，请换一个名称" : "";
-      dialog.querySelector("#playlist-name-error").textContent = error;
-      input.setAttribute("aria-invalid", String(Boolean(error)));
-      if (error) { input.focus(); return; }
-      value = name;
-      dialog.close();
-    };
-    dialog.addEventListener("close", () => { dialog.remove(); resolve(value); }, {once:true});
-    document.body.append(dialog);
-    dialog.showModal();
-    input.focus(); input.select();
-  });
-}
-
-async function renamePlaylist(playlistName) {
-  const playlist = playlists.find((item) => item.name === playlistName);
-  if (!playlist) return;
-  const nextName = await requestPlaylistName("重命名歌单", playlist.name, playlist);
-  if (!playlists.includes(playlist)) return;
-  if (!nextName || nextName === playlist.name) return;
-  const previousName = playlist.name;
-  playlist.name = nextName;
-  tracks.forEach((track) => {
-    if (!track.playlists?.includes(previousName)) return;
-    track.playlists = track.playlists.map((name) => name === previousName ? nextName : name);
-  });
-  if (currentPlaylist === previousName) currentPlaylist = nextName;
-  persist();
-  render();
-}
-
-function renameCurrentPlaylist() {
-  renamePlaylist(currentPlaylist);
-}
-
-async function deletePlaylist(playlistName) {
-  const playlist = playlists.find((item) => item.name === playlistName);
-  if (!playlist || !await confirmPlaylistAction("删除歌单", `删除“${playlist.name}”？本地歌曲文件不会删除。`)) return;
-  if (!playlists.includes(playlist)) return;
-  const deletedName = playlist.name;
-  playlists = playlists.filter((item) => item !== playlist);
-  tracks.forEach((track) => {
-    track.playlists = (track.playlists || []).filter((name) => name !== deletedName);
-  });
-  if (currentPlaylist === deletedName) {
-    currentPlaylist = null;
-    currentView = "library";
-    setActiveNav(document.querySelector('[data-view="library"]'));
-  }
-  persist();
-  render();
-}
-
-function deleteCurrentPlaylist() {
-  deletePlaylist(currentPlaylist);
-}
-
-async function savePlaybackQueueAsPlaylist() {
-  const date = new Date();
-  const defaultName = `播放列表${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
-
-  const queueIds = playbackQueueIds.filter((id) => tracks.some((track) => track.id === id));
-  if (!queueIds.length) {
-    showActionFeedback("当前播放列表为空");
-    return;
-  }
-  const name = await requestPlaylistName("保存为歌单", defaultName, null, true);
-  if (!name) return;
-  const existing = playlists.find(playlist => playlist.name.toLocaleLowerCase() === name.toLocaleLowerCase());
-  if (existing) {
-    if (!await confirmPlaylistAction("替换歌单", `“${existing.name}”已存在，是否用当前队列替换？`)) return;
-    if (!playlists.includes(existing)) return;
-    existing.trackIds = [...queueIds];
-    tracks.forEach(track => {
-      track.playlists = (track.playlists || []).filter(value => value !== existing.name);
-    });
-    existing.name = name;
-  } else playlists.push({ name, path: null, trackIds: [...queueIds] });
-  showActionFeedback(`已保存 ${queueIds.length} 首到“${name}”`);
-  tracks.forEach((track) => {
-    if (!queueIds.includes(track.id)) return;
-    track.playlists = [...new Set([...(track.playlists || []), name])];
-  });
-  persist();
-  renderPlaylists();
-}
-
-async function migratePlaylistOrder() {
-  let changed = false;
-  for (const playlist of playlists.filter((item) => !item.trackIds?.length)) {
-    const result = await window.medo.loadPlaylist(playlist.path);
-    if (!result) continue;
-    mergeTracks(result.tracks);
-    playlist.name = result.name;
-    playlist.trackIds = result.tracks.map((track) => track.id);
-    changed = true;
-  }
-  if (changed) {
-    persist();
-    render();
-  }
-}
-
-async function initializeDefaultLibrary() {
-  if (localStorage.getItem("medo.initialScanComplete") === "true") {
-    if (localStorage.getItem("medo.indexSchema") !== "2") {
-      await rebuildMusicLibraryIndex();
-      localStorage.setItem("medo.indexSchema", "2");
-    }
-    syncMusicFolderWatchers();
-    await scanManagedFoldersIncrementally();
-    return;
-  }
-  try {
-    const discovered = await window.medo.discoverDefaultLibrary();
-    if (!discovered) return;
-    if (discovered.folder && !musicFolders.some((folder) => folder.toLowerCase() === discovered.folder.toLowerCase())) {
-      musicFolders.push(discovered.folder);
-    }
-    mergeTracks(discovered.tracks || [], false);
-    for (const imported of discovered.playlists || []) {
-      mergeTracks(imported.tracks || [], false);
-      const existing = playlists.find((playlist) => playlist.path === imported.path);
-      const next = {
-        name: imported.name,
-        path: imported.path,
-        trackIds: (imported.tracks || []).map((track) => track.id)
-      };
-      if (existing) Object.assign(existing, next);
-      else playlists.push(next);
-    }
-    localStorage.setItem("medo.initialScanComplete", "true");
-    localStorage.setItem("medo.indexSchema", "2");
-    persist();
-    render();
-    syncMusicFolderWatchers();
-  } catch {
-    // Leave the flag unset so a temporary first-run failure can retry next launch.
-  }
-}
-
-function showActionFeedback(message, undo = null) {
+function showActionFeedback(message, undo = null, actionLabel = "撤销") {
   let toast = document.querySelector("#action-feedback");
   if (!toast) {
     toast = document.createElement("div");
@@ -2893,163 +2434,12 @@ function showActionFeedback(message, undo = null) {
   toast.append(label);
   if (undo) {
     const button = document.createElement("button");
-    button.textContent = "撤销";
+    button.textContent = actionLabel;
     button.addEventListener("click", undo, { once: true });
     toast.append(button);
   }
   toast.hidden = false;
   showActionFeedback.timer = setTimeout(() => { toast.hidden = true; }, undo ? 8000 : 3500);
-}
-
-function showPlaybackError(track, message = "播放失败，已自动跳到下一首") {
-  let toast = document.querySelector("#playback-error-toast");
-  if (!toast) {
-    toast = document.createElement("div");
-    toast.id = "playback-error-toast";
-    toast.className = "playback-error-toast";
-    document.body.append(toast);
-  }
-  const mediaError = audio.error;
-  const errorNames = { 1: "播放已中止", 2: "文件读取错误", 3: "音频解码失败", 4: "格式不受支持" };
-  const detail = mediaError ? `（${errorNames[mediaError.code] || `错误 ${mediaError.code}`}）` : "";
-  toast.textContent = `${track?.title || "歌曲"}：${message}${detail}`;
-  toast.classList.add("visible");
-  clearTimeout(showPlaybackError.timer);
-  showPlaybackError.timer = setTimeout(() => toast.classList.remove("visible"), 4200);
-}
-
-function recoverPlaybackFailure(track) {
-  if (!track || playbackFailedIds.has(track.id)) return;
-  playbackFailedIds.add(track.id);
-  showPlaybackError(track);
-  const tracksById = new Map(tracks.map((item) => [item.id, item]));
-  const queue = playbackQueueIds.map((id) => tracksById.get(id)).filter(Boolean);
-  const start = Math.max(0, queue.findIndex((item) => item.id === track.id));
-  for (let offset = 1; offset <= queue.length; offset += 1) {
-    const candidate = queue[(start + offset) % queue.length];
-    if (!playbackFailedIds.has(candidate.id)) {
-      playTrack(tracks.findIndex((item) => item.id === candidate.id), true);
-      return;
-    }
-  }
-  showPlaybackError(track, "队列中没有可播放的文件");
-}
-
-async function playTrack(index, preserveQueue = false, preservePreviousNavigation = false) {
-  if (!tracks[index]) return;
-  ensureAudioProcessing();
-  if (!preserveQueue) playbackFailedIds.clear();
-  const generation = ++playbackGeneration;
-  if (!preserveQueue && currentView !== "now") {
-    playbackQueueIds = visibleTracks().map((track) => track.id);
-  }
-  if (!playbackQueueIds.length) playbackQueueIds = [tracks[index].id];
-  const track = tracks[index];
-  window.medo.updateLyricsWindow({ noLyrics: false, playing: true });
-  const resolvedSource = await window.medo.resolveMediaSource(track.path).catch(() => null);
-  if (generation !== playbackGeneration) return;
-  index = tracks.findIndex((candidate) => candidate.id === track.id);
-  if (index < 0) return;
-  if (!resolvedSource) {
-    recoverPlaybackFailure(track);
-    return;
-  }
-  track.url = resolvedSource;
-  loadMetadata(track).catch(() => {});
-  activeLyricIndex = -1;
-  ensureLyrics(track);
-  window.medo.updateLyricsWindow({
-    title: track.title,
-    artist: track.artist,
-    album: track.album,
-    primary: desktopLyricPrimaryColor,
-    secondary: desktopLyricSecondaryColor,
-    noLyrics: false,
-    playing: true
-  });
-  if (!track.transient) {
-    const identity = normalizedSongIdentity(track);
-    const nextCount = mergedPlayCount(track) + 1;
-    playStats[identity] = nextCount;
-    tracksWithSameSongIdentity(track).forEach((version) => {
-      version.playCount = nextCount;
-    });
-  }
-  switchingPlaybackGeneration = generation;
-  audio.pause();
-  if (generation !== playbackGeneration) return;
-  currentIndex = index;
-  if (!preservePreviousNavigation) {
-    lastPreviousRestartAt = 0;
-    lastPreviousRestartTrackId = null;
-  }
-  audio.src = track.url;
-  applyOutputVolume();
-  audio.load();
-  const ready = await new Promise((resolve, reject) => {
-    if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
-      resolve();
-      return;
-    }
-    const cleanup = () => {
-      clearTimeout(timeout);
-      audio.removeEventListener("canplay", onReady);
-      audio.removeEventListener("error", onError);
-    };
-    const onReady = () => { cleanup(); resolve(); };
-    const onError = () => { cleanup(); reject(audio.error); };
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error("media-load-timeout"));
-    }, 10000);
-    audio.addEventListener("canplay", onReady, { once: true });
-    audio.addEventListener("error", onError, { once: true });
-  }).catch(() => false);
-  if (generation !== playbackGeneration) return;
-  if (ready === false) {
-    switchingPlaybackGeneration = 0;
-    recoverPlaybackFailure(track);
-    return;
-  }
-  audio.play().then(() => {
-    if (generation !== playbackGeneration) return;
-    playbackFailedIds.delete(track.id);
-  }).catch((error) => {
-    if (generation !== playbackGeneration || error?.name === "AbortError") return;
-    switchingPlaybackGeneration = 0;
-    recoverPlaybackFailure(track);
-  });
-  if (!track.transient) {
-    const identity = normalizedSongIdentity(track);
-    const preferred = preferredRecentVersion(track);
-    recent = [
-      preferred.id,
-      ...recent.filter((id) => {
-        const candidate = tracks.find((item) => item.id === id);
-        return candidate && normalizedSongIdentity(candidate) !== identity;
-      })
-    ].slice(0, 100);
-  }
-  try {
-    updateNowPlaying(track);
-  } catch {
-    // Visual metadata, artwork and lyrics are isolated from audio playback.
-  }
-  schedulePersist();
-  if (currentView === "recent" || currentView === "now") {
-    render();
-  } else {
-    document.querySelectorAll(".track-row").forEach((row) => {
-      const active = row.dataset.trackId === track.id;
-      row.classList.toggle("active", active);
-      if (active && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-        row.querySelector(".row-cover")?.animate(
-          [{ opacity: .66, transform: "scale(.94)" }, { opacity: 1, transform: "scale(1)" }],
-          { duration: 260, easing: "cubic-bezier(.22,1,.36,1)" }
-        );
-      }
-    });
-  }
 }
 
 function updateMiniCoverState() {
@@ -3207,6 +2597,7 @@ function attachQueueDrag(button, trackId) {
 }
 
 function renderPlaybackDetail() {
+  updatePlaylistSaveControls();
   const track = tracks[currentIndex];
   if (!track) return;
   [
@@ -3296,166 +2687,6 @@ function renderPlaybackDetail() {
   };
 }
 
-function togglePlayback() {
-  if (!audio.src) {
-    const available = visibleTracks().filter((track) => track && !track.transient);
-    const first = available[0] || tracks.find((track) => !track.transient);
-    if (first) {
-      if (!playbackQueueIds.length) {
-        playbackQueueIds = [first.id];
-        persist();
-      }
-      playTrack(tracks.findIndex((track) => track.id === first.id), true);
-    }
-  } else if (audio.paused) {
-    ensureAudioProcessing();
-    applyOutputVolume();
-    const generation = playbackGeneration;
-    const track = tracks[currentIndex];
-    audio.play().catch((error) => {
-      if (generation === playbackGeneration && error?.name !== "AbortError") recoverPlaybackFailure(track);
-    });
-  } else {
-    audio.pause();
-  }
-}
-
-function clearCurrentPlayback() {
-  playbackGeneration += 1;
-  switchingPlaybackGeneration = 0;
-  audio.pause();
-  audio.removeAttribute("src");
-  audio.load();
-  currentIndex = -1;
-  applyCoverTheme(missingArt);
-  updateMiniCoverState();
-  activeLyricIndex = -1;
-  renderedLyricsState = null;
-  clearTimeout(lyricInspectionRestoreTimer);
-  lyricInspectionActive = false;
-  lyricFollowAnimation?.cancel();
-  lyricsStage.classList.remove("inspecting");
-  document.querySelectorAll(".track-row.active").forEach((row) => row.classList.remove("active"));
-  updatePlayButtonState(false);
-  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
-  progress.value = 0;
-  updateRangeGradient(progress, 0);
-  document.querySelector("#current-time").textContent = formatTime(0);
-  document.querySelector("#duration").textContent = formatTime(0);
-  document.querySelector("#now-title").textContent = "未选择歌曲";
-  document.querySelector("#now-album").textContent = "MedoMusic";
-  document.querySelector("#mini-cover").src = missingArt;
-  updateFavoriteButton();
-  if ("mediaSession" in navigator) navigator.mediaSession.metadata = null;
-  window.medo.updateLyricsWindow({
-    title: "MedoMusic",
-    current: "等待播放歌曲",
-    next: "",
-    playing: false
-  });
-}
-
-function nextTrack(direction = 1) {
-  const tracksById = new Map(tracks.map((track) => [track.id, track]));
-  let queue = playbackQueueIds.map((id) => tracksById.get(id)).filter(Boolean);
-  const currentId = tracks[currentIndex]?.id;
-  if (!queue.length && direction > 0) {
-    const available = visibleTracks().filter((track) => track && !track.transient);
-    const candidate = available[0] || tracks.find((track) => !track.transient);
-    if (candidate) {
-      const queueIds = queue.map((track) => track.id);
-      if (!queueIds.includes(candidate.id)) {
-        queueIds.splice(0, 0, candidate.id);
-        playbackQueueIds = queueIds;
-        persist();
-      }
-      return playTrack(tracks.findIndex((track) => track.id === candidate.id), true);
-    }
-  }
-  if (!queue.length) return;
-  let continuingPreviousNavigation = false;
-  if (direction < 0 && currentId && !audio.paused) {
-    const now = Date.now();
-    const repeatedPrevious = lastPreviousRestartAt > 0 && now - lastPreviousRestartAt <= 3000;
-    if (!repeatedPrevious) {
-      audio.currentTime = 0;
-      progress.value = 0;
-      updateRangeGradient(progress, 0);
-      document.querySelector("#current-time").textContent = formatTime(0);
-      lastPreviousRestartAt = now;
-      lastPreviousRestartTrackId = currentId;
-      schedulePersist();
-      return;
-    }
-    continuingPreviousNavigation = true;
-    lastPreviousRestartAt = now;
-    lastPreviousRestartTrackId = currentId;
-  }
-  if (!continuingPreviousNavigation) {
-    lastPreviousRestartAt = 0;
-    lastPreviousRestartTrackId = null;
-  }
-  if (playMode === "shuffle") {
-    if (queue.length === 1) {
-      return playTrack(tracks.findIndex((track) => track.id === queue[0].id), true, continuingPreviousNavigation);
-    }
-    const queueIds = queue.map((track) => track.id);
-    const signature = [...queueIds].sort().join("\u001f");
-    if (shuffleQueueSignature !== signature) {
-      shuffleQueueSignature = signature;
-      shuffleHistoryIds = currentId && queueIds.includes(currentId) ? [currentId] : [];
-      shuffleHistoryIndex = shuffleHistoryIds.length - 1;
-      shuffleRemainingIds = queueIds.filter((id) => id !== currentId);
-      for (let index = shuffleRemainingIds.length - 1; index > 0; index -= 1) {
-        const swapIndex = Math.floor(Math.random() * (index + 1));
-        [shuffleRemainingIds[index], shuffleRemainingIds[swapIndex]] =
-          [shuffleRemainingIds[swapIndex], shuffleRemainingIds[index]];
-      }
-    }
-    if (currentId && shuffleHistoryIds[shuffleHistoryIndex] !== currentId) {
-      shuffleHistoryIds = shuffleHistoryIds.slice(0, shuffleHistoryIndex + 1);
-      shuffleHistoryIds.push(currentId);
-      shuffleHistoryIndex = shuffleHistoryIds.length - 1;
-      shuffleRemainingIds = shuffleRemainingIds.filter((id) => id !== currentId);
-    }
-    if (direction < 0 && shuffleHistoryIndex > 0) {
-      shuffleHistoryIndex -= 1;
-      const previousId = shuffleHistoryIds[shuffleHistoryIndex];
-      return playTrack(tracks.findIndex((track) => track.id === previousId), true, continuingPreviousNavigation);
-    }
-    if (direction > 0 && shuffleHistoryIndex < shuffleHistoryIds.length - 1) {
-      shuffleHistoryIndex += 1;
-      const forwardId = shuffleHistoryIds[shuffleHistoryIndex];
-      return playTrack(tracks.findIndex((track) => track.id === forwardId), true);
-    }
-    if (!shuffleRemainingIds.length) {
-      shuffleRemainingIds = queueIds.filter((id) => id !== currentId);
-      for (let index = shuffleRemainingIds.length - 1; index > 0; index -= 1) {
-        const swapIndex = Math.floor(Math.random() * (index + 1));
-        [shuffleRemainingIds[index], shuffleRemainingIds[swapIndex]] =
-          [shuffleRemainingIds[swapIndex], shuffleRemainingIds[index]];
-      }
-      shuffleHistoryIds = currentId ? [currentId] : [];
-      shuffleHistoryIndex = shuffleHistoryIds.length - 1;
-    }
-    const nextId = shuffleRemainingIds.pop();
-    if (!nextId) return;
-    shuffleHistoryIds = shuffleHistoryIds.slice(0, shuffleHistoryIndex + 1);
-    shuffleHistoryIds.push(nextId);
-    shuffleHistoryIndex = shuffleHistoryIds.length - 1;
-    return playTrack(tracks.findIndex((track) => track.id === nextId), true);
-  }
-  const queueIndex = queue.findIndex((track) => track.id === currentId);
-  const nextIndex = queueIndex < 0
-    ? (direction < 0 ? queue.length - 1 : 0)
-    : (queueIndex + direction + queue.length) % queue.length;
-  playTrack(
-    tracks.findIndex((track) => track.id === queue[nextIndex].id),
-    true,
-    direction < 0 && continuingPreviousNavigation
-  );
-}
-
 function toggleFavorite(id = tracks[currentIndex]?.id) {
   if (!id) return;
   favorites.has(id) ? favorites.delete(id) : favorites.add(id);
@@ -3493,6 +2724,7 @@ function scheduleStartupMaintenance() {
     migratePlaylistOrder();
     initializeDefaultLibrary();
     renderAppInfo();
+    if (autoCheckUpdates) checkForAppUpdates(true);
   };
   if (typeof window.requestIdleCallback === "function") {
     window.requestIdleCallback(run, { timeout: 2000 });
@@ -3522,7 +2754,7 @@ function extensionTrack(track) {
 function extensionPlaybackState() {
   return {
     currentTrack: extensionTrack(tracks[currentIndex]),
-    playing: Boolean(audio.src && !audio.paused),
+    playing: Boolean(audio.src && !audio.paused && !playbackPausePending),
     currentTime: Number(audio.currentTime) || 0,
     duration: Number(audio.duration) || 0,
     volume: desiredVolume,
@@ -3546,63 +2778,6 @@ function setFavoriteFromExtension(trackId, favorite) {
   return extensionTrack(track);
 }
 
-function validTrackIds(values) {
-  const known = new Set(tracks.filter((track) => !track.transient).map((track) => track.id));
-  return [...new Set((Array.isArray(values) ? values : []).filter((id) => known.has(id)))];
-}
-
-function createPlaylistFromExtension(name, trackIds = []) {
-  const normalized = String(name || "").trim();
-  if (!normalized || normalized.length > 100) throw new Error("invalid-playlist-name");
-  if (playlists.some((playlist) => playlist.name.toLocaleLowerCase() === normalized.toLocaleLowerCase())) {
-    throw new Error("playlist-already-exists");
-  }
-  const ids = validTrackIds(trackIds);
-  playlists.push({ name: normalized, path: null, trackIds: ids });
-  tracks.forEach((track) => {
-    if (ids.includes(track.id)) track.playlists = [...new Set([...(track.playlists || []), normalized])];
-  });
-  persist();
-  render();
-  return playlists.at(-1);
-}
-
-function updatePlaylistFromExtension(currentName, changes = {}) {
-  const playlist = playlists.find((item) => item.name === currentName);
-  if (!playlist) throw new Error("playlist-not-found");
-  const nextName = changes.newName === undefined ? currentName : String(changes.newName || "").trim();
-  if (!nextName || nextName.length > 100) throw new Error("invalid-playlist-name");
-  if (nextName !== currentName && playlists.some((item) => item !== playlist && item.name.toLocaleLowerCase() === nextName.toLocaleLowerCase())) {
-    throw new Error("playlist-already-exists");
-  }
-  const nextIds = changes.trackIds === undefined ? [...(playlist.trackIds || [])] : validTrackIds(changes.trackIds);
-  tracks.forEach((track) => {
-    const names = new Set(track.playlists || []);
-    names.delete(currentName);
-    if (nextIds.includes(track.id)) names.add(nextName);
-    track.playlists = [...names];
-  });
-  playlist.name = nextName;
-  playlist.trackIds = nextIds;
-  if (currentPlaylist === currentName) currentPlaylist = nextName;
-  persist();
-  render();
-  return playlist;
-}
-
-function deletePlaylistFromExtension(name) {
-  const playlist = playlists.find((item) => item.name === name);
-  if (!playlist) throw new Error("playlist-not-found");
-  playlists = playlists.filter((item) => item !== playlist);
-  tracks.forEach((track) => {
-    track.playlists = (track.playlists || []).filter((value) => value !== name);
-  });
-  if (currentPlaylist === name) currentPlaylist = null;
-  persist();
-  render();
-  return { deleted: name };
-}
-
 async function handleMyFireflyCommand(payload = {}) {
   switch (payload.command) {
     case "get-state":
@@ -3619,9 +2794,7 @@ async function handleMyFireflyCommand(payload = {}) {
         .filter((value) => typeof value === "string" && value.trim()).slice(0, 200))];
       if (!paths.length) throw new Error("no-track-paths");
       const incoming = await window.medo.getExternalTracks(paths);
-      incoming.forEach((track) => { track.transient = false; });
-      mergeTracks(incoming);
-      return { added: incoming.map(extensionTrack) };
+      return { added: mergeTracks(incoming).map(extensionTrack) };
     }
     case "create-playlist":
       return createPlaylistFromExtension(payload.name, payload.trackIds);
@@ -3634,9 +2807,9 @@ async function handleMyFireflyCommand(payload = {}) {
     case "control": {
       const action = String(payload.action || "");
       if (action === "play") {
-        if (!audio.src || audio.paused) togglePlayback();
+        if (!audio.src || audio.paused || playbackPausePending) togglePlayback();
       } else if (action === "pause") {
-        audio.pause();
+        pausePlayback();
       } else if (action === "toggle") {
         togglePlayback();
       } else if (action === "next") {
@@ -3658,7 +2831,7 @@ async function handleMyFireflyCommand(payload = {}) {
       } else if (action === "seek") {
         const seconds = Number(payload.value);
         if (!Number.isFinite(seconds) || !audio.src) throw new Error("invalid-seek");
-        audio.currentTime = Math.min(Math.max(0, seconds), Number(audio.duration) || seconds);
+        seekPlaybackTo(Math.min(Math.max(0, seconds), Number(audio.duration) || seconds));
       } else if (action === "play-track") {
         const index = tracks.findIndex((track) => track.id === payload.trackId && !track.transient);
         if (index < 0) throw new Error("track-not-found");
@@ -3708,27 +2881,132 @@ async function renderAppInfo() {
   document.querySelector("#about-install-directory").textContent = info.installDirectory;
 }
 
-document.querySelector("#check-for-updates").addEventListener("click", async (event) => {
-  const button = event.currentTarget;
+function applyAutoUpdateSetting(enabled) {
+  autoCheckUpdates = Boolean(enabled);
+  localStorage.setItem("medo.autoCheckUpdates", String(autoCheckUpdates));
+  document.querySelector("#auto-check-updates").checked = autoCheckUpdates;
+}
+
+document.querySelector("#auto-check-updates").addEventListener("change", event => applyAutoUpdateSetting(event.target.checked));
+document.querySelector("#check-for-updates").addEventListener("click", () => checkForAppUpdates());
+document.querySelector("#reset-listening-time").addEventListener("click", async () => {
+  if (listeningTimeMs <= 0 || document.querySelector("dialog[open]")) return;
+  if (!await confirmPlaylistAction("重置听歌统计", "确认清空每日、每月、每年和总累计听歌时长？\n此操作不可撤销，最近播放记录和播放次数会保留。", "确认重置")) return;
+  if (resetListeningTime()) showActionFeedback("听歌时长统计已重置");
+});
+const listeningMonthTrigger = document.querySelector("#listening-calendar-month");
+const listeningMonthPicker = document.querySelector("#listening-month-picker");
+listeningMonthPicker.addEventListener("beforetoggle", event => {
+  if (event.newState === "open") {
+    listeningPickerYear = Number(listeningCalendarMonth.slice(0, 4));
+    renderListeningMonthPicker();
+  }
+});
+listeningMonthPicker.addEventListener("toggle", event => {
+  listeningMonthTrigger.setAttribute("aria-expanded", String(event.newState === "open"));
+  if (event.newState === "open") {
+    positionListeningMonthPicker();
+    const selected = listeningMonthPicker.querySelector('[aria-pressed="true"]:not(:disabled)') ||
+      listeningMonthPicker.querySelector("#listening-picker-months button:not(:disabled)");
+    selected?.focus({ preventScroll: true });
+  }
+});
+document.querySelector("#listening-picker-previous-year").addEventListener("click", () => {
+  listeningPickerYear -= 1;
+  renderListeningMonthPicker();
+});
+document.querySelector("#listening-picker-next-year").addEventListener("click", () => {
+  listeningPickerYear += 1;
+  renderListeningMonthPicker();
+});
+document.querySelector("#listening-picker-year").addEventListener("change", event => {
+  const year = event.target.valueAsNumber;
+  if (Number.isInteger(year) && year >= 1 && year <= new Date().getFullYear()) listeningPickerYear = year;
+  renderListeningMonthPicker();
+});
+document.querySelector("#listening-picker-year").addEventListener("keydown", event => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  event.stopPropagation();
+  event.target.dispatchEvent(new Event("change"));
+  listeningMonthPicker.querySelector("#listening-picker-months button:not(:disabled)")?.focus();
+});
+listeningMonthPicker.addEventListener("keydown", event => {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    listeningMonthPicker.hidePopover();
+    listeningMonthTrigger.focus({ preventScroll: true });
+    return;
+  }
+  const buttons = [...listeningMonthPicker.querySelectorAll("#listening-picker-months button")];
+  const index = buttons.indexOf(document.activeElement);
+  if (index < 0) return;
+  const offsets = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -4, ArrowDown: 4 };
+  if (event.key in offsets || event.key === "Home" || event.key === "End") {
+    event.preventDefault();
+    let next = event.key === "Home" ? 0 : event.key === "End" ? buttons.findLastIndex(button => !button.disabled) : index + offsets[event.key];
+    next = Math.max(0, Math.min(buttons.length - 1, next));
+    if (!buttons[next].disabled) buttons[next].focus();
+  }
+});
+document.querySelector("#listening-picker-current").addEventListener("click", () => {
+  listeningSelectedDate = listeningDateKey(new Date());
+  showListeningMonth(listeningSelectedDate.slice(0, 7));
+  listeningMonthPicker.hidePopover();
+  listeningMonthTrigger.focus({ preventScroll: true });
+});
+document.addEventListener("scroll", event => {
+  if (listeningMonthPicker.matches(":popover-open") && !listeningMonthPicker.contains(event.target)) listeningMonthPicker.hidePopover();
+}, { capture: true });
+window.addEventListener("resize", () => {
+  if (listeningMonthPicker.matches(":popover-open")) listeningMonthPicker.hidePopover();
+});
+window.addEventListener("blur", () => {
+  if (listeningMonthPicker.matches(":popover-open")) listeningMonthPicker.hidePopover();
+});
+document.querySelector("#listening-calendar-previous").addEventListener("click", () => moveListeningMonth(-1));
+document.querySelector("#listening-calendar-next").addEventListener("click", () => moveListeningMonth(1));
+document.querySelector("#listening-calendar-today").addEventListener("click", () => {
+  listeningSelectedDate = listeningDateKey(new Date());
+  showListeningMonth(listeningSelectedDate.slice(0, 7));
+});
+
+async function checkForAppUpdates(automatic = false) {
+  const button = document.querySelector("#check-for-updates");
   const label = button.querySelector("span:last-child");
   if (button.disabled) return;
   button.disabled = true;
   button.classList.remove("latest", "failed");
   button.classList.add("checking");
   label.textContent = "\u6b63\u5728\u68c0\u67e5";
-  const result = await window.medo.checkForUpdates();
+  let result;
+  try {
+    result = await window.medo.checkForUpdates({ automatic });
+  } catch {
+    result = { error: "unavailable" };
+  }
   button.classList.remove("checking");
   if (result?.error) {
-    button.classList.add("failed");
-    label.textContent = "\u68c0\u67e5\u5931\u8d25";
+    button.classList.toggle("failed", !automatic);
+    label.textContent = automatic ? "检查更新" : "检查失败";
   } else if (result?.updateAvailable) {
-    label.textContent = `\u53d1\u73b0 ${result.latestVersion}`;
+    label.textContent = `发现 ${result.latestVersion}`;
+    if (automatic && autoCheckUpdates) {
+      showActionFeedback(`发现新版本 MedoMusic ${result.latestVersion}`, async () => {
+        try {
+          await window.medo.openUpdateRelease(result.releaseUrl);
+        } catch {
+          showActionFeedback("更新页面未能打开，请稍后在设置中检查更新");
+        }
+      }, "查看更新");
+    }
   } else {
     button.classList.add("latest");
     label.textContent = "\u8f6f\u4ef6\u5df2\u6700\u65b0";
   }
   button.disabled = false;
-});
+}
 
 function formatTime(seconds) {
   if (!Number.isFinite(seconds)) return "0:00";
@@ -3761,16 +3039,6 @@ function showVolumeBubble(autoHide = false) {
 function hideVolumeBubble() {
   clearTimeout(volumeBubbleHideTimer);
   volumeBubbleHideTimer = setTimeout(() => document.querySelector(".volume-control").classList.remove("adjusting"), 90);
-}
-
-function updateMediaSession(track) {
-  if (!("mediaSession" in navigator)) return;
-  navigator.mediaSession.metadata = new MediaMetadata({
-    title: track.title,
-    album: track.album,
-    artist: track.artist || "未知艺术家",
-    artwork: track.cover ? [{ src: track.cover }] : []
-  });
 }
 
 function setActiveNav(activeButton) {
@@ -4052,13 +3320,34 @@ document.querySelector("#next-selected").addEventListener("click", () => queueSe
 document.querySelector("#append-selected").addEventListener("click", () => queueSelectedTracks(false));
 document.querySelector("#queue-selected").addEventListener("click", () => {
   const selected = visibleTracks().filter(track => selectedTrackIds.has(track.id));
-  if (!selected.length || document.querySelector(".playlist-picker-dialog")) return;
+  if (!selected.length || !canSavePlaylistTracks(selected) || document.querySelector(".playlist-picker-dialog")) return;
   const dialog = document.createElement("dialog");
   dialog.className = "track-info-dialog playlist-picker-dialog";
   dialog.setAttribute("aria-labelledby", "playlist-picker-title");
   dialog.innerHTML = '<form method="dialog"><header><h2 id="playlist-picker-title">添加到歌单</h2><p></p></header><div class="playlist-picker-options"></div><footer><button value="cancel">取消</button></footer></form>';
-  dialog.querySelector("header p").textContent = playlists.length ? `将 ${selected.length} 首歌曲添加到：` : "还没有歌单，请先创建歌单。";
+  dialog.querySelector("header p").textContent = `将 ${selected.length} 首歌曲添加到：`;
   const list = dialog.querySelector(".playlist-picker-options");
+  const createButton = document.createElement("button");
+  createButton.type = "button";
+  createButton.className = "playlist-picker-create";
+  createButton.textContent = "创建新播放列表";
+  createButton.setAttribute("aria-label", "创建新播放列表");
+  createButton.addEventListener("click", async () => {
+    dialog.close();
+    // Remove the picker before opening the naming dialog in the same modal layer.
+    dialog.remove();
+    const playlist = await createPlaylistWithTracks(selected.map(track => track.id));
+    if (!playlist) return;
+    selectedTrackIds.clear();
+    multiSelectionMode = false;
+    render();
+  });
+  list.append(createButton);
+  if (playlists.length) {
+    const separator = document.createElement("div");
+    separator.setAttribute("role", "separator");
+    list.append(separator);
+  }
   playlists.forEach(playlist => {
     const button = document.createElement("button");
     button.type = "button";
@@ -4066,9 +3355,8 @@ document.querySelector("#queue-selected").addEventListener("click", () => {
     button.addEventListener("click", () => {
       if (!playlists.includes(playlist)) return;
       const addedCount = selected.filter(track => !(playlist.trackIds || []).includes(track.id)).length;
-      playlist.trackIds = [...new Set([...(playlist.trackIds || []), ...selected.map(track => track.id)])];
+      if (!addTracksToPlaylist(playlist, selected.map(track => track.id))) return;
       showActionFeedback(addedCount ? `已添加 ${addedCount} 首到“${playlist.name}”` : "所选歌曲已在该歌单中");
-      selected.forEach(track => { track.playlists = [...new Set([...(track.playlists || []), playlist.name])]; });
       selectedTrackIds.clear();
       multiSelectionMode = false;
       persist();
@@ -4365,6 +3653,15 @@ window.medo.onLyricsWindowLockState((locked) => {
 
 const lyricsStage = document.querySelector(".lyrics-stage");
 const lyricsLines = document.querySelector("#lyrics-lines");
+const lyricLayoutObserver = new ResizeObserver(() => {
+  if (currentView !== "player" || lyricInspectionActive || lyricsLines.classList.contains("unsynced")) return;
+  const active = lyricsLines.querySelector(".lyric-line.active");
+  if (active && lyricsLines.style.transform !== `translateY(${-active.offsetTop - active.offsetHeight / 2}px)`) {
+    animateLyricFollow(lyricsLines, active);
+  }
+});
+lyricLayoutObserver.observe(lyricsLines);
+lyricLayoutObserver.observe(lyricsLines.parentElement);
 function freezeLyricFollow() {
   const transform = getComputedStyle(lyricsLines).transform;
   const offset = transform === "none" ? 0 : new DOMMatrixReadOnly(transform).m42;
@@ -4451,7 +3748,7 @@ lyricsStage.addEventListener("click", (event) => {
     scheduleLyricFollowRestore();
     return;
   }
-  audio.currentTime = Math.max(0, Number(line.dataset.start) || 0);
+  seekPlaybackTo(Math.max(0, Number(line.dataset.start) || 0));
   selectedLyricElement.classList.remove("selected");
   selectedLyricElement = null;
   clearTimeout(lyricInspectionRestoreTimer);
@@ -4576,6 +3873,22 @@ document.querySelectorAll(".theme-option").forEach((button) => {
     localStorage.setItem("medo.theme", theme);
   });
 });
+const interfaceScaleSelect = document.querySelector("#interface-scale");
+function syncInterfaceScale(state) {
+  if (!state) return;
+  interfaceScaleSelect.value = String(state.requested);
+  const fitted = state.effective + .001 < state.requested;
+  document.querySelector("#interface-scale-status").textContent = fitted
+    ? `当前适配为 ${Math.round(state.effective * 100)}%，扩大窗口可使用所选比例。`
+    : "跟随系统显示缩放，可按需调整界面大小。";
+}
+window.medo.onWindowScale(syncInterfaceScale);
+interfaceScaleSelect.addEventListener("change", async () => {
+  const requested = interfaceScaleSelect.value;
+  const state = await window.medo.setWindowScale(Number(requested));
+  localStorage.setItem("medo.interfaceScale", requested);
+  syncInterfaceScale(state);
+});
 document.querySelector("#theme-primary-color").addEventListener("input", (event) => {
   applyThemeColors(event.target.value, themeSecondaryColor);
 });
@@ -4593,7 +3906,7 @@ document.querySelector("#reset-theme-colors").addEventListener("click", () => {
   localStorage.removeItem("medo.themeSecondaryColor");
   applyThemeColors("#2864ff", "#d934ff");
 });
-document.querySelectorAll(".display-option").forEach((button) => {
+document.querySelectorAll("[data-display-value]").forEach((button) => {
   button.addEventListener("click", () => {
     applyDisplayMode(button.dataset.displayValue);
     localStorage.setItem("medo.displayMode", displayMode);
@@ -4659,6 +3972,15 @@ document.querySelector("#reset-desktop-lyric-colors").addEventListener("click", 
 document.querySelector("#detail-lyric-size").addEventListener("input", (event) => {
   applyDetailLyricSize(event.target.value);
 });
+document.querySelector("#inactive-lyric-color").addEventListener("input", (event) => {
+  applyInactiveLyricColor(event.target.value);
+});
+document.querySelector("#inactive-lyric-color").addEventListener("change", (event) => {
+  applyInactiveLyricColor(event.target.value, true);
+});
+document.querySelector("#reset-inactive-lyric-color").addEventListener("click", () => {
+  applyInactiveLyricColor(null, true);
+});
 document.querySelectorAll(".desktop-lyric-lock-option").forEach((button) => {
   button.addEventListener("click", () => {
     const locked = button.dataset.lockedValue === "true";
@@ -4683,7 +4005,7 @@ window.medo.onResolvedTheme((resolvedTheme) => {
   document.documentElement.dataset.theme = resolvedTheme;
 });
 const applyWindowMaterial = (material) => {
-  document.documentElement.dataset.windowMaterial = ["blur", "acrylic"].includes(material) ? material : "none";
+  document.documentElement.dataset.windowMaterial = ["transparent", "blur", "acrylic"].includes(material) ? material : "none";
   // index.html paints an opaque startup color before styles load. It must be
   // cleared as well as the body background to expose the native backdrop.
   document.documentElement.style.backgroundColor = document.documentElement.dataset.windowMaterial === "none" ? "var(--background)" : "transparent";
@@ -4691,6 +4013,7 @@ const applyWindowMaterial = (material) => {
 };
 window.medo.onWindowMaterial?.(applyWindowMaterial);
 window.medo.getWindowMaterial?.().then(applyWindowMaterial);
+const glassBackground = window.MedoGlassBackground.create({ onChange: updateThemeInkColors, updateRange: updateRangeGradient });
 document.addEventListener("keydown", (event) => {
   if (document.querySelector("dialog[open]") || event.defaultPrevented) return;
   if (event.key === "Escape") {
@@ -4722,7 +4045,7 @@ document.addEventListener("keydown", (event) => {
   const seekOffset = event.key === "ArrowLeft" ? -5 : event.key === "ArrowRight" ? 5 : 0;
   if (!seekOffset) return;
   event.preventDefault();
-  audio.currentTime = Math.max(0, Math.min(audio.duration, audio.currentTime + seekOffset));
+  seekPlaybackTo(Math.max(0, Math.min(audio.duration, audio.currentTime + seekOffset)));
   progress.value = audio.duration ? audio.currentTime / audio.duration * 100 : 0;
   updateRangeGradient(progress, audio.duration ? audio.currentTime / audio.duration : 0);
   document.querySelector("#current-time").textContent = formatTime(audio.currentTime);
@@ -4732,12 +4055,23 @@ document.addEventListener("keydown", (event) => {
 
 audio.addEventListener("play", () => {
   switchingPlaybackGeneration = 0;
-  updatePlayButtonState(true);
-  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
+  updatePlayButtonState(!playbackPausePending);
+  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = playbackPausePending ? "paused" : "playing";
   activeLyricIndex = -1;
   updateLyricsAtTime();
 });
+audio.addEventListener("playing", () => {
+  if (playbackFadeEnabled && !playbackPausePending) setPlaybackFadeTarget(1, .24);
+  startListeningTime();
+});
+audio.addEventListener("seeked", startListeningTime);
+audio.addEventListener("ratechange", accumulateListeningTime);
+["pause", "waiting", "seeking", "ended", "emptied", "error", "abort"].forEach(eventName => {
+  audio.addEventListener(eventName, stopListeningTime);
+});
 audio.addEventListener("pause", () => {
+  if (!audio.paused) return;
+  resetPlaybackFade();
   if (switchingPlaybackGeneration !== 0) return;
   updatePlayButtonState(false);
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
@@ -4746,12 +4080,13 @@ audio.addEventListener("pause", () => {
   schedulePersist();
 });
 audio.addEventListener("timeupdate", () => {
+  accumulateListeningTime();
   if (backgroundMode) updateLyricsAtTime();
   if (backgroundMode && performance.now() - lastBackgroundUiUpdate < 1000) return;
   lastBackgroundUiUpdate = performance.now();
   if (performance.now() - lastPlaybackStateSave > 5000) {
     lastPlaybackStateSave = performance.now();
-    persist();
+    persistPlaybackState();
   }
   progress.value = audio.duration ? (audio.currentTime / audio.duration) * 100 : 0;
   updateRangeGradient(progress, audio.duration ? audio.currentTime / audio.duration : 0);
@@ -4777,7 +4112,7 @@ audio.addEventListener("ended", () => {
     const queueIndex = playbackQueueIds.indexOf(tracks[currentIndex]?.id);
     if (queueIndex < 0 || queueIndex >= playbackQueueIds.length - 1) {
       audio.pause();
-      audio.currentTime = audio.duration || 0;
+      seekPlaybackTo(audio.duration || 0);
       return;
     }
   }
@@ -4786,7 +4121,7 @@ audio.addEventListener("ended", () => {
 audio.addEventListener("error", () => recoverPlaybackFailure(tracks[currentIndex]));
 
 progress.addEventListener("input", () => {
-  if (audio.duration) audio.currentTime = (Number(progress.value) / 100) * audio.duration;
+  if (audio.duration) seekPlaybackTo((Number(progress.value) / 100) * audio.duration);
 });
 volume.addEventListener("input", () => {
   desiredVolume = Number(volume.value);
@@ -4814,36 +4149,6 @@ volume.addEventListener("keydown", (event) => {
 volume.addEventListener("keyup", hideVolumeBubble);
 volume.addEventListener("blur", hideVolumeBubble);
 
-async function restorePlaybackState() {
-  desiredVolume = Math.min(1, Math.max(0, Number(restoredPlaybackState.volume ?? .7)));
-  volume.value = desiredVolume;
-  updateVolumeDisplay();
-  applyOutputVolume();
-  audio.muted = Boolean(restoredPlaybackState.muted);
-  updateMuteButton();
-  const index = tracks.findIndex((track) => track.id === restoredPlaybackState.trackId);
-  if (index < 0) return;
-  const track = tracks[index];
-  const generation = ++playbackGeneration;
-  const source = await window.medo.resolveMediaSource(track.path).catch(() => null);
-  if (!source || generation !== playbackGeneration) return;
-  const restoredIndex = tracks.findIndex((candidate) => candidate.id === track.id);
-  if (restoredIndex < 0) return;
-  currentIndex = restoredIndex;
-  track.url = source;
-  audio.src = source;
-  audio.load();
-  audio.addEventListener("loadedmetadata", () => {
-    if (generation !== playbackGeneration) return;
-    audio.currentTime = Math.min(Number(restoredPlaybackState.currentTime) || 0, Math.max(0, audio.duration - .1));
-  }, { once: true });
-  updateNowPlaying(track);
-  loadMetadata(track).catch(() => {});
-  ensureLyrics(track);
-  audio.pause();
-  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
-}
-
 window.addEventListener("beforeunload", persist);
 
 function updateBackgroundMode() {
@@ -4852,6 +4157,8 @@ function updateBackgroundMode() {
   if (backgroundMode) coverAtmosphere.finish();
   if (!backgroundMode) {
     lastBackgroundUiUpdate = 0;
+    updateListeningTimeDisplay();
+    scheduleListeningCalendarRollover();
     if (currentView === "player") {
       updateLyricsAtTime();
       renderPlaybackDetail();
@@ -4865,50 +4172,30 @@ window.medo.onWindowVisibility((visible) => {
 });
 
 if ("mediaSession" in navigator) {
-  navigator.mediaSession.setActionHandler("play", () => audio.play());
-  navigator.mediaSession.setActionHandler("pause", () => audio.pause());
+  navigator.mediaSession.setActionHandler("play", () => {
+    if (!audio.src || audio.paused || playbackPausePending) togglePlayback();
+  });
+  navigator.mediaSession.setActionHandler("pause", pausePlayback);
   navigator.mediaSession.setActionHandler("previoustrack", () => nextTrack(-1));
   navigator.mediaSession.setActionHandler("nexttrack", () => nextTrack(1));
 }
 
-function persistNavigation() {
-  localStorage.setItem("medo.navigation", JSON.stringify({
-    view: currentView === "player" ? viewBeforePlayer : currentView,
-    playlist: currentPlaylist,
-    sort: currentSort,
-    collection: currentCollection
-  }));
-}
-
-function restoreNavigation() {
-  const saved = loadJson("medo.navigation", null);
-  if (!saved || !["library", "recent", "favorites", "playlists", "now", "settings"].includes(saved.view)) return;
-  currentView = saved.view;
-  currentSort = ["songs", "albums", "artists"].includes(saved.sort) ? saved.sort : "songs";
-  currentPlaylist = playlists.some(playlist => playlist.name === saved.playlist) ? saved.playlist : null;
-  currentCollection = saved.collection && ["albums", "artists"].includes(saved.collection.type) &&
-    typeof saved.collection.name === "string" ? saved.collection : null;
-  if (saved.playlist && !currentPlaylist) {
-    currentView = "library";
-    currentCollection = null;
-  }
-  viewBeforePlayer = currentView;
-  setActiveNav(currentPlaylist ? null : document.querySelector(`.nav-item[data-view="${currentView}"]`));
-  document.querySelectorAll(".pivot").forEach(button => button.classList.toggle("active", button.dataset.sort === currentSort));
-}
-
+repairPlaylistMemberships();
 restoreNavigation();
 desiredVolume = Math.min(1, Math.max(0, Number(restoredPlaybackState.volume ?? desiredVolume)));
 volume.value = desiredVolume;
 applyOutputVolume();
+applyPlaybackFadeSetting(playbackFadeEnabled);
 window.medo.setTrayMuted(audio.muted);
 updateVolumeDisplay();
 updateRangeGradient(progress, 0);
 applyTheme(theme);
+window.medo.setWindowScale(Number(localStorage.getItem("medo.interfaceScale")) || 1).then(syncInterfaceScale);
 applyThemeColors();
 applyDisplayMode(displayMode);
 applyCloseBehavior(closeBehavior);
 applyTrayEnabled(trayEnabled);
+applyAutoUpdateSetting(autoCheckUpdates);
 applyGlobalShortcutSettings();
 applyLyricTranslationSetting(lyricTranslationEnabled);
 applyWordLyricsSetting(wordLyricsEnabled);
@@ -4926,6 +4213,7 @@ updatePlayModeButton();
 document.querySelector(".app-shell").classList.toggle("sidebar-collapsed", sidebarCollapsed);
 document.documentElement.style.setProperty("--sidebar-width", `${sidebarWidth}px`);
 render();
+scheduleListeningCalendarRollover();
 scheduleStartupMaintenance();
 restorePlaybackState();
 window.medo.onOpenAudioFiles((filePaths) => {

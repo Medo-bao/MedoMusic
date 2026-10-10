@@ -2,7 +2,11 @@
 window.MedoMenus = (() => {
   let dismiss = null;
   const action = (label, name) => ({ label, value: { action: name } });
-  const targets = names => names.map(name => ({ label: name, value: { action: 'add-to-playlist', playlist: name } }));
+  const targets = names => [
+    action('创建新播放列表', 'create-playlist'),
+    ...(names.length ? [{ separator: true }] : []),
+    ...names.map(name => ({ label: name, value: { action: 'add-to-playlist', playlist: name } }))
+  ];
   function show(items, anchor) {
     dismiss?.();
     return new Promise(resolve => {
@@ -107,18 +111,18 @@ window.MedoMenus = (() => {
   }
   function playlist(options, anchor) {
     return show([action('播放', 'play'), action('播放下一首', 'play-next'),
-      { label: '添加到', disabled: !options.playlists.length, children: targets(options.playlists) },
+      { label: '添加到', disabled: options.canSave === false, children: targets(options.playlists) },
       ...(!options.favorites ? [{ separator: true }, action('重命名', 'rename'), action('删除', 'delete')] : [])], anchor);
   }
   function track(options, anchor) {
     return show([action('播放', 'play'), action('添加到播放队列', 'add-to-queue'), action('添加到下一首播放', 'play-next'),
-      { label: '添加到', disabled: !options.playlists.length, children: targets(options.playlists) },
+      { label: '添加到', disabled: options.canSave === false, children: targets(options.playlists) },
       action(options.currentPlaylist ? '从播放列表中删除' : '删除', options.currentPlaylist ? 'remove-from-playlist' : 'remove-from-library'),
       action('显示专辑', 'show-album'), action('编辑信息', 'edit-info'), action('属性', 'properties'), action('打开歌曲位置', 'open-location'),
       { separator: true }, action('选择', 'select')], anchor);
   }
   function chooseTarget(names, anchor) {
-    return show(names.length ? names.map(name => ({ label: name, value: name })) : [{ label: '暂无播放列表', disabled: true }], anchor);
+    return show(targets(names), anchor);
   }
   // Keep the existing select/change contract while styling its popup in the same layer.
   document.querySelectorAll('select').forEach(select => {

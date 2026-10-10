@@ -5,6 +5,7 @@ const fsSync = require("node:fs");
 const crypto = require("node:crypto");
 const { pathToFileURL } = require("node:url");
 const { parseZpl } = require("./zpl");
+const { pruneCoverCache } = require("./cover-cache");
 const { decodeTextBuffer } = require("./text-decoder");
 const { createMediaFileResponse } = require("./media-file-response");
 const { hasNativeWordTiming } = require("./lyrics-timing");
@@ -13,6 +14,8 @@ const { fetchQqMusicLyrics } = require("./qq-music");
 const { resolveOnlineLyricProviders, selectLocalLyrics, removeLiveQualifier, removeEnglishSuffixFromChineseTitle } = require("./lyrics-source-priority");
 const { startMyFireflyExtension } = require("./myfirefly-extension");
 const { attachWindowMaterial } = require("./window-material");
+const { createBackgroundImageStore } = require("./background-image-store");
+const { startupBounds, attachWindowScaling } = require("./window-scaling");
 
 const WINDOWS_APP_USER_MODEL_ID = "com.medomusic.desktop";
 const WINDOWS_TRAY_GUID = "8c33d388-8b65-4e7c-a54d-1af447cd8bfa";
@@ -35,6 +38,7 @@ if (!hasSingleInstanceLock) {
   });
 }
 let mainWindow = null;
+let backgroundMaterialMode = 'frosted';
 let pendingExternalAudioFiles = [];
 let externalAudioDispatchTimer = null;
 let tray = null;
@@ -44,6 +48,8 @@ const myFireflyPending = new Map();
 let closeBehavior = "background";
 let isQuitting = false;
 let metadataCache = null;
+let metadataCacheLoad = null;
+const pendingCoverPaths = new Set();
 let metadataCacheWriteTimer = null;
 let onlineLyricsCache = null;
 let onlineLyricsCacheWriteTimer = null;
@@ -152,19 +158,15 @@ function trimRecord(record, limit) {
 
 async function getMetadataCache() {
   if (metadataCache) return metadataCache;
-  try {
-    const cachePath = path.join(app.getPath("userData"), "metadata-cache.json");
-    const serialized = await fs.readFile(cachePath, "utf8");
-    if (serialized.length > 20 * 1024 * 1024) {
-      metadataCache = {};
-      await fs.rm(cachePath, { force: true });
-    } else {
-      metadataCache = JSON.parse(serialized);
-    }
-  } catch {
-    metadataCache = {};
-  }
-  return metadataCache;
+  metadataCacheLoad ||= (async () => {
+    try {
+      const serialized = await fs.readFile(path.join(app.getPath("userData"), "metadata-cache.json"), "utf8");
+      metadataCache ||= serialized.length <= 20 * 1024 * 1024 ? JSON.parse(serialized) : {};
+    } catch { metadataCache ||= {}; }
+    scheduleMetadataCacheWrite();
+    return metadataCache;
+  })();
+  return metadataCacheLoad;
 }
 
 function scheduleMetadataCacheWrite() {
@@ -178,6 +180,8 @@ function scheduleMetadataCacheWrite() {
         JSON.stringify(Object.fromEntries(entries)),
         "utf8"
       );
+      await pruneCoverCache(coverCacheDirectory(), filePath => pendingCoverPaths.has(filePath) ||
+        Object.values(metadataCache || {}).some(entry => entry.coverPath === filePath));
     } catch {
       // Cache failures must never interrupt playback or library loading.
     }
@@ -321,11 +325,9 @@ async function getNeteaseLyricTranslation(options, lines) {
 
 function createWindow() {
   const startupBackground = nativeTheme.shouldUseDarkColors ? "#111416" : "#f4f6f7";
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
   const window = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 960,
-    minHeight: 640,
+    ...startupBounds(display.workArea),
     backgroundColor: startupBackground,
     show: false,
     frame: false,
@@ -338,7 +340,8 @@ function createWindow() {
   });
 
   mainWindow = window;
-  window.desktopMaterial = attachWindowMaterial(window, nativeTheme);
+  window.desktopMaterial = attachWindowMaterial(window, nativeTheme, backgroundMaterialMode);
+  window.interfaceScaling = attachWindowScaling(window, screen);
   const sendMaximizedState = () => {
     if (!window.isDestroyed()) window.webContents.send("window:maximized", window.isMaximized());
   };
@@ -352,7 +355,7 @@ function createWindow() {
   };
   for (const event of ["show", "hide", "minimize", "restore"]) window.on(event, sendWindowVisibility);
   window.webContents.on("did-finish-load", sendWindowVisibility);
-  window.loadFile(path.join(__dirname, "index.html"));
+  window.loadFile(path.join(__dirname, "index.html"), { query: { window: "main" } });
   window.once("ready-to-show", () => {
     if (!window.isDestroyed()) window.show();
   });
@@ -766,7 +769,28 @@ async function toTrackWithFileTimes(filePath) {
   return track;
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  getMetadataCache().catch(() => {});
+  const backgroundImages = createBackgroundImageStore(app.getPath("userData"), nativeImage);
+  backgroundMaterialMode = (await backgroundImages.get()).material;
+  const updateBackground = async operation => {
+    const settings = await operation();
+    backgroundMaterialMode = settings.material;
+    mainWindow?.desktopMaterial?.set(settings.material);
+    return settings;
+  };
+  ipcMain.handle("background-image:get", () => backgroundImages.get());
+  ipcMain.handle("background-image:update", (_event, values) => updateBackground(() => backgroundImages.update(values)));
+  ipcMain.handle("background-image:apply", (_event, values) => backgroundImages.apply(values));
+  ipcMain.handle("background-image:reset", () => updateBackground(() => backgroundImages.reset()));
+  ipcMain.handle("background-image:choose", async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "选择玻璃染色图片",
+      properties: ["openFile"],
+      filters: [{ name: "图片", extensions: ["jpg", "jpeg", "png", "webp", "bmp"] }]
+    });
+    return result.canceled ? null : backgroundImages.choose(result.filePaths[0]);
+  });
   ipcMain.on("myfirefly-extension:response", (_event, payload = {}) => {
     const pending = myFireflyPending.get(payload.id);
     if (!pending) return;
@@ -792,9 +816,15 @@ app.whenReady().then(() => {
     node: process.versions.node,
     platform: process.platform,
     arch: process.arch,
-    installDirectory: "E:\\Medo_music\\release"
+    installDirectory: app.isPackaged ? path.dirname(process.execPath) : app.getAppPath()
   }));
-  ipcMain.handle("app:check-update", async () => {
+  const openUpdateRelease = async (url) => {
+    if (!/^https:\/\/github\.com\/Medo-bao\/MedoMusic\/releases\//i.test(String(url || ""))) return false;
+    await shell.openExternal(url);
+    return true;
+  };
+  ipcMain.handle("app:open-update-release", (_event, url) => openUpdateRelease(url));
+  ipcMain.handle("app:check-update", async (_event, options) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
     try {
@@ -823,9 +853,7 @@ app.whenReady().then(() => {
       }
       const updateAvailable = comparison > 0;
       const releaseUrl = String(release.html_url || "");
-      if (updateAvailable && /^https:\/\/github\.com\/Medo-bao\/MedoMusic\/releases\//i.test(releaseUrl)) {
-        await shell.openExternal(releaseUrl);
-      }
+      if (updateAvailable && options?.automatic !== true) await openUpdateRelease(releaseUrl);
       return { currentVersion, latestVersion, updateAvailable, releaseUrl };
     } catch (error) {
       return { error: error?.name === "AbortError" ? "timeout" : "unavailable" };
@@ -845,9 +873,10 @@ app.whenReady().then(() => {
       for (const playlistPath of playlistFiles) {
         try {
           const playlist = await parseZpl(playlistPath, toTrack);
-          playlist.tracks = await Promise.all(playlist.tracks.map((track) => toTrackWithFileTimes(track.path)));
+          playlist.tracks = await Promise.all(playlist.tracks.map(async (track) => ({ ...await toTrackWithFileTimes(track.path), playlists: track.playlists })));
           parsedPlaylists.push(playlist);
-        } catch {
+        } catch (error) {
+          if (error.code) throw error;
           // Ignore malformed playlists while continuing the first-run scan.
         }
       }
@@ -857,7 +886,7 @@ app.whenReady().then(() => {
         playlists: parsedPlaylists
       };
     } catch {
-      return { folder, tracks: [], playlists: [] };
+      return null;
     }
   });
 
@@ -867,6 +896,10 @@ app.whenReady().then(() => {
     _event.sender.send("theme:resolved", nativeTheme.shouldUseDarkColors ? "dark" : "light");
   });
   ipcMain.handle("window:get-material", (event) => BrowserWindow.fromWebContents(event.sender)?.desktopMaterial?.get() || "none");
+  ipcMain.handle("window:set-scale", (event, value) => {
+    const window = BrowserWindow.fromWebContents(event.sender);
+    return window?.interfaceScaling?.set(value);
+  });
 
   ipcMain.on("window:minimize", (event) => {
     const window = BrowserWindow.fromWebContents(event.sender);
@@ -1208,103 +1241,6 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.handle("track:context-menu", (event, options = {}) => new Promise((resolve) => {
-    let completed = false;
-    const finish = (result) => {
-      if (completed) return;
-      completed = true;
-      resolve(result);
-    };
-    const playlistItems = Array.isArray(options.playlists)
-      ? options.playlists.map((name) => ({
-        label: name,
-        click: () => finish({ action: "add-to-playlist", playlist: name })
-      }))
-      : [];
-    const legacyTemplate = [
-      { label: "添加到播放队列", click: () => finish({ action: "add-to-queue" }) },
-      { label: "播放", click: () => finish({ action: "play" }) },
-      { label: "播放下一首", click: () => finish({ action: "play-next" }) },
-      {
-        label: "添加到",
-        enabled: playlistItems.length > 0,
-        submenu: playlistItems
-      },
-      ...(options.currentPlaylist ? [{
-        label: "从播放列表中删除",
-        click: () => finish({ action: "remove-from-playlist" })
-      }] : [{
-        label: "删除",
-        click: () => finish({ action: "remove-from-library" })
-      }]),
-      { label: "显示专辑", click: () => finish({ action: "show-album" }) },
-      { label: "编辑信息", click: () => finish({ action: "edit-info" }) },
-      { label: "属性", click: () => finish({ action: "properties" }) },
-      { label: "打开歌曲位置", click: () => finish({ action: "open-location" }) },
-      { type: "separator" },
-      { label: options.currentPlaylist ? "选择" : "选择", click: () => finish({ action: "select" }) }
-    ];
-    const template = [
-      { label: "播放", click: () => finish({ action: "play" }) },
-      { label: "添加到播放队列", click: () => finish({ action: "add-to-queue" }) },
-      { label: "添加到下一首播放", click: () => finish({ action: "play-next" }) },
-      ...legacyTemplate.slice(3)
-    ];
-    Menu.buildFromTemplate(template).popup({
-      window: BrowserWindow.fromWebContents(event.sender),
-      callback: () => finish(null)
-    });
-  }));
-
-  ipcMain.handle("playlist:context-menu", (event, options = {}) => new Promise((resolve) => {
-    let completed = false;
-    const finish = (result) => {
-      if (completed) return;
-      completed = true;
-      resolve(result);
-    };
-    const playlistItems = Array.isArray(options.playlists)
-      ? options.playlists.map((name) => ({
-        label: name,
-        click: () => finish({ action: "add-to-playlist", playlist: name })
-      }))
-      : [];
-    const template = [
-      { label: "播放", click: () => finish({ action: "play" }) },
-      { label: "播放下一首", click: () => finish({ action: "play-next" }) },
-      {
-        label: "添加到",
-        enabled: playlistItems.length > 0,
-        submenu: playlistItems
-      },
-      ...(!options.favorites ? [
-        { type: "separator" },
-        { label: "重命名", click: () => finish({ action: "rename" }) },
-        { label: "删除", click: () => finish({ action: "delete" }) }
-      ] : [])
-    ];
-    Menu.buildFromTemplate(template).popup({
-      window: BrowserWindow.fromWebContents(event.sender),
-      callback: () => finish(null)
-    });
-  }));
-
-  ipcMain.handle("playlist:pick-target", (event, playlistNames = []) => new Promise((resolve) => {
-    let completed = false;
-    const finish = (name) => {
-      if (completed) return;
-      completed = true;
-      resolve(name || null);
-    };
-    const template = Array.isArray(playlistNames) && playlistNames.length
-      ? playlistNames.map((name) => ({ label: name, click: () => finish(name) }))
-      : [{ label: "暂无播放列表", enabled: false }];
-    Menu.buildFromTemplate(template).popup({
-      window: BrowserWindow.fromWebContents(event.sender),
-      callback: () => finish(null)
-    });
-  }));
-
   ipcMain.handle("track:properties", async (event, filePath) => {
     if (typeof filePath !== "string") return null;
     try {
@@ -1342,6 +1278,9 @@ app.whenReady().then(() => {
       if (validCachedMetadata) {
         try {
           if (cached.coverPath) await fs.access(cached.coverPath);
+          delete cache[filePath];
+          cache[filePath] = cached;
+          scheduleMetadataCacheWrite();
           return cached.value;
         } catch {}
       }
@@ -1351,12 +1290,15 @@ app.whenReady().then(() => {
         skipCovers: false
       });
       let cover = null;
+      let writtenCoverPath = null;
       try {
         const picture = selectCover(metadata.common.picture);
         const image = picture ? nativeImage.createFromBuffer(Buffer.from(picture.data)) : null;
         if (image && !image.isEmpty()) {
           const jpeg = image.resize({ width: 800, height: 800, quality: "good" }).toJPEG(100);
           const cachedCoverPath = coverCachePath(filePath, stat);
+          writtenCoverPath = cachedCoverPath;
+          pendingCoverPaths.add(cachedCoverPath);
           await fs.mkdir(path.dirname(cachedCoverPath), { recursive: true });
           await fs.writeFile(cachedCoverPath, jpeg);
           cover = `medo-media://local/cover?path=${encodeURIComponent(cachedCoverPath)}`;
@@ -1375,7 +1317,9 @@ app.whenReady().then(() => {
         cover
       };
       const cachedCoverPath = cover ? new URL(cover).searchParams.get("path") : null;
+      delete cache[filePath];
       cache[filePath] = { mtimeMs: stat.mtimeMs, size: stat.size, coverVersion: METADATA_COVER_VERSION, coverPath: cachedCoverPath, value };
+      if (writtenCoverPath) pendingCoverPaths.delete(writtenCoverPath);
       scheduleMetadataCacheWrite();
       return value;
     } catch {
@@ -1409,6 +1353,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle("music:clear-metadata-cache", async () => {
     metadataCache = {};
+    metadataCacheLoad = null;
     clearTimeout(metadataCacheWriteTimer);
     try {
       await fs.rm(path.join(app.getPath("userData"), "metadata-cache.json"), { force: true });
@@ -1476,7 +1421,7 @@ app.whenReady().then(() => {
     });
     if (result.canceled) return null;
     const playlist = await parseZpl(result.filePaths[0], toTrack);
-    playlist.tracks = await Promise.all(playlist.tracks.map((track) => toTrackWithFileTimes(track.path)));
+    playlist.tracks = await Promise.all(playlist.tracks.map(async (track) => ({ ...await toTrackWithFileTimes(track.path), playlists: track.playlists })));
     return playlist;
   });
 
@@ -1496,7 +1441,7 @@ app.whenReady().then(() => {
     }
     try {
       const playlist = await parseZpl(playlistPath, toTrack);
-      playlist.tracks = await Promise.all(playlist.tracks.map((track) => toTrackWithFileTimes(track.path)));
+      playlist.tracks = await Promise.all(playlist.tracks.map(async (track) => ({ ...await toTrackWithFileTimes(track.path), playlists: track.playlists })));
       return playlist;
     } catch {
       return null;

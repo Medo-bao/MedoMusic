@@ -58,6 +58,12 @@ assert.deepEqual(searchSongsFromPayload({ req_1: { data: { body: { song: { list:
   );
   assert.equal(liveFallback.source, "qq-word");
   assert.deepEqual(liveQueries, ["测试歌曲 (Live) 测试歌手", "测试歌曲 测试歌手"]);
+  const mismatched = await fetchQqMusicLyrics({ title: "测试歌曲", artist: "其他歌手", duration: 180 }, qrcFetch);
+  assert.equal(mismatched, null, "An exact title and duration cannot override an unrelated artist");
+  const wrongDuration = await fetchQqMusicLyrics({ title: "测试歌曲", artist: "测试歌手", duration: 300 }, qrcFetch);
+  assert.equal(wrongDuration, null);
+  const unknownArtist = await fetchQqMusicLyrics({ title: "测试歌曲", duration: 180 }, qrcFetch);
+  assert.equal(unknownArtist.source, "qq-word");
   console.log("QQ Music tests passed");
 })().catch((error) => {
   console.error(error);

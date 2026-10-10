@@ -41,6 +41,8 @@ module.exports = async function checkSelectionPlaylists(page) {
   assert.deepEqual(await page.evaluate(() => playbackQueueIds), ['c','a','b'], 'Insert next while retaining the current song');
   await page.evaluate(() => {playbackQueueIds = ['c']; selectedTrackIds = new Set(['a','b']); multiSelectionMode = true; render();});
   await page.locator('#queue-selected').click();
+  assert.equal(await page.locator('.playlist-picker-options button').first().textContent(), '创建新播放列表');
+  assert.equal(await page.locator('.playlist-picker-options > :nth-child(2)').getAttribute('role'), 'separator');
   await page.locator('.playlist-picker-dialog footer button').click();
   assert.equal(await page.evaluate(() => selectedTrackIds.size),2);
   await page.locator('#queue-selected').click();
@@ -48,6 +50,23 @@ module.exports = async function checkSelectionPlaylists(page) {
   assert.deepEqual(await page.evaluate(() => playlists[1].trackIds),['a','b']);
   assert.match(await page.locator('#action-feedback').textContent(), /已添加 1 首/);
   assert.deepEqual(await page.evaluate(() => playbackQueueIds),['c']);
+  await page.evaluate(() => { selectedTrackIds = new Set(['a','b']); multiSelectionMode = true; render(); });
+  await page.locator('#queue-selected').click();
+  await page.getByRole('button', {name:'创建新播放列表',exact:true}).click();
+  await page.locator('.playlist-name-dialog button[type="button"]').click();
+  assert.deepEqual(await page.evaluate(() => [...selectedTrackIds]), ['a','b'], 'Cancel creation retains selection');
+  assert.equal(await page.evaluate(() => playlists.length), 2);
+  await page.locator('#queue-selected').click();
+  await page.getByRole('button', {name:'创建新播放列表',exact:true}).click();
+  await page.locator('.playlist-name-dialog input').fill('Source');
+  await page.locator('.playlist-name-dialog button[type="submit"]').click();
+  assert.match(await page.locator('#playlist-name-error').textContent(), /同名/);
+  await page.locator('.playlist-name-dialog input').fill('批量新列表');
+  await page.locator('.playlist-name-dialog button[type="submit"]').click();
+  await page.waitForFunction(() => playlists.length === 3);
+  assert.deepEqual(await page.evaluate(() => playlists[2].trackIds), ['a','b']);
+  assert.deepEqual(await page.evaluate(() => ({selected:selectedTrackIds.size,mode:multiSelectionMode,queue:playbackQueueIds})),
+    {selected:0,mode:false,queue:['c']});
   await page.evaluate(() => { selectedTrackIds = new Set(['a','b']); multiSelectionMode = true; render(); });
   await page.setViewportSize({width:960,height:720});
   await page.waitForTimeout(250);

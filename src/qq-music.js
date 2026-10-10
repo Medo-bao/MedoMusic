@@ -116,11 +116,13 @@ async function fetchQqMusicLyricsOnce(options, fetchImplementation) {
     const artistScore = !artist ? .5 : normalize(songArtists).includes(normalize(artist)) ? 1 : 0;
     const duration = Number(song.interval) || 0;
     const durationScore = !expectedDuration ? .5 : Math.max(0, 1 - Math.abs(duration - expectedDuration) / 12);
-    return { song, artist: songArtists, score: titleScore * .58 + artistScore * .27 + durationScore * .15 };
+    const plausibleMatch = titleScore > 0 && (!artist || artistScore > 0) &&
+      (!expectedDuration || !duration || Math.abs(duration - expectedDuration) <= 12);
+    return { song, artist: songArtists, plausibleMatch, score: titleScore * .58 + artistScore * .27 + durationScore * .15 };
   }).sort((left, right) => right.score - left.score);
   const requireWords = options.requireWordTiming || options.mode === "network";
   let fallback = null;
-  for (const best of ranked.filter(item => item.score >= .62)) {
+  for (const best of ranked.filter(item => item.plausibleMatch && item.score >= .62)) {
     let qrcText = null;
     let text = null;
     try { qrcText = await fetchQrcBySongId(best.song.id || best.song.songid, fetchImplementation); } catch {}

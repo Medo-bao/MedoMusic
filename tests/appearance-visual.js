@@ -111,7 +111,7 @@ module.exports = async function checkAppearance(page) {
     const glass = await page.evaluate(() => {
       const root = document.documentElement, material = root.dataset.windowMaterial;
       root.dataset.windowMaterial = 'blur';
-      const read = () => ({ background: getComputedStyle(document.body).backgroundImage,
+      const read = () => ({ background: getComputedStyle(document.querySelector('.glass-background-tint')).background,
         sidebar: getComputedStyle(document.querySelector('.sidebar'), '::before').maskImage,
         list: getComputedStyle(document.querySelector('.track-list')).boxShadow });
       const original = read();
@@ -123,6 +123,24 @@ module.exports = async function checkAppearance(page) {
     assert.notEqual(glass.original.background, glass.custom.background, 'Desktop glass follows the selected theme colors');
     assert.equal((glass.original.sidebar.match(/linear-gradient/g) || []).length, 2, 'Sidebar top and right edges share a masked material fade');
     assert.match(glass.original.list, /inset/, 'List has a boundary without changing virtual row geometry');
+    const edges = await page.evaluate(() => {
+      const list = getComputedStyle(document.querySelector('.track-list'));
+      const hero = getComputedStyle(document.querySelector('.playlist-hero'));
+      const player = getComputedStyle(document.querySelector('.player'), '::before');
+      return { list: list.boxShadow, hero: hero.boxShadow, listRadius: list.borderRadius, heroRadius: hero.borderRadius, playerFade: player.maskImage };
+    });
+    assert.equal(edges.list, edges.hero, 'Playlist and list share the same thin edge, highlight and soft shadow');
+    assert.equal(edges.listRadius, edges.heroRadius, 'Playlist and list share the same corner radius');
+    assert.match(edges.playerFade, /linear-gradient/, 'Player joins the page with the shared material fade');
+    assert.equal(await page.locator('#search-input').getAttribute('placeholder'), null, 'Main search has no visible placeholder text');
+    assert.equal(await page.locator('#search-input').getAttribute('aria-label'), '搜索音乐');
+    const dividers = await page.evaluate(() => ['.playlist-favorite-slot', '.playlist-title'].map(selector => {
+      const element = document.querySelector(selector);
+      return { border: getComputedStyle(element).borderTopColor, image: getComputedStyle(element, '::before').backgroundImage };
+    }));
+    assert.equal(dividers[0].border, 'rgba(0, 0, 0, 0)');
+    assert.deepEqual(dividers[1], dividers[0], 'Both favorite separators use the same material fade');
+    assert.match(dividers[0].image, /linear-gradient.*rgba\(0, 0, 0, 0\)/, 'Separator ends fade into the background');
     const sharedMaterial = () => page.evaluate(() => ['body', '.window-titlebar', '.player'].map(selector => {
       const style = getComputedStyle(document.querySelector(selector));
       return [style.backgroundColor, style.backgroundImage, style.borderBottomWidth];
@@ -154,7 +172,8 @@ module.exports = async function checkAppearance(page) {
       const override = document.createElement('style');
       override.textContent = '.lyric-line, .lyric-line * { transition: none !important; }';
       document.head.append(override);
-      const elements = [...document.querySelectorAll('.lyric-line, .lyric-karaoke-base, .lyric-karaoke-fill, .lyric-translation')];
+      const elements = [...document.querySelectorAll('.lyric-line, .lyric-karaoke-base, .lyric-karaoke-fill, .lyric-translation')]
+        .filter(element => element.closest('.lyric-line').matches('.active, .selected'));
       const read = () => elements.map(el => {
         const style = getComputedStyle(el);
         return [style.color, style.backgroundImage, style.opacity, style.filter];
@@ -165,7 +184,8 @@ module.exports = async function checkAppearance(page) {
       return { current, original };
     });
     assert.ok(lyricPalette.current.length > 0);
-    assert.deepEqual(lyricPalette.current, lyricPalette.original, 'Lyrics retain the original colors, karaoke gradients and opacity');
+    assert.deepEqual(lyricPalette.current, lyricPalette.original, 'Active and selected lyrics retain the original colors, karaoke gradients and opacity');
+    await require('./custom-background-lyrics')(page);
     const controls = await page.evaluate(() => {
       return ['desktop-lyrics-button', 'toggle-detail-track', 'toggle-detail-queue', 'lyric-translation-toggle'].map(id => {
         const button = document.getElementById(id), active = button.classList.contains('active');
@@ -188,6 +208,25 @@ module.exports = async function checkAppearance(page) {
     assert.equal(await page.locator('.detail-glow').first().evaluate(el => getComputedStyle(el).animationPlayState), 'paused');
     await page.evaluate(() => updatePlayButtonState(true));
     await page.evaluate(() => { currentView = 'settings'; render(); });
+    const sliders = await page.evaluate(() => {
+      const inputs = [...document.querySelectorAll('.settings-panel input[type="range"]')];
+      const results = inputs.map(input => {
+        const ratio = (Number(input.value) - Number(input.min)) / (Number(input.max) - Number(input.min));
+        updateRangeGradient(progress, ratio);
+        const style = getComputedStyle(input);
+        return { id: input.id, appearance: style.appearance, height: style.height,
+          gradient: style.backgroundImage === getComputedStyle(progress).backgroundImage,
+          fill: Math.abs(parseFloat(input.style.getPropertyValue('--range-progress')) - ratio * 100) };
+      });
+      updateRangeGradient(progress, audio.duration ? audio.currentTime / audio.duration : 0);
+      return results;
+    });
+    assert.deepEqual(sliders.map(slider => slider.id), ['background-transparency','background-image-clarity','background-image-blur','detail-lyric-size','desktop-lyric-size']);
+    for (const slider of sliders) {
+      assert.equal(slider.appearance, 'none', `${slider.id}: custom player-style slider`);
+      assert.equal(slider.height, '4px');
+      assert.ok(slider.gradient && slider.fill < .01, `${slider.id}: theme gradient and filled length match the player`);
+    }
     await settle(); await shot(`settings-${theme}`);
     await page.locator('#open-sound-settings').click();
     await settle(); await shot(`sound-${theme}`);
@@ -195,6 +234,39 @@ module.exports = async function checkAppearance(page) {
     assert.notEqual(select.color, select.background);
     await page.locator('#close-sound-settings').click();
   }
+
+  // Enough surrounding lines expose an off-center follow anchor at every window size.
+  await page.evaluate(() => {
+    window.__balancedLyricFixture = { lyrics: lyricsCache.get(tracks[0].id), translation: lyricTranslationEnabled };
+    lyricTranslationEnabled = false;
+    lyricsCache.set(tracks[0].id, { synced: true, networkOnly: true, level: 'word', lines: Array.from({ length: 32 }, (_, i) => ({ start: i * 8, text: `歌词 第 ${i + 1} 行` })) });
+    audio.currentTime = 120; lyricInspectionActive = false; activeLyricIndex = -1;
+    currentView = 'library'; render(); openPlaybackDetail();
+  });
+  for (const viewport of [{ width: 960, height: 640 }, { width: 1280, height: 820 }, { width: 1920, height: 1080 }]) {
+    await page.setViewportSize(viewport);
+    for (const size of [26, 38]) {
+      await page.evaluate(size => applyDetailLyricSize(size), size);
+      await settle();
+      const balance = await page.evaluate(() => {
+        const viewport = document.querySelector('.lyrics-viewport').getBoundingClientRect();
+        const active = document.querySelector('.lyric-line.active').getBoundingClientRect();
+        const center = active.top + active.height / 2;
+        const rows = [...document.querySelectorAll('.lyric-line')].filter(row => !row.classList.contains('active'))
+          .map(row => { const rect = row.getBoundingClientRect(); return rect.top + rect.height / 2; })
+          .filter(y => y >= viewport.top + viewport.height * .08 && y <= viewport.bottom - viewport.height * .08);
+        return { delta: Math.abs(center - viewport.top - viewport.height / 2), above: rows.filter(y => y < center).length, below: rows.filter(y => y > center).length };
+      });
+      assert.ok(balance.delta < 1, `Playing lyric stays centered after resize/font adjustment: ${JSON.stringify({ viewport, size, balance })}`);
+      assert.ok(balance.above > 0 && balance.above === balance.below, `Equal surrounding lyric counts: ${JSON.stringify({ viewport, size, balance })}`);
+    }
+    await shot(`lyrics-balanced-${viewport.width}`);
+  }
+  await page.evaluate(() => {
+    lyricsCache.set(tracks[0].id, __balancedLyricFixture.lyrics);
+    lyricTranslationEnabled = __balancedLyricFixture.translation; audio.currentTime = 28;
+    applyDetailLyricSize(26); renderLyrics(tracks[0]);
+  });
 
   // Geometry checks use the actual supported minimum client area and largest lyrics.
   await page.setViewportSize({ width: 1060, height: 720 });

@@ -4,10 +4,30 @@ const fs = require("node:fs");
 const { pathToFileURL } = require("node:url");
 const { chromium } = require("playwright");
 
+async function checkHighResolutionMenus(page, artifacts) {
+  for (const viewport of [{width:2560,height:1440},{width:3840,height:2160}]) {
+    await page.setViewportSize(viewport);
+    await page.evaluate(() => {
+      tracks = Array.from({length:12}, (_, index) => ({id:`hires-${index}`,title:`高分辨率歌曲 ${index + 1}`,artist:'MedoMusic',album:'显示缩放',duration:180,metadataLoaded:true,playlists:[]}));
+      playlists = [{name:'高分辨率歌单',trackIds:[]}];
+      currentView='library'; currentPlaylist=null; currentCollection=null; currentSort='songs'; query='';
+      selectedTrackIds.clear(); multiSelectionMode=false; render();
+    });
+    const size = await page.evaluate(() => ({width:innerWidth,scroll:document.body.scrollWidth,player:document.querySelector('.player').getBoundingClientRect().right}));
+    assert.ok(size.scroll <= size.width + 1 && size.player <= size.width + 1, 'High-resolution layout must fit the viewport');
+    await page.locator('.track-row').first().hover();
+    await page.locator('.track-row .row-queue').first().click();
+    assert.equal(await page.getByRole('menuitem').first().textContent(), '创建新播放列表');
+    await page.screenshot({path:path.join(artifacts, `playlist-menu-${viewport.width}.png`)});
+    await page.keyboard.press('Escape');
+  }
+}
+
 async function run() {
   const root = path.resolve(__dirname, "..");
   const artifacts = path.join(__dirname, "artifacts");
   const startupOnly = process.env.MEDO_STARTUP_ONLY === "1";
+  const allRepairs = process.env.MEDO_ALL_REPAIRS === "1" || process.argv.includes("--library-repairs");
   fs.mkdirSync(artifacts, { recursive: true });
   const browser = await chromium.launch({
     headless: true,
@@ -84,7 +104,6 @@ async function run() {
         ]
       }),
       chooseCover: async () => "file:///E:/Music/custom-cover.jpg",
-      chooseTargetPlaylist: async () => null,
       clearMetadataCache: async () => {},
       getExternalTracks: async () => [],
       getLyricsWindowState: async () => ({ locked: false, visible: false }),
@@ -99,8 +118,6 @@ async function run() {
       setLyricsWindowSize: () => {},
       onWindowVisibility: (callback) => { window.__windowVisibility = callback; return () => {}; },
       setTrayMuted: () => {},
-      showPlaylistMenu: async () => null,
-      showTrackMenu: async () => null,
       showTrackProperties: async (filePath) => ({ name: "Demo.mp3", path: filePath, extension: "MP3", size: 1024 }),
       showTrackInFolder: async () => true,
       toggleLyricsWindow: () => { window.__desktopLyricsVisible = !window.__desktopLyricsVisible; },
@@ -119,6 +136,8 @@ async function run() {
       readMetadata: async () => null,
       setTitleBarTheme: () => {},
       minimizeWindow: () => {},
+      setWindowScale: async value => ({ requested: value, effective: value }),
+      onWindowScale: () => () => {},
       toggleMaximizeWindow: () => {},
       onWindowMaximized: (callback) => { window.__setMaximized = callback; },
       closeWindow: () => {},
@@ -135,6 +154,15 @@ async function run() {
       checkForUpdates: async () => ({ currentVersion: "1.4.0", latestVersion: "1.4.0", updateAvailable: false })
     };
   });
+
+  if ((process.env.MEDO_LIBRARY_REPAIR_ONLY === "1" || allRepairs)) {
+    await page.addInitScript(() => {
+      localStorage.setItem("medo.initialScanComplete", "true");
+      localStorage.setItem("medo.indexSchema", "2");
+      localStorage.setItem("medo.autoCheckUpdates", "false");
+      window.requestIdleCallback = () => 0;
+    });
+  }
 
   if (startupOnly) {
     await page.addInitScript(() => {
@@ -159,6 +187,12 @@ async function run() {
   const navigationStarted = Date.now();
   await page.goto(pathToFileURL(path.join(process.env.MEDO_BENCHMARK_ROOT || root, "src", "index.html")).href);
   await page.waitForFunction(() => typeof window.__setMaximized === "function");
+  if ((process.env.MEDO_LIBRARY_REPAIR_ONLY === "1" || allRepairs)) {
+    await require("./library-integrity")(page);
+    if (allRepairs) await require("./review-repairs")(page);
+    if (errors.length) throw new Error(`Library browser errors: ${errors.join(" | ")}`);
+    return;
+  }
   if (process.env.MEDO_BENCHMARK_ONLY === "1") {
     await require("./appearance-performance")(page);
     return;
@@ -169,9 +203,16 @@ async function run() {
     if (errors.length) throw new Error(errors.join(" | "));
     return;
   }
+  if (process.env.MEDO_LYRIC_COLOR_ONLY === "1") {
+    await require("./inactive-lyric-color")(page);
+    if (errors.length) throw new Error(errors.join(" | "));
+    return;
+  }
   if (process.env.MEDO_APPEARANCE_ONLY === "1") {
     await require("./appearance-visual")(page);
     await require("./glass-menus")(page);
+    await require("./inactive-lyric-color")(page);
+    await checkHighResolutionMenus(page, artifacts);
     if (errors.length) throw new Error(`Appearance browser errors: ${errors.join(" | ")}`);
     await browser.close();
     return;
@@ -355,7 +396,8 @@ async function run() {
   const lastLyricCenterDelta = await page.locator(".lyrics-stage").evaluate((stage) => {
     const line = stage.querySelector(".lyric-line:last-child");
     const lineRect = line.getBoundingClientRect();
-    return Math.abs(lineRect.top + lineRect.height / 2 - window.innerHeight / 2);
+    const viewport = stage.querySelector('.lyrics-viewport').getBoundingClientRect();
+    return Math.abs(lineRect.top + lineRect.height / 2 - (viewport.top + viewport.height / 2));
   });
   if (lastLyricCenterDelta > 2) throw new Error(`Last lyric cannot be fully reached: ${lastLyricCenterDelta}`);
   await page.locator(".lyrics-stage").dispatchEvent("wheel", { deltaY: -100000 });
@@ -363,17 +405,18 @@ async function run() {
   const firstLyricCenterDelta = await page.locator(".lyrics-stage").evaluate((stage) => {
     const line = stage.querySelector(".lyric-line:first-child");
     const lineRect = line.getBoundingClientRect();
-    return Math.abs(lineRect.top + lineRect.height / 2 - window.innerHeight / 2);
+    const viewport = stage.querySelector('.lyrics-viewport').getBoundingClientRect();
+    return Math.abs(lineRect.top + lineRect.height / 2 - (viewport.top + viewport.height / 2));
   });
   if (firstLyricCenterDelta > 2) throw new Error(`First lyric cannot be fully reached: ${firstLyricCenterDelta}`);
   const lyricTestViewport = page.viewportSize();
   for (const viewport of [{width:960,height:720},{width:1280,height:820},{width:1920,height:1080}]) {
     await page.setViewportSize(viewport);
     const anchorDelta = await page.locator('#lyrics-lines').evaluate(lines => {
-      const viewportTop = lines.parentElement.getBoundingClientRect().top;
-      return Math.abs(viewportTop + parseFloat(getComputedStyle(lines).top) - window.innerHeight / 2);
+      const viewport = lines.parentElement.getBoundingClientRect();
+      return Math.abs(parseFloat(getComputedStyle(lines).top) - viewport.height / 2);
     });
-    if (anchorDelta > 1) throw new Error(`Lyric anchor is not window-centered at ${viewport.width}x${viewport.height}: ${anchorDelta}`);
+    if (anchorDelta > 1) throw new Error(`Lyric anchor is not viewport-centered at ${viewport.width}x${viewport.height}: ${anchorDelta}`);
   }
   await page.setViewportSize(lyricTestViewport);
   await page.locator("#lyrics-lines .lyric-line:first-child").dblclick();
@@ -663,6 +706,7 @@ async function run() {
   await lyricPage.close();
 
   await require("./playback-experience")(page);
+  await require("./library-integrity")(page);
   await require("./long-list-scroll")(page);
   await require("./selection-playlists")(page);
   await require("./navigation-restore")(page);
@@ -671,6 +715,8 @@ async function run() {
   await require("./sound-enhancement")(page);
   await require("./appearance-visual")(page);
   await require("./glass-menus")(page);
+  await require("./inactive-lyric-color")(page);
+  await checkHighResolutionMenus(page, artifacts);
 
   if (errors.length) throw new Error(`Browser errors: ${errors.join(" | ")}`);
   console.log(

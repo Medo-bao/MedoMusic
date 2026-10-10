@@ -98,7 +98,8 @@ module.exports = async function(page) {
   assert.equal(measurements.original.right,0,'Original comparison bypasses spatial processing');
   await page.evaluate(()=>{currentView='settings';render();});
   assert.equal(await page.locator('#settings-panel > .settings-group').first().locator('h2').textContent(),'音乐库');
-  assert.equal(await page.locator('#settings-panel > .settings-group').nth(1).getAttribute('id'),'sound-settings-entry');
+  assert.equal(await page.locator('#settings-panel > .settings-group').nth(1).getAttribute('id'),'settings-sound');
+  assert.equal(await page.locator('#settings-sound #sound-settings-entry').count(),1);
   assert.match(await page.locator('#open-sound-settings').textContent(),/声音增强（实验功能）/);
   assert.equal(await page.locator('#sound-dialog').isVisible(),false);
   await page.locator('#sound-quick-enabled').check();

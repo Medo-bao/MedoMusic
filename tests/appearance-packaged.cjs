@@ -12,8 +12,14 @@ async function run() {
   const bundle = path.join(unpacked, 'resources', 'app.asar');
   const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'))).version;
   assert.equal(JSON.parse(asar.extractFile(bundle, 'package.json')).version, version);
+  const locales = fs.readdirSync(path.join(unpacked, 'locales')).sort();
+  assert.deepEqual(locales, ['en-US.pak', 'zh-CN.pak', 'zh-TW.pak']);
+  const entries = asar.listPackage(bundle);
+  assert.equal(entries.some(file => /node_modules[\\/]koffi[\\/](?:lib[\\/]native|vendor)[\\/].*\.(?:h|hh|hpp|c|cc|cpp)$/.test(file)), false, 'Build-only C/C++ files are excluded');
+  assert.equal(entries.some(file => /node_modules[\\/]pako[\\/]dist[\\/].*\.js$/.test(file)), false, 'Duplicate UMD distributions are excluded');
+  assert.ok(entries.some(file => /[\\/]node_modules[\\/]pako[\\/]dist[\\/]pako\.esm\.mjs$/.test(file)));
   const packagedFiles = {};
-  for (const file of ['src/glass-menus.js', 'src/appearance.js', 'src/appearance.css', 'src/styles.css', 'src/renderer.js', 'src/index.html', 'src/main.js', 'src/preload.js', 'src/window-material.js']) {
+  for (const file of ['src/glass-background.js', 'src/background-image-store.js', 'src/glass-menus.js', 'src/appearance.js', 'src/appearance.css', 'src/styles.css', 'src/renderer.js', 'src/index.html', 'src/main.js', 'src/preload.js', 'src/window-material.js']) {
     const shipped = asar.extractFile(bundle, file);
     assert.ok(shipped.equals(fs.readFileSync(path.join(root, file))), `${file} differs in package`);
     packagedFiles[file] = crypto.createHash('sha256').update(shipped).digest('hex');
@@ -34,6 +40,20 @@ async function run() {
     const info = await app.evaluate(({ app }) => ({ version: app.getVersion(), userData: app.getPath('userData') }));
     assert.equal(info.version, version);
     assert.equal(path.resolve(info.userData).toLowerCase(), path.resolve(profile).toLowerCase(), 'Test profile must be isolated');
+    const packageRuntime = await app.evaluate(async ({ app }) => {
+      const path = process.getBuiltinModule('path');
+      const root = app.getAppPath();
+      const load = process.getBuiltinModule('module').createRequire(path.join(root, 'package.json'));
+      const qrc = load('qrc-decoder');
+      const message = '[1000,1000]打(1000,500)包(1500,500)';
+      const qrcRoundTrip = qrc.decryptQrc(qrc.encryptQrc(message)) === message;
+      const pako = load('pako/dist/pako.esm.mjs');
+      const pakoRoundTrip = pako.inflate(pako.deflate(Buffer.from(message)), { to: 'string' }) === message;
+      const koffi = load('koffi');
+      const screenWidth = koffi.load('user32.dll').func('int __stdcall GetSystemMetrics(int index)')(0);
+      return { qrcRoundTrip, pakoRoundTrip, ffi: screenWidth > 0 };
+    });
+    assert.deepEqual(packageRuntime, { qrcRoundTrip: true, pakoRoundTrip: true, ffi: true });
     const page = await app.firstWindow();
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
@@ -74,11 +94,13 @@ async function run() {
     assert.equal(await page.locator('.detail-glow').first().evaluate(el=>getComputedStyle(el).animationPlayState), 'paused');
     const minimizedPlaying = await page.evaluate(() => !audio.paused);
     assert.equal(minimizedPlaying, true, 'Minimizing must keep audio playing');
-    await app.evaluate(({BrowserWindow}) => { const win=BrowserWindow.getAllWindows()[0];win.restore();win.show(); });
+    await app.evaluate(({BrowserWindow}) => { const win=BrowserWindow.getAllWindows()[0];win.restore();win.show();win.focus(); });
     await page.waitForFunction(() => !document.body.classList.contains('background-mode'));
     await page.evaluate(() => audio.pause());
+    await require('./inactive-lyric-color')(page, { native: true });
+    assert.ok(['blur', 'acrylic'].includes(await page.evaluate(() => document.documentElement.dataset.windowMaterial)), 'Native desktop glass still works after dependency filtering');
     assert.deepEqual(errors, []);
-    const evidence = { version, profile, packagedFiles, playing, minimizedPlaying, errors };
+    const evidence = { version, profile, locales, packageRuntime, packagedFiles, playing, minimizedPlaying, errors };
     fs.writeFileSync(path.join(destination,'packaged-checks.json'),JSON.stringify(evidence,null,2));
     console.log(`Packaged app passed: ${version}; exact source resources, real WAV playback, pause/resume, dark/light and minimized audio with paused atmosphere`);
   } finally { await app.close(); }

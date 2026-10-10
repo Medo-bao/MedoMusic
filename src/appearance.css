@@ -2,12 +2,12 @@
 @property --cover-tone { syntax: '<color>'; inherits: true; initial-value: #7a89a8; }
 :root {
   --background: #12151c;
-  --sidebar: rgba(23, 27, 37, .78);
+  --sidebar: rgba(23, 27, 37, .60);
   --text: #f0f3fa;
   --secondary: #a8b2c5;
   --tertiary: #7e8a9e;
   --ambient-fallback: #7a89a8;
-  --glass-panel: rgba(27, 32, 44, .78);
+  --glass-panel: rgba(27, 32, 44, .62);
   --solid-panel: #202633;
   --glass-edge: rgba(227, 237, 255, .14);
   --glass-highlight: rgba(241, 246, 255, .17);
@@ -16,17 +16,29 @@
   --detail-reading: rgba(15, 20, 30, .82);
   --detail-edge: rgba(15, 20, 30, .56);
   --detail-text: #f2f5fb;
+  --inactive-lyric-default: #ffffff;
   --art-opacity: .40;
   --glow-opacity: .24;
   --material-theme: color-mix(in srgb, var(--accent) 65%, var(--accent-secondary));
-  --material-base: color-mix(in srgb, #171d29 88%, var(--material-theme));
-  --module-edge: color-mix(in srgb, var(--accent) 30%, transparent);
-  --list-reading: color-mix(in srgb, var(--material-base) 48%, transparent);
+  --material-base: #171d29;
+  --background-coverage: .90;
+  --module-edge: color-mix(in srgb, var(--glass-edge) 86%, color-mix(in srgb, var(--accent) 12%, transparent));
+  --module-highlight: color-mix(in srgb, var(--glass-highlight) 55%, transparent);
+  --module-divider: color-mix(in srgb, var(--glass-edge) 65%, transparent);
+  --module-shadow: inset 0 0 0 1px var(--module-edge), inset 0 1px var(--module-highlight), 0 4px 14px var(--glass-shadow);
+  --module-fade: 24px;
+  --artwork-shadow: 0 8px 20px var(--glass-shadow), 0 0 0 1px var(--glass-edge);
+  --list-reading: color-mix(in srgb, var(--material-base) 34%, transparent);
   --player-material: linear-gradient(110deg, color-mix(in srgb, var(--accent) 10%, transparent), transparent 50%, color-mix(in srgb, var(--accent-secondary) 5%, transparent)), var(--glass-panel);
   --player-blur: blur(20px) saturate(1.15);
-  --settings-material: color-mix(in srgb, var(--material-base) 64%, transparent);
-  --popup-material: color-mix(in srgb, var(--material-base) 88%, transparent);
-  --control-material: color-mix(in srgb, var(--material-base) 40%, transparent);
+  --settings-material: color-mix(in srgb, var(--material-base) 48%, transparent);
+  --popup-tint: color-mix(in srgb, var(--material-base) 80%, transparent);
+  --popup-material: linear-gradient(160deg, color-mix(in srgb, var(--glass-highlight) 8%, transparent), transparent 45%), var(--popup-tint);
+  --popup-radius: 14px;
+  --popup-edge: var(--glass-edge);
+  --popup-shadow: inset 0 1px color-mix(in srgb, var(--glass-highlight) 65%, transparent), 0 12px 36px var(--glass-shadow), 0 2px 8px var(--glass-shadow);
+  --popup-blur: blur(24px) saturate(1.08);
+  --control-material: color-mix(in srgb, var(--material-base) 28%, transparent);
   --sidebar-material: var(--sidebar);
   --accent-ink: var(--accent-readable, #879eff);
   --accent-ink-secondary: var(--accent-secondary-readable, #df85f4);
@@ -36,12 +48,12 @@
 [data-theme="light"] {
   color-scheme: light;
   --background: #f1f3f8;
-  --sidebar: rgba(245, 247, 252, .76);
+  --sidebar: rgba(245, 247, 252, .58);
   --text: #222c3d;
   --secondary: #546279;
   --tertiary: #6c7a90;
   --ambient-fallback: #8d9bb7;
-  --glass-panel: rgba(250, 252, 255, .82);
+  --glass-panel: rgba(250, 252, 255, .64);
   --solid-panel: #f8faff;
   --glass-edge: rgba(79, 97, 128, .16);
   --glass-highlight: rgba(255, 255, 255, .92);
@@ -50,13 +62,14 @@
   --detail-reading: rgba(242, 245, 250, .86);
   --detail-edge: rgba(237, 242, 250, .64);
   --detail-text: #233047;
+  --inactive-lyric-default: #182126;
   --art-opacity: .40;
   --glow-opacity: .16;
-  --material-base: color-mix(in srgb, #f8faff 91%, var(--material-theme));
-  --module-edge: color-mix(in srgb, var(--accent) 20%, transparent);
-  --list-reading: color-mix(in srgb, var(--material-base) 48%, transparent);
+  --material-base: #f8faff;
+  --list-reading: color-mix(in srgb, var(--material-base) 34%, transparent);
 }
 body {
+  isolation: isolate;
   background:
     radial-gradient(ellipse at 82% -18%, color-mix(in srgb, var(--accent) 17%, transparent), transparent 55%),
     radial-gradient(ellipse at 2% 80%, color-mix(in srgb, var(--accent-secondary) 9%, transparent), transparent 48%),
@@ -65,27 +78,26 @@ body {
 body.settings-view {
   background: radial-gradient(ellipse at 88% 0%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 56%), var(--background);
 }
-/* Native DWM blur supplies the actual desktop behind this tint. Do not use
+/* Native DWM supplies the actual desktop behind this tint. Do not use
    window opacity: the artwork, labels and controls must remain fully opaque. */
-:root[data-window-material="blur"], :root[data-window-material="acrylic"] {
-  --desktop-tint: color-mix(in srgb, var(--material-base) 82%, transparent);
-  --desktop-sidebar: color-mix(in srgb, var(--material-base) 40%, transparent);
+:root:is([data-window-material="transparent"], [data-window-material="blur"], [data-window-material="acrylic"]) {
+  --desktop-tint: color-mix(in srgb, var(--material-base) calc(var(--background-coverage) * 100%), transparent);
+  --desktop-sidebar: color-mix(in srgb, var(--material-base) 28%, transparent);
   --sidebar-material: var(--desktop-sidebar);
-  --desktop-player: color-mix(in srgb, var(--material-base) 68%, transparent);
+  --desktop-player: color-mix(in srgb, var(--material-base) 50%, transparent);
   --player-material: var(--desktop-player);
   --player-blur: none;
   --secondary: #c1cadb;
   --tertiary: #b0bcd0;
 }
-:root[data-theme="light"][data-window-material="blur"],
-:root[data-theme="light"][data-window-material="acrylic"] {
+:root[data-theme="light"]:is([data-window-material="transparent"], [data-window-material="blur"], [data-window-material="acrylic"]) {
   --secondary: #42516a;
   --tertiary: #46556d;
 }
-:root:is([data-window-material="blur"], [data-window-material="acrylic"]) body {
+:root:is([data-window-material="transparent"], [data-window-material="blur"], [data-window-material="acrylic"]) body {
   background: linear-gradient(125deg, color-mix(in srgb, var(--accent) 5%, transparent), transparent 55%, color-mix(in srgb, var(--accent-secondary) 4%, transparent)), var(--desktop-tint);
 }
-:root:is([data-window-material="blur"], [data-window-material="acrylic"]) .sidebar {
+:root:is([data-window-material="transparent"], [data-window-material="blur"], [data-window-material="acrylic"]) .sidebar {
   box-shadow: none;
   backdrop-filter: none;
 }
@@ -99,7 +111,8 @@ body.settings-view {
   backdrop-filter: none;
 }
 .sidebar-resizer { top: 0; }
-.side-search { background: color-mix(in srgb, var(--text) 5%, transparent); border: 1px solid var(--glass-edge); }
+.side-search { background: var(--control-material); border: 1px solid var(--module-edge); box-shadow: inset 0 1px var(--module-highlight); }
+.side-search:focus-within { border-color: var(--accent-ink); box-shadow: inset 0 1px var(--module-highlight); }
 .nav-item.active, .playlist-item.active { background: color-mix(in srgb, var(--accent) 10%, var(--surface)); color: var(--accent-ink); }
 .nav-item.active > span, .playlist-title.active > span,
 .playlist-item.active .playlist-item-name, .playlist-item.active .playlist-count,
@@ -116,29 +129,37 @@ body.settings-view {
   content: ''; position: absolute; inset: 0; z-index: -1;
   pointer-events: none;
   background: var(--sidebar-material);
-  mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent), linear-gradient(to bottom, transparent, #000 24px);
+  mask-image: linear-gradient(to right, #000 calc(100% - var(--module-fade)), transparent), linear-gradient(to bottom, transparent, #000 var(--module-fade));
   mask-composite: intersect;
+}
+.playlist-favorite-slot, .playlist-title { position: relative; border-top-color: transparent; }
+.playlist-favorite-slot::before, .playlist-title::before {
+  content: ''; position: absolute; inset: -1px 0 auto; height: 1px; pointer-events: none;
+  background: linear-gradient(to right, transparent, var(--module-divider) 18%, var(--module-divider) 72%, transparent);
 }
 .pivot-bar { border-bottom-color: transparent; margin-bottom: 12px; }
 .playlist-hero {
-  background: linear-gradient(125deg, color-mix(in srgb, var(--accent) 9%, transparent), color-mix(in srgb, var(--accent-secondary) 3%, transparent) 75%), color-mix(in srgb, var(--material-base) 70%, transparent);
-  border-color: var(--module-edge);
-  box-shadow: 0 6px 18px var(--glass-shadow);
+  background: linear-gradient(125deg, color-mix(in srgb, var(--accent) 9%, transparent), color-mix(in srgb, var(--accent-secondary) 3%, transparent) 75%), color-mix(in srgb, var(--material-base) 52%, transparent);
+  border-color: transparent;
+  border-radius: var(--radius-md);
+  box-shadow: var(--module-shadow);
 }
-.track-list.virtual-track-list:has(> .track-row) {
+.track-list.virtual-track-list:has(> .track-row), .track-list.collection-list:has(> .collection-card) {
   background: var(--list-reading);
   border-radius: var(--radius-md);
-  box-shadow: inset 0 0 0 1px var(--module-edge);
+  overflow: clip;
+  box-shadow: var(--module-shadow);
 }
 .track-row .row-artist, .track-row .row-album-name { font-size: 13px; }
-.row-cover { border-radius: 6px; box-shadow: 0 2px 6px var(--glass-shadow); }
+.row-cover { border-radius: var(--radius-sm); box-shadow: 0 2px 6px var(--glass-shadow); }
 .track-row:not(.active):not(.selected):hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
 .collection-cover, .playlist-overview-cover, .playlist-art {
-  box-shadow: 0 12px 26px var(--glass-shadow), 0 0 0 1px var(--glass-edge);
+  border-radius: var(--radius-md);
+  box-shadow: var(--artwork-shadow);
 }
 .collection-card:hover .collection-cover, .playlist-overview-item:hover .playlist-overview-cover {
   transform: translateY(-3px);
-  box-shadow: 0 16px 32px color-mix(in srgb, var(--accent) 18%, transparent), 0 0 0 1px var(--glass-highlight);
+  box-shadow: 0 10px 24px var(--glass-shadow), 0 0 0 1px var(--module-edge);
 }
 .track-row.active:not(.selected) {
   background: linear-gradient(105deg, color-mix(in srgb, var(--accent) 9%, transparent), color-mix(in srgb, var(--accent-secondary) 3%, transparent));
@@ -201,10 +222,50 @@ body.playback-detail-active.is-playing:not(.background-mode):not(.playback-detai
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
   white-space: normal; overflow-wrap: anywhere; text-wrap: balance;
 }
+.collection-list .collection-card:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.collection-list .collection-card:hover .collection-cover { transform: none; box-shadow: var(--artwork-shadow); }
+
+/* Mix image and neutral tint first, then fade the whole plane. Transparent PNG
+   pixels retain the same base and desktop contribution as opaque image pixels. */
+.glass-background { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; background: var(--background); opacity: var(--background-coverage); }
+:root:is([data-window-material="transparent"], [data-window-material="blur"], [data-window-material="acrylic"]) .glass-background { background: transparent; }
+.glass-background[hidden] { display: none; }
+.glass-background img, .glass-background-tint { position: absolute; inset: calc(-1 * var(--background-overscan, 180px)); width: calc(100% + 2 * var(--background-overscan, 180px)); height: calc(100% + 2 * var(--background-overscan, 180px)); opacity: .24; filter: blur(7.5px); }
+.glass-background img { object-fit: cover; object-position: center; }
+.glass-background-tint {
+  --default-tint-strength: 4.8%; opacity: 1;
+  background: radial-gradient(ellipse at 8% 4%, color-mix(in srgb, var(--accent) var(--default-tint-strength), transparent), transparent 55%), radial-gradient(ellipse at 96% 96%, color-mix(in srgb, var(--accent-secondary) var(--default-tint-strength), transparent), transparent 55%), color-mix(in srgb, var(--material-theme) var(--default-tint-strength), var(--material-base));
+}
+.glass-background::after { content: ''; position: absolute; inset: 0; z-index: -1; background: var(--material-base); }
+:root[data-glass-background="theme"] .glass-background::after { content: none; }
+:root:where([data-glass-background="image"]) { --settings-material: color-mix(in srgb, var(--material-base) 32%, transparent); }
+:root:is([data-glass-background="theme"], [data-glass-background="image"]) body { background: transparent; }
+
+.background-image-setting { margin-top: 22px; padding-top: 22px; border-top: 1px solid var(--line); }
+.background-image-heading h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.background-image-heading p { margin: 5px 0 16px; color: var(--secondary); font-size: 12px; }
+.background-image-editor { display: flex; align-items: center; gap: 16px; }
+.background-image-thumbnail { width: 112px; height: 72px; flex: none; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--glass-edge); border-radius: 10px; background: var(--control-material); }
+.background-image-thumbnail img { width: 100%; height: 100%; object-fit: cover; }
+.background-image-thumbnail [hidden] { display: none; }
+.background-image-thumbnail .glyph { font-size: 26px; color: var(--secondary); }
+.background-image-details { min-width: 0; flex: 1; }
+.background-image-details > strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
+.background-image-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.background-image-actions button { margin: 0; white-space: nowrap; }
+.background-image-adjustments { display: grid; gap: 16px; margin-top: 20px; }
+.background-image-slider { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(120px, 1.35fr) 52px; align-items: center; gap: 16px; }
+.background-image-slider > span { display: grid; gap: 4px; }
+.background-image-slider strong { font-size: 13px; font-weight: 500; }
+.background-image-slider small { font-size: 12px; color: var(--secondary); }
+.background-image-slider input { width: 100%; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.background-image-slider input:disabled { opacity: .4; cursor: default; }
+.background-image-slider output { color: var(--secondary); font-size: 12px; text-align: right; font-variant-numeric: tabular-nums; }
+.background-image-status { min-height: 18px; margin: 12px 0 0; font-size: 12px; color: var(--secondary); }
 .detail-layout, [data-theme="light"] .detail-layout { color: var(--detail-text); }
 .detail-track span, .detail-track small, [data-theme="light"] .detail-track span, [data-theme="light"] .detail-track small { color: var(--secondary); }
 .detail-queue, [data-theme="light"] .detail-queue {
-  background: color-mix(in srgb, var(--material-base) 70%, transparent);
+  background: color-mix(in srgb, var(--material-base) 52%, transparent);
   border-color: var(--module-edge); box-shadow: 0 10px 28px var(--glass-shadow);
   backdrop-filter: blur(16px) saturate(1.1);
 }
@@ -212,15 +273,27 @@ body.playback-detail-active.is-playing:not(.background-mode):not(.playback-detai
 .detail-queue-title > span:first-child, #detail-queue-count { white-space: nowrap; }
 .queue-item.active { background: linear-gradient(110deg, color-mix(in srgb, var(--cover-tone) 20%, transparent), color-mix(in srgb, var(--cover-tone) 5%, transparent)); }
 .queue-item.active::before { background: var(--accent-ink); }
-/* Lyric colors and karaoke gradients inherit the original theme rules in styles.css. */
+/* Keep the chosen ink opaque; apply distance fading once at the row level. */
+@media (prefers-contrast: no-preference) {
+  :root[data-custom-lyric-color] #lyrics-lines .lyric-line:not(.active):not(.selected) { color: rgb(var(--inactive-lyric-custom-rgb)); }
+  :root[data-custom-lyric-color] #lyrics-lines { --custom-lyric-depth-max: calc(.68 * .78); }
+  :root[data-custom-lyric-color] .lyrics-stage.inspecting #lyrics-lines { --custom-lyric-depth-max: calc(.8 * .9); }
+  :root[data-custom-lyric-color] #lyrics-lines .lyric-line:not(.active):not(.selected) { opacity: calc(var(--inactive-lyric-alpha) * .55 / var(--custom-lyric-depth-max)); }
+  :root[data-custom-lyric-color] #lyrics-lines .lyric-line.past:not(.near):not(.active):not(.selected) { opacity: calc(var(--inactive-lyric-alpha) * .42 / var(--custom-lyric-depth-max)); }
+  :root[data-custom-lyric-color] #lyrics-lines .lyric-line.near:not(.active):not(.selected) { opacity: 1; }
+  :root[data-custom-lyric-color] .lyrics-stage.inspecting #lyrics-lines .lyric-line:not(.active):not(.selected) { opacity: calc(var(--inactive-lyric-alpha) * .82 / var(--custom-lyric-depth-max)); }
+  :root[data-custom-lyric-color] .lyrics-stage.inspecting #lyrics-lines .lyric-line.past:not(.near):not(.active):not(.selected) { opacity: calc(var(--inactive-lyric-alpha) * .76 / var(--custom-lyric-depth-max)); }
+  :root[data-custom-lyric-color] .lyrics-stage.inspecting #lyrics-lines .lyric-line.near:not(.active):not(.selected) { opacity: 1; }
+}
 
 /* The control console keeps the same material when entering or leaving lyrics. */
 .player, [data-theme="light"] .player, .playback-detail-active .player, [data-theme="light"] .playback-detail-active .player {
   background: var(--player-material);
-  border-top-color: var(--module-edge);
-  box-shadow: 0 -8px 24px var(--glass-shadow);
+  border-top-color: transparent;
+  box-shadow: inset 0 1px var(--module-highlight);
   backdrop-filter: var(--player-blur);
 }
+.player::before { content: ''; position: absolute; inset: calc(-1 * var(--module-fade)) 0 auto; height: var(--module-fade); pointer-events: none; background: var(--player-material); mask-image: linear-gradient(to bottom, transparent, #000); }
 .controls .play-button, .playback-detail-active .controls .play-button {
   color: var(--on-accent, white); background: var(--accent-gradient);
   box-shadow: inset 0 1px 1px rgba(255,255,255,.4), 0 5px 16px color-mix(in srgb, var(--accent) 25%, transparent);
@@ -239,48 +312,41 @@ body.playback-detail-active #toggle-detail-queue.active, body.playback-detail-ac
 .controls .play-mode-button.active, [data-theme="light"] .playback-detail-active .player .play-mode-button.active {
   color: var(--accent-ink); background: color-mix(in srgb, var(--accent) 10%, transparent); background-clip: border-box; -webkit-background-clip: border-box;
 }
-#progress, #volume {
+#progress, #volume, .settings-panel input[type="range"] {
   background: linear-gradient(to right, var(--accent) 0%, color-mix(in srgb, var(--accent) 46%, var(--accent-secondary)) var(--range-mid, 0%), var(--accent-secondary) var(--range-progress, 0%), var(--line-strong) var(--range-progress, 0%), var(--line-strong) 100%);
 }
-#progress::-webkit-slider-thumb, #volume::-webkit-slider-thumb { box-shadow: 0 2px 9px color-mix(in srgb, var(--accent) 28%, transparent); }
-#progress:hover::-webkit-slider-thumb, #volume:hover::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--accent-soft), 0 3px 12px color-mix(in srgb, var(--accent) 30%, transparent); }
+#progress::-webkit-slider-thumb, #volume::-webkit-slider-thumb, .settings-panel input[type="range"]::-webkit-slider-thumb { box-shadow: 0 2px 9px color-mix(in srgb, var(--accent) 28%, transparent); }
+#progress:hover::-webkit-slider-thumb, #volume:hover::-webkit-slider-thumb, .settings-panel input[type="range"]:hover::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--accent-soft), 0 3px 12px color-mix(in srgb, var(--accent) 30%, transparent); }
 .primary-button, .primary-button:hover, .playlist-actions .playlist-primary, .playlist-actions .playlist-primary:hover { color: var(--on-accent, white); }
 .playlist-actions .playlist-primary:disabled { opacity: .4; cursor: default; box-shadow: none; transform: none; background: var(--accent-gradient); }
 
 /* Settings and secondary surfaces share the theme glass, with denser popup tint. */
 .settings-group {
   background: var(--settings-material);
-  border-color: var(--module-edge); box-shadow: 0 6px 18px var(--glass-shadow);
+  border-color: transparent; box-shadow: var(--module-shadow);
 }
 .settings-heading p { max-width: 65ch; line-height: 1.6; }
 .settings-action:hover { transform: translateY(-1px); box-shadow: 0 8px 20px var(--glass-shadow); }
 .settings-action:hover { background: color-mix(in srgb, var(--accent) 8%, var(--control-material)); }
-.sound-entry.settings-group:hover, .sound-entry.settings-group:active {
+.sound-entry:hover, .sound-entry:active {
   background: linear-gradient(color-mix(in srgb, var(--accent) 5%, transparent), color-mix(in srgb, var(--accent) 5%, transparent)), var(--settings-material);
-  border-color: var(--module-edge); box-shadow: 0 6px 18px var(--glass-shadow);
+  border-color: transparent; box-shadow: var(--module-shadow);
 }
 .theme-option.active { color: var(--accent-ink); }
 .display-option.active, .close-behavior-option.active, .tray-option.active, .lyric-translation-option.active,
-.word-lyrics-option.active, .desktop-lyric-lock-option.active, .global-play-shortcut-option.active,
+.word-lyrics-option.active, .desktop-lyric-lock-option.active, .playback-fade-option.active, .global-play-shortcut-option.active,
 .global-desktop-lyrics-shortcut-option.active, .global-lyrics-shortcut-option.active, .global-previous-shortcut-option.active,
 .global-next-shortcut-option.active {
   color: var(--on-accent, white); box-shadow: 0 5px 16px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 .sound-dialog, [data-theme="light"] .sound-dialog {
-  --sound-panel: var(--popup-material);
+  --sound-panel: var(--popup-tint);
   --sound-card: var(--control-material);
   --sound-track: color-mix(in srgb, var(--solid-panel) 74%, var(--text));
-  background: var(--sound-panel); border-color: var(--glass-edge);
-  box-shadow: inset 0 1px var(--glass-highlight), 0 24px 70px var(--glass-shadow);
 }
 .sound-dialog #sound-preset, .sound-dialog option { color: var(--text); background: var(--sound-card); }
 .sound-dialog button:disabled { opacity: .55; }
 .sound-band output, .sound-band span { color: var(--secondary); font-variant-numeric: tabular-nums; }
-.action-feedback, .context-menu, .playlist-picker, .playlist-name-dialog, .track-info-dialog, .track-properties-dialog {
-  color: var(--text); background: var(--solid-panel); border-color: var(--glass-edge);
-  box-shadow: inset 0 1px var(--glass-highlight), 0 16px 40px var(--glass-shadow);
-}
-.selection-actions { background: var(--glass-panel); border-color: var(--glass-edge); box-shadow: inset 0 1px var(--glass-highlight), 0 12px 32px var(--glass-shadow); }
 button:focus-visible, input:not([type="range"]):focus-visible, select:focus-visible {
   background-color: color-mix(in srgb, var(--accent) 15%, var(--solid-panel));
   box-shadow: inset 0 0 0 1px var(--accent-ink);
@@ -288,14 +354,17 @@ button:focus-visible, input:not([type="range"]):focus-visible, select:focus-visi
 .sound-dialog .frequency-knob:focus-visible { background: transparent; box-shadow: none; }
 .sound-dialog .frequency-knob:focus-visible .knob-track { stroke: var(--accent-ink); }
 
-/* Use one material for menus, property/edit dialogs and sound subdialogs. */
-:root :is(dialog, .action-feedback, .selection-actions, .glass-menu, #sound-rename-dialog, #sound-delete-dialog, #sound-preset-menu) {
-  color: var(--text); background: var(--popup-material); border-color: var(--module-edge);
-  box-shadow: 0 12px 36px var(--glass-shadow);
-  backdrop-filter: blur(18px) saturate(1.1);
+/* Every app popup shares the same frost, rim and elevation, including menus
+   hosted in a modal dialog and the selection toolbar beneath a context menu. */
+:root :is(dialog, .action-feedback, .playback-error-toast, .selection-actions, .glass-menu, .listening-month-picker, #volume-percent) {
+  color: var(--text); background: var(--popup-material);
+  border: 1px solid var(--popup-edge); border-radius: var(--popup-radius);
+  box-shadow: var(--popup-shadow); text-shadow: none;
+  backdrop-filter: var(--popup-blur);
 }
 :root dialog::backdrop { background: rgba(9, 14, 25, .18); backdrop-filter: blur(3px); }
 :root #sound-preset-menu::backdrop { background: transparent; backdrop-filter: none; }
+:root #volume-percent::after { border-top-color: var(--popup-tint); filter: none; }
 .settings-action, .folder-row, .theme-option:not(.active), .display-option:not(.active),
 .sound-card, .sound-dialog select, :root .track-info-dialog input,
 :root .track-info-dialog footer button:not(.primary), #sound-preset-name {
@@ -305,25 +374,29 @@ button:focus-visible, input:not([type="range"]):focus-visible, select:focus-visi
   position: fixed; inset: auto; margin: 0; padding: 6px;
   width: max-content; min-width: 172px; max-width: min(320px, calc(100vw - 16px));
   max-height: calc(100vh - 16px); overflow: auto;
-  border: 1px solid; border-radius: 12px; font: inherit;
+  font: inherit;
 }
 .glass-menu::backdrop { background: transparent; }
 .glass-menu button {
   position: relative; display: block; width: 100%; padding: 9px 32px 9px 14px;
-  border: 0; border-radius: 7px; color: inherit; background: transparent;
+  border: 0; border-radius: 8px; color: inherit; background: transparent;
   font: inherit; text-align: left; overflow-wrap: anywhere; cursor: default;
   transform: none; transition: background-color 100ms ease;
 }
-.glass-menu button:is(:hover, :focus-visible), .glass-menu button[aria-expanded="true"] {
+.glass-menu button:is(:hover, :focus-visible), .glass-menu button[aria-expanded="true"],
+:root #sound-preset-menu button:is(:hover, :focus-visible) {
   background: color-mix(in srgb, var(--accent) 14%, transparent); outline: none; box-shadow: none;
 }
 .glass-menu button:disabled { opacity: .42; background: transparent; }
 .glass-menu button[aria-haspopup]::after { content: '›'; position: absolute; right: 12px; top: 6px; font-size: 20px; }
 .glass-menu button.checked::after { content: '✓'; position: absolute; right: 10px; color: var(--accent-ink); }
-.glass-menu [role="separator"] { height: 1px; margin: 5px 7px; background: var(--glass-edge); }
+.glass-menu [role="separator"] { height: 1px; margin: 5px 7px; background: var(--module-divider); }
+:root #sound-preset-menu { padding: 6px; }
+:root #sound-preset-menu button { border-radius: 8px; }
+.selection-divider, .sound-dialog-header { border-color: var(--module-divider); }
+.selection-divider { background: var(--module-divider); }
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
-  :root { --settings-material: var(--solid-panel); --popup-material: var(--solid-panel); --control-material: var(--surface); }
-  :root :is(dialog, .action-feedback, .selection-actions, .glass-menu, #sound-rename-dialog, #sound-delete-dialog, #sound-preset-menu) { backdrop-filter: none; }
+  :root { --settings-material: var(--solid-panel); --popup-tint: var(--solid-panel); --popup-material: var(--solid-panel); --popup-blur: none; --control-material: var(--surface); }
 }
 
 @media (max-width: 1050px) {
@@ -343,7 +416,10 @@ button:focus-visible, input:not([type="range"]):focus-visible, select:focus-visi
   .collection-card:hover .collection-cover, .playlist-overview-item:hover .playlist-overview-cover { transform: none; }
 }
 @media (prefers-reduced-transparency: reduce) {
-  :root:is([data-window-material="blur"], [data-window-material="acrylic"]) body { background: var(--background); }
+  :root:is([data-glass-background="theme"], [data-glass-background="image"]) body { background: var(--background); }
+  .glass-background { display: none; }
+  .player::before { content: none; }
+  :root:is([data-window-material="transparent"], [data-window-material="blur"], [data-window-material="acrylic"]) body { background: var(--background); }
   .sidebar, [data-theme="light"] .sidebar, .player, [data-theme="light"] .player,
   .playback-detail-active .player, [data-theme="light"] .playback-detail-active .player,
   .detail-queue, [data-theme="light"] .detail-queue, .selection-actions { background: var(--solid-panel); backdrop-filter: none; }
@@ -351,7 +427,10 @@ button:focus-visible, input:not([type="range"]):focus-visible, select:focus-visi
   .playback-detail::after, [data-theme="light"] .playback-detail::after { background: var(--detail-base); }
 }
 @media (prefers-contrast: more) {
-  :root:is([data-window-material="blur"], [data-window-material="acrylic"]) body { background: var(--background); }
+  :root:is([data-glass-background="theme"], [data-glass-background="image"]) body { background: var(--background); }
+  .glass-background { display: none; }
+  .player::before { content: none; }
+  :root:is([data-window-material="transparent"], [data-window-material="blur"], [data-window-material="acrylic"]) body { background: var(--background); }
   :root { --secondary: #d5deec; --glass-edge: #8794a8; }
   [data-theme="light"] { --secondary: #374359; --glass-edge: #637189; }
   .sidebar, [data-theme="light"] .sidebar, .player, [data-theme="light"] .player,

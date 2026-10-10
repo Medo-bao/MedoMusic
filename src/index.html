@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-glass-background="theme">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -19,6 +19,7 @@
   <link rel="stylesheet" href="./appearance.css">
 </head>
 <body>
+  <div id="glass-background" class="glass-background" aria-hidden="true"><div class="glass-background-tint"></div><img alt="" hidden></div>
   <div class="window-titlebar" aria-label="窗口控制">
     <button id="window-minimize" class="window-control" title="最小化" aria-label="最小化"><span class="window-icon minimize-icon"></span></button>
     <button id="window-maximize" class="window-control" title="最大化" aria-label="最大化"><span class="window-icon maximize-icon"></span></button>
@@ -33,8 +34,8 @@
       </div>
 
       <label class="side-search">
-        <input id="search-input" type="search" placeholder="搜索">
-        <span class="glyph">&#xE721;</span>
+        <input id="search-input" type="search" aria-label="搜索音乐">
+        <span class="glyph" aria-hidden="true">&#xE721;</span>
       </label>
 
       <nav>
@@ -62,6 +63,10 @@
     <main>
       <header class="page-header">
         <h1 id="view-title">我的音乐</h1>
+        <div id="recent-listening-summary" class="recent-listening-summary" hidden>
+          <span>听歌总时长</span>
+          <strong id="recent-listening-time">0 小时 00 分钟</strong>
+        </div>
       </header>
 
       <section id="playlist-hero" class="playlist-hero" hidden>
@@ -101,7 +106,7 @@
             <label class="sort-choice">
               <span id="library-sort-value" class="sort-value">创建时间</span>
               <select id="library-sort" aria-label="排序依据">
-              <option value="added">创建时间</option>
+              <option value="manual">手动排序</option><option value="added">创建时间</option>
               <option value="az">A 到 Z</option>
               <option value="artist">歌手</option>
               <option value="album">专辑</option>
@@ -124,6 +129,7 @@
       </div>
 
       <section class="content-area">
+        <div id="compact-track-heading" class="compact-track-heading" aria-hidden="true" hidden><span class="heading-number">#</span><span>歌曲</span><span>歌手</span><span class="heading-album">专辑</span><span class="heading-play-count" hidden>播放次数</span><span></span></div>
         <div id="track-list" class="track-list"></div>
         <div id="empty-state" class="empty-state">
           <img src="../Groove/Assets/MissingAlbumArt.jpg" alt="">
@@ -137,10 +143,10 @@
       </section>
 
       <section id="settings-panel" class="settings-panel" aria-label="设置">
-        <div class="settings-group">
+        <div class="settings-group" id="settings-library" aria-labelledby="settings-library-title">
           <div class="settings-heading">
             <div>
-              <h2>音乐库</h2>
+              <h2 id="settings-library-title">音乐库</h2>
               <p>添加本地音乐，导入 Groove 播放列表，或管理自动扫描的文件夹。</p>
             </div>
           </div>
@@ -170,20 +176,73 @@
             </div>
           </div>
           <div id="folder-list" class="folder-list"></div>
+          <div class="display-setting">
+            <div><h3>音乐内容显示</h3><p>切换我的音乐页面的显示密度。</p></div>
+            <div class="segmented-control" role="radiogroup" aria-label="音乐内容显示">
+              <button class="display-option active" data-display-value="thumbnail" role="radio" aria-checked="true">缩略图</button>
+              <button class="display-option" data-display-value="compact" role="radio" aria-checked="false">紧凑列表</button>
+            </div>
+          </div>
         </div>
 
-        <div class="settings-group sound-entry" id="sound-settings-entry">
+        <div class="settings-group" id="settings-listening" aria-labelledby="settings-listening-title">
+          <div class="settings-heading listening-statistics-heading">
+            <div><h2 id="settings-listening-title">听歌统计</h2></div>
+            <button id="reset-listening-time" class="secondary-button" disabled>重置听歌统计</button>
+          </div>
+          <div class="listening-statistics">
+            <div><span id="listening-day-label">今日</span><strong id="listening-day-time">0 小时 00 分钟</strong></div>
+            <div><span id="listening-month-label">本月</span><strong id="listening-month-time">0 小时 00 分钟</strong></div>
+            <div><span id="listening-year-label">今年</span><strong id="listening-year-time">0 小时 00 分钟</strong></div>
+            <div><span>总累计</span><strong id="settings-listening-time">0 小时 00 分钟</strong></div>
+          </div>
+          <div class="listening-calendar-toolbar">
+            <h3>听歌日历</h3>
+            <div class="listening-calendar-controls">
+              <button id="listening-calendar-previous" class="listening-calendar-nav" aria-label="上个月"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m10 4-4 4 4 4"/></svg></button>
+              <button id="listening-calendar-month" class="listening-month-trigger" popovertarget="listening-month-picker" aria-label="选择统计月份" aria-haspopup="dialog" aria-expanded="false">
+                <span id="listening-calendar-month-label"></span>
+                <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="3.5" width="11" height="10" rx="2"/><path d="M5 2v3m6-3v3M3 7h10"/></svg>
+              </button>
+              <button id="listening-calendar-next" class="listening-calendar-nav" aria-label="下个月"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></button>
+            </div>
+            <button id="listening-calendar-today" class="secondary-button">今天</button>
+          </div>
+          <div id="listening-month-picker" class="listening-month-picker" popover="auto" role="dialog" aria-label="选择统计月份">
+            <div class="listening-picker-header">
+              <button id="listening-picker-previous-year" class="listening-calendar-nav" aria-label="上一年"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m10 4-4 4 4 4"/></svg></button>
+              <label class="listening-picker-year"><input id="listening-picker-year" type="number" min="1" step="1" aria-label="选择年份"><span>年</span></label>
+              <button id="listening-picker-next-year" class="listening-calendar-nav" aria-label="下一年"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4 4 4-4 4"/></svg></button>
+            </div>
+            <div id="listening-picker-months" class="listening-picker-months" role="group" aria-label="选择月份"></div>
+            <div class="listening-picker-footer"><button id="listening-picker-current" class="secondary-button">回到本月</button></div>
+          </div>
+          <div class="listening-calendar-weekdays" aria-hidden="true"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div>
+          <div id="listening-calendar" class="listening-calendar-grid" role="group" aria-label="每日听歌时长"></div>
+        </div>
+
+        <div class="settings-group" id="settings-sound" aria-labelledby="settings-sound-title">
+          <div class="settings-heading"><div><h2 id="settings-sound-title">声音</h2><p>调整声音增强与音效。</p></div></div>
+          <div class="sound-entry" id="sound-settings-entry">
           <button id="open-sound-settings" class="sound-entry-open" aria-haspopup="dialog">
           <span class="sound-entry-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 4v6m0 4v6M12 4v10m0 4v2M19 4v2m0 4v10"/><path d="M2.5 10h5v4h-5zm7 4h5v4h-5zm7-8h5v4h-5z"/></svg></span><span><strong>声音增强<span class="sound-experimental">（实验功能）</span></strong></span><svg class="sound-entry-chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m8 5 5 5-5 5"/></svg>
           </button>
           <label class="sound-switch sound-entry-toggle"><span id="sound-entry-status">已关闭</span><input id="sound-quick-enabled" type="checkbox" aria-label="启用声音增强"></label>
+          </div>
+          <div class="display-setting playback-fade-setting">
+            <div><h3>播放/暂停渐强渐弱</h3><p>播放时音量渐强，暂停时渐弱，让声音平滑过渡。</p></div>
+            <div class="segmented-control playback-fade-options" role="radiogroup" aria-label="播放/暂停渐强渐弱">
+              <button class="playback-fade-option" data-playback-fade-value="on" role="radio" aria-checked="false">开启</button>
+              <button class="playback-fade-option active" data-playback-fade-value="off" role="radio" aria-checked="true">关闭</button>
+            </div>
+          </div>
         </div>
 
-        <div class="settings-group">
+        <div class="settings-group" id="settings-appearance" aria-labelledby="settings-appearance-title">
           <div class="settings-heading">
             <div>
-              <h2>外观</h2>
-              <p>选择适合当前环境的界面主题。</p>
+              <h2 id="settings-appearance-title">外观</h2>
+              <p>调整界面主题、自定义背景与玻璃材质。</p>
             </div>
           </div>
           <div class="theme-options" role="radiogroup" aria-label="颜色模式">
@@ -203,6 +262,22 @@
               <span class="theme-check glyph">&#xE73E;</span>
             </button>
           </div>
+          <div class="display-setting interface-scale-setting">
+            <div><h3><label for="interface-scale">界面缩放</label></h3><p id="interface-scale-status">跟随系统显示缩放，可按需调整界面大小。</p></div>
+            <div class="interface-scale-control">
+              <select id="interface-scale" aria-describedby="interface-scale-status">
+                <option value="0.8">80%</option>
+                <option value="0.9">90%</option>
+                <option value="1" selected>跟随系统（100%）</option>
+                <option value="1.1">110%</option>
+                <option value="1.25">125%</option>
+                <option value="1.5">150%</option>
+                <option value="1.75">175%</option>
+                <option value="2">200%</option>
+              </select>
+              <svg class="interface-scale-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
+            </div>
+          </div>
           <div class="theme-color-setting">
             <div><h3>自定义主题色</h3><p>调整按钮、选中状态与渐变强调色。</p></div>
             <div class="theme-color-controls">
@@ -211,13 +286,30 @@
               <button id="reset-theme-colors" class="secondary-button">恢复默认</button>
             </div>
           </div>
-          <div class="display-setting">
-            <div><h3>音乐内容显示</h3><p>切换我的音乐页面的显示密度。</p></div>
-            <div class="segmented-control" role="radiogroup" aria-label="音乐内容显示">
-              <button class="display-option active" data-display-value="thumbnail" role="radio" aria-checked="true">缩略图</button>
-              <button class="display-option" data-display-value="compact" role="radio" aria-checked="false">紧凑列表</button>
+          <div class="background-image-setting">
+            <div class="background-image-heading"><div><h3>自定义背景</h3><p>用模糊图片替代默认染色，保留桌面透视。</p></div></div>
+            <div class="background-image-editor">
+              <div class="background-image-thumbnail"><img id="background-image-preview" alt="当前背景图片" hidden><span id="background-image-placeholder" class="glyph" aria-hidden="true">&#xE790;</span></div>
+              <div class="background-image-details"><strong id="background-image-name">默认染色</strong><div class="background-image-actions"><button id="choose-background-image" class="secondary-button">选择图片</button><button id="reset-background-image" class="secondary-button" disabled>恢复默认</button></div></div>
             </div>
+            <div class="background-image-adjustments">
+              <label class="background-image-slider"><span><strong>背景透明度</strong><small>调整整窗背景的透明程度</small></span><input id="background-transparency" type="range" min="0" max="100" step="1" value="10"><output id="background-transparency-value" for="background-transparency">10%</output></label>
+              <label class="background-image-slider"><span><strong>背景清晰度</strong><small>调整默认染色或图片的显现程度</small></span><input id="background-image-clarity" type="range" min="0" max="100" step="1" value="30"><output id="background-image-clarity-value" for="background-image-clarity">30%</output></label>
+              <label class="background-image-slider"><span><strong>背景模糊度</strong><small>调整默认染色或图片的柔化程度</small></span><input id="background-image-blur" type="range" min="0" max="100" step="1" value="50"><output id="background-image-blur-value" for="background-image-blur">50%</output></label>
+            </div>
+            <div class="display-setting background-material-setting">
+              <div><h3>背景材质</h3><p>选择窗口背景的玻璃效果。</p></div>
+              <div class="segmented-control background-material-options" role="radiogroup" aria-label="背景材质">
+                <button class="display-option" data-background-material-value="transparent" role="radio" aria-checked="false">透明玻璃</button>
+                <button class="display-option active" data-background-material-value="frosted" role="radio" aria-checked="true">磨砂玻璃</button>
+              </div>
+            </div>
+            <p id="background-image-status" class="background-image-status" role="status"></p>
           </div>
+        </div>
+
+        <div class="settings-group" id="settings-lyrics" aria-labelledby="settings-lyrics-title">
+          <div class="settings-heading"><div><h2 id="settings-lyrics-title">歌词</h2><p>调整歌词内容、文字大小与颜色。</p></div></div>
           <div class="display-setting word-lyrics-setting">
             <div><h3>逐字歌词（实验功能）</h3><p>开启后强制从网络获取歌词。</p></div>
             <div class="segmented-control word-lyrics-options" role="radiogroup" aria-label="逐字歌词">
@@ -236,6 +328,17 @@
             <div><h3>歌词字体大小</h3><p>调整歌词字号。</p></div>
             <label class="desktop-lyric-size-control"><input id="detail-lyric-size" type="range" min="18" max="38" step="1" value="26"><output id="detail-lyric-size-value">26 px</output></label>
           </div>
+          <div class="display-setting inactive-lyric-color-setting">
+            <div><h3>非播放歌词颜色</h3><p>调整非播放歌词的文字颜色。</p></div>
+            <div class="theme-color-controls">
+              <label><span>颜色</span><input id="inactive-lyric-color" type="color" value="#ffffff"></label>
+              <button id="reset-inactive-lyric-color" class="secondary-button">恢复默认</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-group" id="settings-desktop-lyrics" aria-labelledby="settings-desktop-lyrics-title">
+          <div class="settings-heading"><div><h2 id="settings-desktop-lyrics-title">桌面歌词</h2><p>调整悬浮歌词的样式、锁定与位置。</p></div></div>
           <div class="display-setting desktop-lyric-size-setting">
             <div><h3>桌面歌词字体大小</h3><p>调整桌面歌词悬浮窗中的歌词字号。</p></div>
             <label class="desktop-lyric-size-control"><input id="desktop-lyric-size" type="range" min="16" max="64" step="2" value="34"><output id="desktop-lyric-size-value">34 px</output></label>
@@ -261,10 +364,10 @@
           </div>
         </div>
 
-        <div class="settings-group global-shortcuts-group">
+        <div class="settings-group global-shortcuts-group" id="settings-shortcuts" aria-labelledby="settings-shortcuts-title">
           <div class="settings-heading">
             <div>
-              <h2>全局快捷键</h2>
+              <h2 id="settings-shortcuts-title">全局快捷键</h2>
               <p>即使 MedoMusic 不在前台，也可以控制播放、显示或隐藏桌面歌词和刷新歌词。</p>
             </div>
           </div>
@@ -305,16 +408,19 @@
           </div>
         </div>
 
-        <div class="settings-group">
+        <div class="settings-group" id="settings-window" aria-labelledby="settings-window-title">
           <div class="settings-heading">
             <div>
-              <h2>关闭行为</h2>
-              <p>选择点击右上角关闭按钮时 MedoMusic 的处理方式。</p>
+              <h2 id="settings-window-title">窗口与托盘</h2>
+              <p>管理窗口关闭与系统托盘。</p>
             </div>
           </div>
-          <div class="segmented-control close-behavior-options" role="radiogroup" aria-label="关闭行为">
-            <button class="close-behavior-option active" data-close-value="background" role="radio" aria-checked="true">最小化到托盘</button>
-            <button class="close-behavior-option" data-close-value="quit" role="radio" aria-checked="false">直接退出软件</button>
+          <div class="display-setting">
+            <div><h3>关闭行为</h3><p>选择点击右上角关闭按钮时的处理方式。</p></div>
+            <div class="segmented-control close-behavior-options" role="radiogroup" aria-label="关闭行为">
+              <button class="close-behavior-option active" data-close-value="background" role="radio" aria-checked="true">最小化到托盘</button>
+              <button class="close-behavior-option" data-close-value="quit" role="radio" aria-checked="false">直接退出软件</button>
+            </div>
           </div>
           <div id="tray-setting" class="display-setting">
             <div><h3>显示系统托盘</h3><p>关闭后不再显示系统托盘图标。</p></div>
@@ -325,14 +431,15 @@
           </div>
         </div>
 
-        <div class="settings-group about-group">
+        <div class="settings-group about-group" id="settings-about" aria-labelledby="settings-about-title">
           <div class="settings-heading">
             <div>
-              <h2>关于 MedoMusic</h2>
+              <h2 id="settings-about-title">更新与关于</h2>
               <p>本地 Windows 音乐播放器。</p>
             </div>
             <button id="check-for-updates" class="secondary-button update-check-button"><span class="glyph">&#xE895;</span><span>检查更新</span></button>
           </div>
+          <label class="auto-update-setting"><input id="auto-check-updates" type="checkbox" checked><span>启动时自动检测更新</span></label>
           <dl class="app-info">
             <div><dt>应用版本</dt><dd id="about-version">正在读取</dd></div>
             <div><dt>安装目录</dt><dd id="about-install-directory">E:\Medo_music\release</dd></div>
@@ -457,6 +564,11 @@
   <script src="./fxsound-core.js"></script>
   <script src="./sound-enhancement.js"></script>
   <script src="./appearance.js"></script>
+  <script src="./glass-background.js"></script>
+  <script src="./renderer-storage.js"></script>
+  <script src="./renderer-library.js"></script>
+  <script src="./renderer-playlists.js"></script>
+  <script src="./renderer-playback.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

@@ -1,6 +1,7 @@
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const { extractFile } = require("@electron/asar");
 const { version } = require("../package.json");
 
 const root = path.resolve(__dirname, "..");
@@ -9,7 +10,7 @@ const installer = path.join(
   "release",
   `MedoMusic-Setup-${version}-x64.exe`
 );
-const destination = path.join(root, "release");
+const destination = path.join(process.env.LOCALAPPDATA, "Programs", "MedoMusic");
 
 if (!fs.existsSync(installer)) {
   throw new Error(`Installer not found: ${installer}`);
@@ -29,6 +30,10 @@ if (result.status !== 0) {
 const executable = path.join(destination, "MedoMusic.exe");
 if (!fs.existsSync(executable)) {
   throw new Error(`Installed executable not found: ${executable}`);
+}
+const installedPackage = JSON.parse(extractFile(path.join(destination, "resources", "app.asar"), "package.json").toString());
+if (installedPackage.version !== version) {
+  throw new Error(`Installation did not update MedoMusic: expected ${version}, found ${installedPackage.version}`);
 }
 fs.writeFileSync(
   path.join(destination, ".medomusic-install"),

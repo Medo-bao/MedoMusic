@@ -1,17 +1,18 @@
 {
   "name": "medo-music",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "A refined local desktop music player",
   "author": "MedoMusic",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer.js && node --check src/appearance.js && node --check src/glass-menus.js && node --check src/window-material.js && node --check src/sound-enhancement.js && node --check src/fxsound-core.js && node --check src/lyrics-window.js && node --check src/lyrics-timing.js && node --check src/lyrics-source-priority.js && node --check src/netease-eapi.js && node --check src/qq-music.js && node --check src/zpl.js && node --check src/media-file-response.js",
-    "test": "npm run check && node tests/media-file-response.test.js && node tests/zpl.test.js && node tests/text-decoder.test.js && node tests/lyrics-timing.test.js && node tests/lyrics-source-priority.test.js && node tests/netease-eapi.test.js && node tests/qq-music.test.js && node tests/word-lyrics-search.test.js && node tests/myfirefly-extension.test.js && node tests/tray-identity.test.js && node tests/lyrics-window-top.test.js && node tests/removed-branding.test.js",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer.js && node --check src/renderer-storage.js && node --check src/renderer-library.js && node --check src/renderer-playlists.js && node --check src/renderer-playback.js && node --check src/cover-cache.js && node --check src/appearance.js && node --check src/glass-background.js && node --check src/background-image-store.js && node --check src/glass-menus.js && node --check src/window-material.js && node --check src/window-scaling.js && node --check src/sound-enhancement.js && node --check src/fxsound-core.js && node --check src/lyrics-window.js && node --check src/lyrics-timing.js && node --check src/lyrics-source-priority.js && node --check src/netease-eapi.js && node --check src/qq-music.js && node --check src/zpl.js && node --check src/media-file-response.js",
+    "test": "npm run check && node tests/media-file-response.test.js && node tests/zpl.test.js && node tests/text-decoder.test.js && node tests/lyrics-timing.test.js && node tests/lyrics-source-priority.test.js && node tests/netease-eapi.test.js && node tests/qq-music.test.js && node tests/word-lyrics-search.test.js && node tests/myfirefly-extension.test.js && node tests/tray-identity.test.js && node tests/lyrics-window-top.test.js && node tests/removed-branding.test.js && node tests/background-image-store.test.js && node tests/cover-cache.test.js",
+    "test:library": "node tests/library-ipc.cjs && node tests/ui_smoke.js --library-repairs",
     "test:fxsound": "node tests/fxsound-integrated-reference.cjs && node tests/fxsound-controls-reference.cjs && node tests/fxsound-rate-reference.cjs && node tests/fxsound-worklet.cjs",
     "test:fxsound:realtime": "node tests/fxsound-realtime.cjs --seconds=30 --sample-reference",
     "make-icon": "node scripts/make-icon.js",
-    "dist": "node scripts/clean-release.js && npm run test && npm run make-icon && electron-builder --win nsis && npm run install-local",
+    "dist": "npm run test && npm run make-icon && node scripts/clean-release.js && electron-builder --win nsis --x64",
     "install-local": "node scripts/install-local.js"
   },
   "devDependencies": {
@@ -29,6 +30,11 @@
     "appId": "com.medomusic.desktop",
     "productName": "MedoMusic",
     "asar": true,
+    "electronLanguages": [
+      "zh-CN",
+      "zh-TW",
+      "en-US"
+    ],
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -38,7 +44,9 @@
       "Groove/Assets/MissingAlbumArt.jpg",
       "Groove/Resources/Fonts/SegMVR2.ttf",
       "THIRD_PARTY_NOTICES.md",
-      "package.json"
+      "package.json",
+      "!node_modules/koffi/{lib/native,vendor}/**/*.{h,hh,hpp,c,cc,cpp}",
+      "!node_modules/pako/dist/*.js"
     ],
     "extraResources": [
       {
@@ -51,6 +59,7 @@
       "target": "nsis"
     },
     "nsis": {
+      "include": "build/installer.nsh",
       "artifactName": "MedoMusic-Setup-${version}-${arch}.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,

@@ -23,6 +23,11 @@ contextBridge.exposeInMainWorld("medo", {
   discoverDefaultLibrary: () => ipcRenderer.invoke("music:discover-default-library"),
   choosePlaylist: () => ipcRenderer.invoke("music:choose-playlist"),
   chooseCover: () => ipcRenderer.invoke("music:choose-cover"),
+  getBackgroundImageSettings: () => ipcRenderer.invoke("background-image:get"),
+  chooseBackgroundImage: () => ipcRenderer.invoke("background-image:choose"),
+  applyBackgroundImage: (values) => ipcRenderer.invoke("background-image:apply", values),
+  setBackgroundImageSettings: (values) => ipcRenderer.invoke("background-image:update", values),
+  resetBackgroundImage: () => ipcRenderer.invoke("background-image:reset"),
   loadPlaylist: (playlistPath) => ipcRenderer.invoke("music:load-playlist", playlistPath),
   readMetadata: (filePath) => ipcRenderer.invoke("music:metadata", filePath),
   clearMetadataCache: () => ipcRenderer.invoke("music:clear-metadata-cache"),
@@ -30,9 +35,6 @@ contextBridge.exposeInMainWorld("medo", {
   getExternalTracks: (filePaths) => ipcRenderer.invoke("music:external-tracks", filePaths),
   readLyrics: (options) => ipcRenderer.invoke("music:lyrics", options),
   translateLyrics: (options) => ipcRenderer.invoke("lyrics:translate", options),
-  showTrackMenu: (options) => ipcRenderer.invoke("track:context-menu", options),
-  showPlaylistMenu: (options) => ipcRenderer.invoke("playlist:context-menu", options),
-  chooseTargetPlaylist: (playlists) => ipcRenderer.invoke("playlist:pick-target", playlists),
   showTrackProperties: (filePath) => ipcRenderer.invoke("track:properties", filePath),
   showTrackInFolder: (filePath) => ipcRenderer.invoke("track:show-in-folder", filePath),
   toggleLyricsWindow: () => ipcRenderer.send("lyrics-window:toggle"),
@@ -61,6 +63,12 @@ contextBridge.exposeInMainWorld("medo", {
   onWindowMaterial: (callback) => ipcRenderer.on("window:material", (_event, material) => callback(material)),
   onResolvedTheme: (callback) => ipcRenderer.on("theme:resolved", (_event, theme) => callback(theme)),
   minimizeWindow: () => ipcRenderer.send("window:minimize"),
+  setWindowScale: (value) => ipcRenderer.invoke("window:set-scale", value),
+  onWindowScale: (callback) => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on("window:scale", listener);
+    return () => ipcRenderer.removeListener("window:scale", listener);
+  },
   onWindowVisibility: (callback) => {
     const listener = (_event, visible) => callback(visible);
     ipcRenderer.on("window:visibility", listener);
@@ -82,7 +90,8 @@ contextBridge.exposeInMainWorld("medo", {
     return () => ipcRenderer.removeListener("tray:command", listener);
   },
   getAppInfo: () => ipcRenderer.invoke("app:get-info"),
-  checkForUpdates: () => ipcRenderer.invoke("app:check-update"),
+  checkForUpdates: (options) => ipcRenderer.invoke("app:check-update", options),
+  openUpdateRelease: (url) => ipcRenderer.invoke("app:open-update-release", url),
   onMyFireflyCommand: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("myfirefly-extension:command", listener);
