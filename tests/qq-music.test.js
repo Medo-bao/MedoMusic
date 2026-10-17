@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const { encryptQrc } = require("qrc-decoder");
 const { decodeQqLyricJsonp, extractQrcLyric, searchSongsFromPayload, fetchQqMusicLyrics } = require("../src/qq-music");
+const { createOnlineLyricsSearch } = require("../src/lyrics-search");
 
 const callback = "MusicJsonCallback_lrc";
 const lyric = "[00:01.00]测试歌词";
@@ -52,12 +53,11 @@ assert.deepEqual(searchSongsFromPayload({ req_1: { data: { body: { song: { list:
     }
     return { ok: true, text: async () => qrcResponse };
   };
-  const liveFallback = await fetchQqMusicLyrics(
-    { title: "测试歌曲 (Live)", artist: "测试歌手", duration: 180 },
-    liveFallbackFetch
-  );
+  const searchLive = createOnlineLyricsSearch({ getCache: async () => ({}), fetchImplementation: async (url, request) =>
+    url.includes('lrclib') ? { ok: true, json: async () => [] } : liveFallbackFetch(url, request) });
+  const liveFallback = await searchLive({ title: "测试歌曲 (Live)", artist: "测试歌手", duration: 180, mode: "qq" });
   assert.equal(liveFallback.source, "qq-word");
-  assert.deepEqual(liveQueries, ["测试歌曲 (Live) 测试歌手", "测试歌曲 测试歌手"]);
+  assert.deepEqual(liveQueries, ["测试歌曲 (Live) 测试歌手", "测试歌曲 (Live)", "测试歌曲 测试歌手"]);
   const mismatched = await fetchQqMusicLyrics({ title: "测试歌曲", artist: "其他歌手", duration: 180 }, qrcFetch);
   assert.equal(mismatched, null, "An exact title and duration cannot override an unrelated artist");
   const wrongDuration = await fetchQqMusicLyrics({ title: "测试歌曲", artist: "测试歌手", duration: 300 }, qrcFetch);

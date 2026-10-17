@@ -18,6 +18,17 @@ function updatePlayButtonState(playing) {
 }
 
 let tracks = loadJson("medo.tracks", []);
+if (localStorage.getItem("medo.coverSizing") !== "proportional") {
+  let refreshed = false;
+  for (const track of tracks) {
+    if (!track.cover?.startsWith("medo-media://local/cover?")) continue;
+    track.cover = null;
+    track.metadataLoaded = false;
+    refreshed = true;
+  }
+  if (refreshed) localStorage.setItem("medo.tracks", JSON.stringify(tracks));
+  localStorage.setItem("medo.coverSizing", "proportional");
+}
 let playlists = loadJson("medo.playlists", []);
 let musicFolders = loadJson("medo.musicFolders", []);
 let favorites = new Set(loadJson("medo.favorites", []));
@@ -56,6 +67,7 @@ let inactiveLyricColor = localStorage.getItem("medo.inactiveLyricColor");
 let desktopLyricPrimaryColor = localStorage.getItem("medo.desktopLyricPrimaryColor") || "#2864ff";
 let desktopLyricSecondaryColor = localStorage.getItem("medo.desktopLyricSecondaryColor") || "#d934ff";
 let displayMode = localStorage.getItem("medo.displayMode") || "thumbnail";
+let coverFit = localStorage.getItem("medo.coverFit") || "cover";
 let closeBehavior = localStorage.getItem("medo.closeBehavior") || "background";
 let trayEnabled = localStorage.getItem("medo.trayEnabled") === "true";
 let autoCheckUpdates = localStorage.getItem("medo.autoCheckUpdates") !== "false";
@@ -64,6 +76,9 @@ let globalDesktopLyricsShortcutEnabled = localStorage.getItem("medo.globalDeskto
 let globalLyricsRefreshShortcutEnabled = localStorage.getItem("medo.globalLyricsRefreshShortcutEnabled") !== "false";
 let globalPreviousShortcutEnabled = localStorage.getItem("medo.globalPreviousShortcutEnabled") !== "false";
 let globalNextShortcutEnabled = localStorage.getItem("medo.globalNextShortcutEnabled") !== "false";
+let pendingShortcutFeedback = null;
+const lastShortcutStates = new Map();
+let globalShortcutBindings = loadJson("medo.globalShortcutBindings", {});
 let lyricTranslationEnabled = localStorage.getItem("medo.lyricTranslationEnabled") !== "false";
 const hasWordLyricsPreference = localStorage.getItem("medo.wordLyricsPreferenceSet") === "true";
 let wordLyricsEnabled = hasWordLyricsPreference && localStorage.getItem("medo.wordLyricsEnabled") === "true";
@@ -704,6 +719,18 @@ function applyThemeColors(primary = themePrimaryColor, secondary = themeSecondar
   }
 }
 
+function applyCoverFit(nextFit) {
+  coverFit = ["cover", "contain", "fill"].includes(nextFit) ? nextFit : "cover";
+  document.documentElement.style.setProperty("--cover-fit", coverFit);
+  document.querySelector("#cover-fit").value = coverFit;
+  document.querySelector("#cover-fit-description").textContent = {
+    cover: "保持原始比例铺满封面区域，超出部分会被裁切。",
+    contain: "完整显示封面，保留原始比例。",
+    fill: "将封面拉伸铺满显示区域。"
+  }[coverFit];
+  localStorage.setItem("medo.coverFit", coverFit);
+}
+
 function applyDisplayMode(nextMode) {
   displayMode = nextMode === "compact" ? "compact" : "thumbnail";
   const main = document.querySelector("main");
@@ -741,6 +768,7 @@ function reloadCurrentLyrics({ networkProvider = null } = {}) {
 }
 
 function applyGlobalShortcutSettings(type, enabled) {
+  pendingShortcutFeedback = type || null;
   if (type === "playPause") {
     globalPlayPauseShortcutEnabled = Boolean(enabled);
     localStorage.setItem("medo.globalPlayPauseShortcutEnabled", String(globalPlayPauseShortcutEnabled));
@@ -783,6 +811,7 @@ function applyGlobalShortcutSettings(type, enabled) {
     button.setAttribute("aria-checked", String(active));
   });
   window.medo.setGlobalShortcuts({
+    ...(!lastShortcutStates.size ? { bindings: globalShortcutBindings } : {}),
     desktopLyrics: globalDesktopLyricsShortcutEnabled,
     playPause: globalPlayPauseShortcutEnabled,
     lyricsRefresh: globalLyricsRefreshShortcutEnabled,
@@ -790,6 +819,111 @@ function applyGlobalShortcutSettings(type, enabled) {
     next: globalNextShortcutEnabled
   });
 }
+
+function syncGlobalShortcutStatus(states) {
+  const selectors = {
+    playPause: ".global-play-shortcut-setting",
+    desktopLyrics: ".global-desktop-lyrics-shortcut-setting",
+    lyricsRefresh: ".global-lyrics-shortcut-setting",
+    previous: ".global-previous-shortcut-setting",
+    next: ".global-next-shortcut-setting"
+  };
+  const problems = [];
+  const recovered = [];
+  let feedback = null;
+  const messageFor = (state) => !state.enabled ? `已关闭 ${state.preferredAccelerator} 快捷键` :
+    !state.registered ? `${state.preferredAccelerator} 无法启用，可能被其他程序占用；可更改组合键，释放占用后也会自动恢复` :
+    `${state.accelerator} 快捷键已启用`;
+  for (const state of states) {
+    const row = document.querySelector(selectors[state.type]);
+    if (!row) continue;
+    const previous = lastShortcutStates.get(state.type);
+    const changed = !previous || previous.enabled !== state.enabled || previous.accelerator !== state.accelerator ||
+      previous.registered !== state.registered || previous.preferredAccelerator !== state.preferredAccelerator;
+    lastShortcutStates.set(state.type, { ...state });
+    const description = row.querySelector("p");
+    description.id = `shortcut-status-${state.type}`;
+    description.setAttribute("role", "status");
+    description.setAttribute("aria-atomic", "true");
+    description.classList.add("shortcut-binding");
+    row.dataset.shortcutState = !state.enabled ? "disabled" : !state.registered ? "unavailable" : "registered";
+    const hasProblem = state.enabled && !state.registered;
+    if (changed) {
+      description.replaceChildren();
+      if (hasProblem) {
+        const tag = document.createElement("span");
+        tag.className = "shortcut-status-tag";
+        tag.textContent = "快捷键未生效";
+        description.append(tag);
+      }
+      const label = document.createElement("span");
+      label.textContent = !state.enabled ? "已关闭" : "快捷键";
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.className = "shortcut-edit";
+      edit.setAttribute("aria-label", `更改${state.label}快捷键`);
+      edit.title = "点击自定义组合键";
+      const key = document.createElement("kbd");
+      key.textContent = state.preferredAccelerator;
+      edit.append(key);
+      edit.addEventListener("click", () => window.MedoShortcutEditor.open(row, lastShortcutStates.get(state.type), result => {
+        syncGlobalShortcutStatus(result.states);
+        row.querySelector(".shortcut-edit").focus({ preventScroll: true });
+        showActionFeedback(`${state.label}快捷键已保存：${result.accelerator}`);
+      }));
+      description.append(label, edit);
+
+      let notice = row.querySelector(".shortcut-conflict");
+      if (hasProblem && !notice) {
+        notice = document.createElement("div");
+        notice.className = "shortcut-conflict";
+        notice.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7.5"/><path d="M10 6v4.5m0 3h.01"/></svg><div><strong></strong><span></span></div><button type="button" class="secondary-button shortcut-retry">立即重试</button>';
+        const retry = notice.querySelector("button");
+        retry.setAttribute("aria-label", `重试 ${state.preferredAccelerator} 快捷键`);
+        retry.addEventListener("click", () => applyGlobalShortcutSettings(state.type, true));
+        row.append(notice);
+      }
+      if (notice) {
+        if (hasProblem) {
+          notice.id = `shortcut-conflict-${state.type}`;
+          notice.querySelector("div").id = `${notice.id}-description`;
+          notice.querySelector("strong").textContent = `${state.preferredAccelerator} 无法启用`;
+          notice.querySelector("span").textContent = "可能被其他程序占用，可点击上方按键更改组合；释放占用后会自动恢复。";
+          notice.title = "系统未返回占用程序名称。";
+          notice.querySelector("button").setAttribute("aria-describedby", `${description.id} ${notice.id}-description`);
+        } else if (notice.contains(document.activeElement)) {
+          row.querySelector('[data-enabled="true"]').focus({ preventScroll: true });
+        }
+        notice.hidden = !hasProblem;
+      }
+    }
+    row.querySelectorAll('[role="radio"]').forEach(button => button.setAttribute("aria-describedby",
+      hasProblem ? `${description.id} shortcut-conflict-${state.type}-description` : description.id));
+    if (state.type === pendingShortcutFeedback) {
+      feedback = messageFor(state);
+    } else if (changed && hasProblem) {
+      problems.push(state);
+    } else if (previous?.enabled && !previous.registered && state.enabled && state.registered && previous.preferredAccelerator === state.preferredAccelerator) {
+      recovered.push(state.accelerator);
+    }
+  }
+  pendingShortcutFeedback = null;
+  globalShortcutBindings = Object.fromEntries([...lastShortcutStates.values()].map(state => [state.type, state.preferredAccelerator]));
+  localStorage.setItem("medo.globalShortcutBindings", JSON.stringify(globalShortcutBindings));
+  if (feedback) showActionFeedback(feedback);
+  else if (problems.length) {
+    showActionFeedback(problems.length === 1 ? messageFor(problems[0]) : `${problems.length} 项快捷键未能使用默认按键，请查看当前可用按键`, () => {
+      if (currentView !== "settings") document.querySelector("#settings-button").click();
+      requestAnimationFrame(() => {
+        const row = document.querySelector(selectors[problems[0].type]);
+        row.scrollIntoView({ block: "center" });
+        (row.querySelector(".shortcut-conflict:not([hidden]) .shortcut-retry") || row.querySelector('[data-enabled="true"]')).focus({ preventScroll: true });
+      });
+    }, "查看设置");
+  } else if (recovered.length) showActionFeedback(`快捷键已恢复：${recovered.join("、")}`);
+}
+
+window.medo.onGlobalShortcutStatus(syncGlobalShortcutStatus);
 
 function refreshCurrentLyricsFromNetwork() {
   const track = tracks[currentIndex];
@@ -974,16 +1108,35 @@ function parseLyrics(text, duration = 0) {
   return { synced: hasTimeline, level, lines: timedLines };
 }
 
+function lyricMetadataKey(track) {
+  return JSON.stringify([track.path, track.title || "", track.artist || "", track.album || "", Math.round(track.duration || 0)]);
+}
+
+function cancelPendingLyrics(exceptTrackId = null) {
+  let cancelled = false;
+  for (const id of lyricsRequests.keys()) {
+    if (id === exceptTrackId) continue;
+    lyricsRequests.delete(id);
+    cancelled = true;
+  }
+  if (cancelled) window.medo.cancelLyrics();
+}
+
 async function ensureLyrics(track, force = false, modeOverride = null) {
   if (!track) return;
+  cancelPendingLyrics(track.id);
   const requestMode = modeOverride || (wordLyricsEnabled ? "network" : "auto");
   const networkOnlyRequest = wordLyricsEnabled || Boolean(modeOverride);
   const cachedLyrics = lyricsCache.get(track.id);
-  const compatibleCache = cachedLyrics && !cachedLyrics.error && (!networkOnlyRequest || cachedLyrics.networkOnly === true);
+  const metadataKey = lyricMetadataKey(track);
+  const compatibleCache = cachedLyrics && cachedLyrics.metadataKey === metadataKey && cachedLyrics.retryAt > Date.now() &&
+    (!networkOnlyRequest || cachedLyrics.networkOnly === true);
   const existingRequest = lyricsRequests.get(track.id);
-  const compatibleRequest = existingRequest && (!networkOnlyRequest || existingRequest.networkOnly === true);
+  const compatibleRequest = existingRequest && existingRequest.metadataKey === metadataKey &&
+    (!networkOnlyRequest || existingRequest.networkOnly === true);
   if (!force && (compatibleCache || compatibleRequest)) return existingRequest;
   if (cachedLyrics && !compatibleCache) lyricsCache.delete(track.id);
+  if (existingRequest) cancelPendingLyrics();
   if (force) {
     lyricsCache.delete(track.id);
     lyricTranslations.delete(track.id);
@@ -994,12 +1147,15 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
     if (requestMode !== "local" && (!track.metadataLoaded || !track.duration)) {
       await loadMetadata(track);
     }
+    if (request && lyricsRequests.get(track.id) !== request) return { cancelled: true };
+    if (request) request.metadataKey = lyricMetadataKey(track);
+    const playingDuration = tracks[currentIndex]?.id === track.id && Number.isFinite(audio.duration) ? audio.duration : 0;
     return window.medo.readLyrics({
       filePath: track.path,
       title: track.title,
       artist: track.artist,
       album: track.album,
-      duration: track.duration || audio.duration,
+      duration: track.duration || playingDuration,
       mode: requestMode,
       force,
       ignoreLocal: wordLyricsEnabled || Boolean(modeOverride),
@@ -1007,19 +1163,24 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
     });
   })()
     .then((result) => {
-      if (lyricsRequests.get(track.id) !== request) return;
+      if (lyricsRequests.get(track.id) !== request || result?.cancelled) return;
       setBoundedCache(lyricsCache, track.id, {
-        ...parseLyrics(result?.text, track.duration || audio.duration),
+        ...parseLyrics(result?.text, track.duration),
         source: result?.source || null,
         confidence: result?.confidence || null,
         match: result?.match || null,
         networkOnly: networkOnlyRequest,
-        error: result?.error || null
+        error: result?.error || null,
+        metadataKey: lyricMetadataKey(track),
+        retryAt: result?.retryAt || Date.now() + (result?.error ? 15000 : result?.text ? 30 * 86400000 : 120000)
       });
       if (lyricTranslationEnabled) ensureLyricTranslation(track);
     })
     .catch(() => {
-      if (lyricsRequests.get(track.id) === request) setBoundedCache(lyricsCache, track.id, { synced: false, lines: [], networkOnly: networkOnlyRequest, error: "network" });
+      if (lyricsRequests.get(track.id) === request) setBoundedCache(lyricsCache, track.id, {
+        synced: false, lines: [], networkOnly: networkOnlyRequest, error: "network",
+        metadataKey: lyricMetadataKey(track), retryAt: Date.now() + 15000
+      });
     })
     .finally(() => {
       if (lyricsRequests.get(track.id) !== request) return;
@@ -1040,6 +1201,7 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
       }
     });
   request.networkOnly = networkOnlyRequest;
+  request.metadataKey = lyricMetadataKey(track);
   lyricsRequests.set(track.id, request);
   return request;
 }
@@ -1120,16 +1282,18 @@ function renderLyrics(track) {
   }
   if (!lyrics.lines.length) {
     translationButton.hidden = true;
-    container.innerHTML = '<p class="lyrics-empty"><strong>未找到歌词</strong><span>可将同名 .lrc 文件放在歌曲旁边</span></p>';
+    container.innerHTML = '<div class="lyrics-empty"><strong>未找到歌词</strong><span>可将同名 .lrc 文件放在歌曲旁边</span></div>';
     if (lyrics.error) {
       container.querySelector("strong").textContent = "歌词加载失败";
-      container.querySelector("span").textContent = "网络或歌词服务暂时不可用，请稍后重试。";
+      container.querySelector("span").textContent = lyrics.error === "timeout"
+        ? "搜索超时，请检查网络后重新查找。"
+        : "网络或歌词服务暂时不可用，请稍后重试。";
     }
     const retry = document.createElement("button");
     retry.className = "secondary-button lyric-retry";
     retry.textContent = "重新查找";
     retry.onclick = () => { ensureLyrics(track, true); renderLyrics(track); };
-    container.append(retry);
+    container.querySelector(".lyrics-empty").append(retry);
     window.medo.updateLyricsWindow({
       title: track.title,
       artist: track.artist,
@@ -2889,6 +3053,20 @@ function applyAutoUpdateSetting(enabled) {
 
 document.querySelector("#auto-check-updates").addEventListener("change", event => applyAutoUpdateSetting(event.target.checked));
 document.querySelector("#check-for-updates").addEventListener("click", () => checkForAppUpdates());
+document.querySelector("#open-github-page").addEventListener("click", async event => {
+  const button = event.currentTarget;
+  if (button.disabled) return;
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  try {
+    await window.medo.openGitHub();
+  } catch {
+    showActionFeedback("无法打开 GitHub，请检查默认浏览器设置");
+  } finally {
+    button.disabled = false;
+    button.removeAttribute("aria-busy");
+  }
+});
 document.querySelector("#reset-listening-time").addEventListener("click", async () => {
   if (listeningTimeMs <= 0 || document.querySelector("dialog[open]")) return;
   if (!await confirmPlaylistAction("重置听歌统计", "确认清空每日、每月、每年和总累计听歌时长？\n此操作不可撤销，最近播放记录和播放次数会保留。", "确认重置")) return;
@@ -3646,6 +3824,10 @@ document.querySelector("#volume-button").addEventListener("click", () => {
 });
 window.medo.onLyricsWindowVisibility((visible) => {
   document.querySelector("#desktop-lyrics-button").classList.toggle("active", visible);
+  if (visible) {
+    activeLyricIndex = -1;
+    updateLyricsAtTime();
+  }
 });
 window.medo.onLyricsWindowLockState((locked) => {
   syncDesktopLyricLockSetting(locked);
@@ -3906,6 +4088,8 @@ document.querySelector("#reset-theme-colors").addEventListener("click", () => {
   localStorage.removeItem("medo.themeSecondaryColor");
   applyThemeColors("#2864ff", "#d934ff");
 });
+document.querySelector("#cover-fit").addEventListener("change", (event) => applyCoverFit(event.target.value));
+
 document.querySelectorAll("[data-display-value]").forEach((button) => {
   button.addEventListener("click", () => {
     applyDisplayMode(button.dataset.displayValue);
@@ -4192,6 +4376,7 @@ updateRangeGradient(progress, 0);
 applyTheme(theme);
 window.medo.setWindowScale(Number(localStorage.getItem("medo.interfaceScale")) || 1).then(syncInterfaceScale);
 applyThemeColors();
+applyCoverFit(coverFit);
 applyDisplayMode(displayMode);
 applyCloseBehavior(closeBehavior);
 applyTrayEnabled(trayEnabled);

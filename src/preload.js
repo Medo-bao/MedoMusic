@@ -34,6 +34,8 @@ contextBridge.exposeInMainWorld("medo", {
   resolveMediaSource: (filePath) => ipcRenderer.invoke("music:resolve-source", filePath),
   getExternalTracks: (filePaths) => ipcRenderer.invoke("music:external-tracks", filePaths),
   readLyrics: (options) => ipcRenderer.invoke("music:lyrics", options),
+  cancelLyrics: () => ipcRenderer.send("music:cancel-lyrics"),
+  openGitHub: () => ipcRenderer.invoke("app:open-github"),
   translateLyrics: (options) => ipcRenderer.invoke("lyrics:translate", options),
   showTrackProperties: (filePath) => ipcRenderer.invoke("track:properties", filePath),
   showTrackInFolder: (filePath) => ipcRenderer.invoke("track:show-in-folder", filePath),
@@ -84,6 +86,13 @@ contextBridge.exposeInMainWorld("medo", {
   setCloseBehavior: (value) => ipcRenderer.send("app:set-close-behavior", value),
   setTrayEnabled: (enabled) => ipcRenderer.send("app:set-tray-enabled", Boolean(enabled)),
   setGlobalShortcuts: (settings) => ipcRenderer.send("app:set-global-shortcuts", settings),
+  checkGlobalShortcut: (type, accelerator) => ipcRenderer.invoke("app:check-global-shortcut", type, accelerator),
+  setGlobalShortcut: (type, accelerator) => ipcRenderer.invoke("app:set-global-shortcut", type, accelerator),
+  onGlobalShortcutStatus: (callback) => {
+    const listener = (_event, states) => callback(states);
+    ipcRenderer.on("app:global-shortcuts-status", listener);
+    return () => ipcRenderer.removeListener("app:global-shortcuts-status", listener);
+  },
   onTrayCommand: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on("tray:command", listener);

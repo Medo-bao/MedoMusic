@@ -497,6 +497,7 @@ function togglePlayback() {
 }
 
 function clearCurrentPlayback() {
+  cancelPendingLyrics();
   playbackGeneration += 1;
   switchingPlaybackGeneration = 0;
   resetPlaybackFade();

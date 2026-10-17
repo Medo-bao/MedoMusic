@@ -7,6 +7,7 @@ assert.deepEqual(resolveOnlineLyricProviders(), ["qq", "netease"]);
 assert.deepEqual(resolveOnlineLyricProviders("qq"), ["qq"]);
 assert.deepEqual(resolveOnlineLyricProviders("qq", true), ["qq", "netease"]);
 assert.deepEqual(resolveOnlineLyricProviders("netease"), ["netease"]);
+assert.deepEqual(resolveOnlineLyricProviders("netease", true), ["netease", "qq"]);
 assert.deepEqual(resolveOnlineLyricProviders("local"), []);
 
 assert.deepEqual(selectLocalLyrics("embedded", "sidecar"), {

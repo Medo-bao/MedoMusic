@@ -1,6 +1,6 @@
 const crypto = require("node:crypto");
-const { removeLiveQualifier } = require("./lyrics-source-priority");
 const { hasNativeWordTiming } = require("./lyrics-timing");
+const { normalizeLyricOptions, scoreLyricCandidate, rankLyricCandidates, isUsableLyricText } = require("./lyrics-matching");
 
 const EAPI_URL = "https://interface3.music.163.com/eapi/song/lyric/v1";
 const EAPI_PATH = "/api/song/lyric/v1";
@@ -57,47 +57,18 @@ async function fetchNeteaseNewLyrics(songId, fetchImplementation = fetch) {
   return await response.json();
 }
 
-function normalize(value) {
-  return String(value || "").toLowerCase().normalize("NFKC").replace(/[^\p{L}\p{N}]+/gu, "");
-}
-
 function rankNeteaseSongs(songs, options) {
-  const title = String(options?.title || "").trim();
-  const artist = String(options?.artist || "").trim();
-  const expectedDuration = Number(options?.duration) || 0;
-  const normalizedTitle = normalize(title);
-  const normalizedArtist = normalize(artist);
   return (Array.isArray(songs) ? songs : []).map((song) => {
     const artistNames = (song.artists || song.ar || []).map((item) => String(item?.name || "").trim()).filter(Boolean);
-    const songArtists = artistNames.join(" ");
-    const candidateTitle = normalize(song.name);
-    const titleScore = candidateTitle === normalizedTitle ? 1 : candidateTitle.includes(normalizedTitle) ? .76 : 0;
-    const normalizedArtists = artistNames.map(normalize);
-    const exactArtist = !artist || normalizedArtists.includes(normalizedArtist);
-    const partialArtist = !artist || normalizedArtists.some((name) => {
-      if (!name || !normalizedArtist) return false;
-      const contains = name.includes(normalizedArtist) || normalizedArtist.includes(name);
-      const longer = Math.max(name.length, normalizedArtist.length);
-      const shorter = Math.max(1, Math.min(name.length, normalizedArtist.length));
-      return contains && longer <= shorter * 2;
-    });
-    const artistScore = !artist ? .5 : exactArtist ? 1 : partialArtist ? .68 : 0;
-    const duration = Number(song.duration || song.dt || 0) / 1000;
-    const durationDelta = expectedDuration && duration ? Math.abs(duration - expectedDuration) : 0;
-    const durationScore = !expectedDuration || !duration ? .5 : Math.max(0, 1 - durationDelta / 12);
-    const plausibleMatch = titleScore > 0 && (exactArtist || partialArtist) &&
-      (!expectedDuration || !duration || durationDelta <= (exactArtist ? 24 : 16));
-    return {
-      song,
-      artist: songArtists,
-      score: plausibleMatch ? titleScore * .58 + artistScore * .27 + durationScore * .15 : 0
-    };
+    const candidate = { song, title: song.name, artists: artistNames, artist: artistNames.join(" / "),
+      album: song.album?.name || song.al?.name, aliases: song.alias || song.alia || [],
+      duration: Number(song.duration || song.dt || 0) / 1000 };
+    return { ...candidate, score: scoreLyricCandidate(candidate, options) };
   }).sort((left, right) => right.score - left.score);
 }
 
 async function searchNeteaseSongs(options, fetchImplementation = fetch) {
-  const title = String(options?.title || "").trim();
-  const artist = String(options?.artist || "").trim();
+  const { title, artist } = normalizeLyricOptions(options);
   if (!title) return [];
   const query = new URLSearchParams({
     s: `${title} ${artist}`.trim(), type: "1", offset: "0", total: "true", limit: "12"
@@ -107,40 +78,44 @@ async function searchNeteaseSongs(options, fetchImplementation = fetch) {
     signal: AbortSignal.timeout(6500)
   });
   if (!response.ok) return [];
-  return (await response.json())?.result?.songs || [];
+  const payload = await response.json();
+  if (payload.code && payload.code !== 200) throw new Error("netease-search-unavailable");
+  const songs = payload?.result?.songs;
+  return Array.isArray(songs) ? songs : [];
 }
 
 async function fetchNeteaseLyricsOnce(options, fetchImplementation) {
-  const ranked = rankNeteaseSongs(await searchNeteaseSongs(options, fetchImplementation), options);
+  options = normalizeLyricOptions(options);
+  const rankSongs = songs => rankLyricCandidates(rankNeteaseSongs(songs, options), options);
+  let ranked = rankSongs(await searchNeteaseSongs(options, fetchImplementation));
+  if (!ranked.length && options.artist) ranked = rankSongs(await searchNeteaseSongs({ ...options, artist: "" }, fetchImplementation));
   const requireWords = options.requireWordTiming || options.mode === "network";
   let fallback = null;
-  for (const best of ranked.filter(item => item.score >= .62 && item.song.id)) {
+  let failure = null;
+  for (const best of ranked.filter(item => item.song.id).slice(0, 4)) {
     let payload;
-    try { payload = await fetchNeteaseNewLyrics(best.song.id, fetchImplementation); } catch { continue; }
+    try {
+      payload = await fetchNeteaseNewLyrics(best.song.id, fetchImplementation);
+      if (payload?.code && payload.code !== 200) throw new Error("netease-lyrics-unavailable");
+    } catch (error) { failure = error; continue; }
     const wordTimed = hasNativeWordTiming(payload?.yrc?.lyric);
     const text = wordTimed ? payload.yrc.lyric : payload?.lrc?.lyric || "";
-    if (!text) continue;
+    if (!isUsableLyricText(text)) continue;
     const result = {
       text,
       source: wordTimed ? "netease-word" : "netease-line",
       confidence: Math.round(best.score * 100),
-      match: { title: best.song.name, artist: best.artist }
+      match: { title: best.title, artist: best.artist, album: best.album || "", duration: best.duration }
     };
     if (!requireWords || wordTimed) return result;
     fallback ||= result;
   }
+  if (!fallback && failure) throw failure;
   return fallback;
 }
 
 async function fetchNeteaseLyrics(options, fetchImplementation = fetch) {
-  const result = await fetchNeteaseLyricsOnce(options, fetchImplementation).catch(() => null);
-  if (result && (!(options.requireWordTiming || options.mode === "network") || hasNativeWordTiming(result.text))) return result;
-  const retryTitle = removeLiveQualifier(options?.title);
-  if (!retryTitle) return result;
-  try {
-    const retry = await fetchNeteaseLyricsOnce({ ...options, title: retryTitle }, fetchImplementation);
-    return retry && hasNativeWordTiming(retry.text) ? retry : result || retry;
-  } catch { return result; }
+  return fetchNeteaseLyricsOnce(options, fetchImplementation);
 }
 
 module.exports = {

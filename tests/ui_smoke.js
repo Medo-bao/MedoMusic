@@ -125,7 +125,15 @@ async function run() {
       updateLyricsWindow: () => {},
       setCloseBehavior: () => {},
       setTrayEnabled: (enabled) => { window.__trayEnabled = enabled; },
-      setGlobalShortcuts: (settings) => window.__globalShortcutSettings.push({ ...settings }),
+      setGlobalShortcuts: (settings) => {
+        window.__globalShortcutSettings.push({ ...settings });
+        const accelerators = { playPause: "Alt+S", desktopLyrics: "Alt+W", lyricsRefresh: "Alt+D", previous: "Alt+Q", next: "Alt+E" };
+        queueMicrotask(() => window.__shortcutStatus?.(Object.entries(accelerators).map(([type, accelerator]) => ({
+          type, enabled: settings[type] !== false, registered: settings[type] !== false,
+          label: type, defaultAccelerator: accelerator, preferredAccelerator: accelerator, accelerator: settings[type] !== false ? accelerator : null
+        }))));
+      },
+      onGlobalShortcutStatus: (callback) => { window.__shortcutStatus = callback; return () => {}; },
       onLyricsWindowVisibility: () => () => {},
       onResolvedTheme: () => () => {},
       onOpenAudioFiles: () => () => {},

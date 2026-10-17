@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
 const { createNeteaseEapiRequest, rankNeteaseSongs, fetchNeteaseLyrics } = require("../src/netease-eapi");
+const { createOnlineLyricsSearch } = require("../src/lyrics-search");
 
 const request = createNeteaseEapiRequest("123456", 1700000000000, 7);
 assert.equal(request.url, "https://interface3.music.163.com/eapi/song/lyric/v1");
@@ -41,12 +42,11 @@ assert.equal(rankNeteaseSongs([misleadingArtist], { title: "测试歌曲", artis
       json: async () => ({ result: { songs: query.includes("Live") ? [] : [official] } })
     };
   };
-  const liveFallback = await fetchNeteaseLyrics(
-    { title: "测试歌曲 - Live Version", artist: "测试歌手", duration: 180 },
-    liveFallbackFetch
-  );
+  const searchLive = createOnlineLyricsSearch({ getCache: async () => ({}), fetchImplementation: async (url, request) =>
+    url.includes('lrclib') ? { ok: true, json: async () => [] } : liveFallbackFetch(url, request) });
+  const liveFallback = await searchLive({ title: "测试歌曲 - Live Version", artist: "测试歌手", duration: 180, mode: "netease" });
   assert.equal(liveFallback.source, "netease-line");
-  assert.deepEqual(liveQueries, ["测试歌曲 - Live Version 测试歌手", "测试歌曲 测试歌手"]);
+  assert.deepEqual(liveQueries, ["测试歌曲 - Live Version 测试歌手", "测试歌曲 - Live Version", "测试歌曲 测试歌手"]);
   console.log("Netease EAPI tests passed");
 })().catch((error) => {
   console.error(error);

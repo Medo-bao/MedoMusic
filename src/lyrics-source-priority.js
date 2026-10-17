@@ -1,7 +1,7 @@
 function resolveOnlineLyricProviders(mode, requireWordTiming = false) {
   if (mode === "local") return [];
   if (mode === "auto" || mode === "network" || !mode) return ["qq", "netease"];
-  if (mode === "qq" && requireWordTiming) return ["qq", "netease"];
+  if (requireWordTiming && (mode === "qq" || mode === "netease")) return [mode, mode === "qq" ? "netease" : "qq"];
   return [mode === "netease" ? "netease" : "qq"];
 }
 

@@ -9,13 +9,14 @@ const { pruneCoverCache } = require("./cover-cache");
 const { decodeTextBuffer } = require("./text-decoder");
 const { createMediaFileResponse } = require("./media-file-response");
 const { hasNativeWordTiming } = require("./lyrics-timing");
-const { fetchNeteaseLyrics } = require("./netease-eapi");
-const { fetchQqMusicLyrics } = require("./qq-music");
-const { resolveOnlineLyricProviders, selectLocalLyrics, removeLiveQualifier, removeEnglishSuffixFromChineseTitle } = require("./lyrics-source-priority");
+const { createOnlineLyricsSearch, LYRICS_CACHE_VERSION } = require("./lyrics-search");
+const { cleanLyricTag, isUsableLyricText } = require("./lyrics-matching");
+const { resolveOnlineLyricProviders, selectLocalLyrics } = require("./lyrics-source-priority");
 const { startMyFireflyExtension } = require("./myfirefly-extension");
 const { attachWindowMaterial } = require("./window-material");
 const { createBackgroundImageStore } = require("./background-image-store");
 const { startupBounds, attachWindowScaling } = require("./window-scaling");
+const { createGlobalShortcutManager } = require("./global-shortcuts");
 
 const WINDOWS_APP_USER_MODEL_ID = "com.medomusic.desktop";
 const WINDOWS_TRAY_GUID = "8c33d388-8b65-4e7c-a54d-1af447cd8bfa";
@@ -38,6 +39,7 @@ if (!hasSingleInstanceLock) {
   });
 }
 let mainWindow = null;
+let applicationInitialized = false;
 let backgroundMaterialMode = 'frosted';
 let pendingExternalAudioFiles = [];
 let externalAudioDispatchTimer = null;
@@ -52,7 +54,14 @@ let metadataCacheLoad = null;
 const pendingCoverPaths = new Set();
 let metadataCacheWriteTimer = null;
 let onlineLyricsCache = null;
+let onlineLyricsCacheLoad = null;
 let onlineLyricsCacheWriteTimer = null;
+const lyricSearchRequests = new Map();
+const searchOnlineLyrics = createOnlineLyricsSearch({
+  getCache: getOnlineLyricsCache,
+  onCacheChange: scheduleOnlineLyricsCacheWrite,
+  userAgent: `MedoMusic/${app.getVersion()} (local Windows music player)`
+});
 let lyricTranslationCache = null;
 let lyricTranslationCacheWriteTimer = null;
 let lyricsWindow = null;
@@ -65,13 +74,20 @@ let lyricsWindowPointerInside = false;
 let lyricsWindowTopTimer = null;
 let trayMuted = false;
 let trayLyricsSize = 34;
-let globalPlayPauseShortcutEnabled = true;
-let globalDesktopLyricsShortcutEnabled = true;
-let globalLyricsRefreshShortcutEnabled = true;
-let globalPreviousShortcutEnabled = true;
-let globalNextShortcutEnabled = true;
+const globalShortcuts = createGlobalShortcutManager(globalShortcut, {
+  onCommand(command) {
+    if (command === "toggle-desktop-lyrics") {
+      setLyricsWindowVisible(!(lyricsWindow && !lyricsWindow.isDestroyed() && lyricsWindow.isVisible()));
+    } else {
+      sendGlobalPlaybackCommand(command);
+    }
+  },
+  onStateChange(states) {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("app:global-shortcuts-status", states);
+  }
+});
 const musicFolderWatchers = new Map();
-const METADATA_COVER_VERSION = 8;
+const METADATA_COVER_VERSION = 9;
 
 function coverCacheDirectory() {
   return path.join(app.getPath("userData"), "cover-cache");
@@ -190,12 +206,19 @@ function scheduleMetadataCacheWrite() {
 
 async function getOnlineLyricsCache() {
   if (onlineLyricsCache) return onlineLyricsCache;
-  try {
-    onlineLyricsCache = JSON.parse(await fs.readFile(path.join(app.getPath("userData"), "online-lyrics-cache.json"), "utf8"));
-  } catch {
-    onlineLyricsCache = {};
+  if (!onlineLyricsCacheLoad) {
+    onlineLyricsCacheLoad = (async () => {
+      try {
+        const saved = JSON.parse(await fs.readFile(path.join(app.getPath("userData"), "online-lyrics-cache.json"), "utf8"));
+        onlineLyricsCache = Object.fromEntries(Object.entries(saved || {}).filter(([, entry]) =>
+          entry?.version === LYRICS_CACHE_VERSION && entry.expiresAt > Date.now()));
+      } catch {
+        onlineLyricsCache = {};
+      }
+      return onlineLyricsCache;
+    })().finally(() => { onlineLyricsCacheLoad = null; });
   }
-  return onlineLyricsCache;
+  return onlineLyricsCacheLoad;
 }
 
 function scheduleOnlineLyricsCacheWrite() {
@@ -384,6 +407,9 @@ function createWindow() {
 }
 
 function showMainWindow() {
+  // Shell launches can arrive while startup is awaiting the background settings.
+  // Open the window only after its IPC handlers have been registered.
+  if (!applicationInitialized) return;
   if (!mainWindow || mainWindow.isDestroyed()) mainWindow = createWindow();
   if (mainWindow.isMinimized()) mainWindow.restore();
   if (!mainWindow.webContents.isLoading()) {
@@ -436,31 +462,7 @@ async function controlWindowFromMyFirefly(action) {
 }
 
 function applyGlobalShortcutSettings(settings = {}) {
-  globalPlayPauseShortcutEnabled = settings.playPause !== false;
-  globalDesktopLyricsShortcutEnabled = settings.desktopLyrics !== false;
-  globalLyricsRefreshShortcutEnabled = settings.lyricsRefresh !== false;
-  globalPreviousShortcutEnabled = settings.previous !== false;
-  globalNextShortcutEnabled = settings.next !== false;
-  globalShortcut.unregister("Alt+S");
-  globalShortcut.unregister("Alt+W");
-  globalShortcut.unregister("Alt+D");
-  globalShortcut.unregister("Alt+Q");
-  globalShortcut.unregister("Alt+E");
-  if (globalPlayPauseShortcutEnabled) {
-    globalShortcut.register("Alt+S", () => sendGlobalPlaybackCommand("toggle-play"));
-  }
-  if (globalDesktopLyricsShortcutEnabled) {
-    globalShortcut.register("Alt+W", () => sendGlobalPlaybackCommand("toggle-desktop-lyrics"));
-  }
-  if (globalLyricsRefreshShortcutEnabled) {
-    globalShortcut.register("Alt+D", () => sendGlobalPlaybackCommand("refresh-lyrics"));
-  }
-  if (globalPreviousShortcutEnabled) {
-    globalShortcut.register("Alt+Q", () => sendGlobalPlaybackCommand("previous"));
-  }
-  if (globalNextShortcutEnabled) {
-    globalShortcut.register("Alt+E", () => sendGlobalPlaybackCommand("next"));
-  }
+  return globalShortcuts.update(settings);
 }
 
 function keepLyricsWindowOnTop(window = lyricsWindow) {
@@ -770,6 +772,8 @@ async function toTrackWithFileTimes(filePath) {
 }
 
 app.whenReady().then(async () => {
+  if (!hasSingleInstanceLock) return;
+  queueExternalAudioFiles(process.argv.slice(1));
   getMetadataCache().catch(() => {});
   const backgroundImages = createBackgroundImageStore(app.getPath("userData"), nativeImage);
   backgroundMaterialMode = (await backgroundImages.get()).material;
@@ -824,6 +828,10 @@ app.whenReady().then(async () => {
     return true;
   };
   ipcMain.handle("app:open-update-release", (_event, url) => openUpdateRelease(url));
+  ipcMain.handle("app:open-github", async () => {
+    await shell.openExternal("https://github.com/Medo-bao/MedoMusic");
+    return true;
+  });
   ipcMain.handle("app:check-update", async (_event, options) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
@@ -927,203 +935,56 @@ app.whenReady().then(async () => {
   ipcMain.on("app:set-global-shortcuts", (_event, settings) => {
     applyGlobalShortcutSettings(settings);
   });
+  ipcMain.handle("app:check-global-shortcut", (_event, type, accelerator) => globalShortcuts.checkBinding(type, accelerator));
+  ipcMain.handle("app:set-global-shortcut", (_event, type, accelerator) => globalShortcuts.setBinding(type, accelerator));
 
-  ipcMain.handle("music:lyrics", async (_event, options) => {
-    const filePath = typeof options === "string" ? options : options?.filePath;
+  ipcMain.on("music:cancel-lyrics", event => {
+    lyricSearchRequests.get(event.sender.id)?.abort();
+  });
+  ipcMain.handle("music:lyrics", async (event, rawOptions) => {
+    const options = typeof rawOptions === "string" ? { filePath: rawOptions, mode: "auto" } : rawOptions || {};
+    const { filePath } = options;
     if (typeof filePath !== "string") return { text: "", source: null };
-    const lrcPath = path.join(path.dirname(filePath), `${path.basename(filePath, path.extname(filePath))}.lrc`);
-    const requireWordTiming = options?.mode === "network" || options?.requireWordTiming === true;
-    const onlineProviders = resolveOnlineLyricProviders(options?.mode, requireWordTiming);
-    const preferLocal = options?.mode === "auto";
-    let localFallback = null;
-    let embeddedFallback = null;
-    if (!options?.force && !options?.ignoreLocal) {
-      try {
-        const { parseFile } = await import("music-metadata");
-        const metadata = await parseFile(filePath, { duration: false, skipCovers: true });
-        const lyrics = metadata.common.lyrics;
-        const text = Array.isArray(lyrics)
-          ? lyrics.map((item) => typeof item === "string" ? item : item?.text || "").filter(Boolean).join("\n")
-          : (typeof lyrics === "string" ? lyrics : "");
-        if (text) embeddedFallback = { text, source: "embedded", confidence: null };
-      } catch {}
-      try {
-        const text = decodeTextBuffer(await fs.readFile(lrcPath));
-        if (text) localFallback = { text, source: "sidecar", confidence: null };
-      } catch {}
-    }
-    const fallbackResult = () => selectLocalLyrics(embeddedFallback?.text, localFallback?.text);
-    const hasOrdinaryFallback = () => Boolean(localFallback || embeddedFallback);
-    if (!onlineProviders.length || (preferLocal && !requireWordTiming && hasOrdinaryFallback())) return fallbackResult();
-    if (hasNativeWordTiming(embeddedFallback?.text)) return embeddedFallback;
-    if (hasNativeWordTiming(localFallback?.text)) return localFallback;
-    const title = String(options.title || "").trim();
-    const artist = String(options.artist || "").trim();
-    const album = String(options.album || "").trim();
-    const duration = Math.round(Number(options.duration) || 0);
-    if (!title || !duration) return fallbackResult();
-    const cache = await getOnlineLyricsCache();
-    let onlineLineFallback = null;
-    let lyricNetworkFailed = false;
-    const lyricFetch = async (...args) => {
-      try {
-        const response = await fetch(...args);
-        if (!response.ok && response.status !== 404) lyricNetworkFailed = true;
-        return response;
-      } catch (error) { lyricNetworkFailed = true; throw error; }
-    };
-    const failedOrFallback = () => {
-      const fallback = fallbackResult();
-      return fallback?.text ? fallback : lyricNetworkFailed ? { text: "", error: "network" } : fallback;
-    };
+    const senderId = event.sender.id;
+    lyricSearchRequests.get(senderId)?.abort();
+    const controller = new AbortController();
+    lyricSearchRequests.set(senderId, controller);
+    const cancel = () => controller.abort();
+    event.sender.once("destroyed", cancel);
     try {
-      const searchOnlineProviders = async (searchOptions) => {
-        let lineFallback = null;
-        const searchTitle = String(searchOptions.title || "").trim();
-        for (const onlineProvider of onlineProviders) {
-          const providerCacheKey = JSON.stringify([onlineProvider, searchTitle, artist, album, duration]);
-          const searchCacheKey = requireWordTiming ? `${providerCacheKey}:word-search-v2` : providerCacheKey;
-          let onlineLyrics = !options?.force ? cache[searchCacheKey] ||
-            (requireWordTiming && hasNativeWordTiming(cache[providerCacheKey]?.text) ? cache[providerCacheKey] : null) : null;
-          if (!onlineLyrics) {
-            try {
-              onlineLyrics = onlineProvider === "qq"
-                ? await fetchQqMusicLyrics({ ...searchOptions, requireWordTiming }, lyricFetch)
-                : await fetchNeteaseLyrics({ ...searchOptions, requireWordTiming }, lyricFetch);
-            } catch {}
-          }
-          if (!onlineLyrics) continue;
-          // Only native word results can satisfy future word searches from cache.
-          // A temporary provider failure must not permanently pin ordinary lyrics.
-          if (!requireWordTiming || hasNativeWordTiming(onlineLyrics.text)) cache[searchCacheKey] = onlineLyrics;
-          scheduleOnlineLyricsCacheWrite();
-          if (requireWordTiming && !hasNativeWordTiming(onlineLyrics.text)) {
-            lineFallback ||= onlineLyrics;
-            continue;
-          }
-          return { result: onlineLyrics, lineFallback };
-        }
-        return { result: null, lineFallback };
-      };
-      const initialOnlineSearch = await searchOnlineProviders(options);
-      if (initialOnlineSearch.result) return initialOnlineSearch.result;
-      onlineLineFallback = initialOnlineSearch.lineFallback;
-      if (requireWordTiming) {
-        const chineseTitle = removeEnglishSuffixFromChineseTitle(title);
-        if (chineseTitle) {
-          const retry = await searchOnlineProviders({ ...options, title: chineseTitle });
-          if (retry.result) return retry.result;
-          onlineLineFallback ||= retry.lineFallback;
-        }
-      }
-      if (onlineLineFallback) return onlineLineFallback;
-      if (hasOrdinaryFallback()) return fallbackResult();
-      const retryTitle = removeLiveQualifier(title);
-      const publicTitles = retryTitle ? [title, retryTitle] : [title];
-      const requestJson = async (url) => {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 5500);
+      const lrcPath = path.join(path.dirname(filePath), `${path.basename(filePath, path.extname(filePath))}.lrc`);
+      const requireWordTiming = options.mode === "network" || options.requireWordTiming === true;
+      const onlineProviders = resolveOnlineLyricProviders(options.mode, requireWordTiming);
+      let embeddedText = "";
+      let sidecarText = "";
+      if (!options.force && !options.ignoreLocal) {
         try {
-          const response = await lyricFetch(url, {
-            signal: controller.signal,
-            headers: { "User-Agent": `MedoMusic/${app.getVersion()} (local Windows music player)` }
-          });
-          if (!response.ok) return null;
-          return await response.json();
-        } finally {
-          clearTimeout(timeout);
-        }
-      };
-      const normalize = (value) => String(value || "").toLowerCase()
-        .normalize("NFKC")
-        .replace(/\([^)]*\)|\[[^\]]*\]/g, " ")
-        .replace(/[^\p{L}\p{N}]+/gu, "");
-      const similarity = (left, right) => {
-        const a = normalize(left);
-        const b = normalize(right);
-        if (!a || !b) return 0;
-        if (a === b) return 1;
-        if (a.includes(b) || b.includes(a)) return Math.min(a.length, b.length) / Math.max(a.length, b.length);
-        const pairs = new Set(Array.from({ length: Math.max(0, a.length - 1) }, (_, index) => a.slice(index, index + 2)));
-        const otherPairs = Array.from({ length: Math.max(0, b.length - 1) }, (_, index) => b.slice(index, index + 2));
-        const overlap = otherPairs.filter((pair) => pairs.has(pair)).length;
-        return (2 * overlap) / Math.max(1, pairs.size + otherPairs.length);
-      };
-      const scoreResult = (result, searchTitle) => {
-        const durationScore = Math.max(0, 1 - Math.abs(Number(result.duration || 0) - duration) / Math.max(8, duration * .08));
-        return similarity(searchTitle, result.trackName) * .48 +
-          similarity(artist, result.artistName) * .28 +
-          similarity(album, result.albumName) * .14 +
-          durationScore * .1;
-      };
-      const searchPublicLyrics = async (searchTitles, cacheTitle) => {
-        const publicCacheKey = JSON.stringify(["lrclib", cacheTitle, artist, album, duration]);
-        if (cache[publicCacheKey] && !options?.force) return cache[publicCacheKey];
-        let result = null;
-        let confidence = 0;
-        for (const searchTitle of searchTitles) {
-          const exactQuery = new URLSearchParams({
-            track_name: searchTitle,
-            artist_name: artist,
-            album_name: album,
-            duration: String(duration)
-          });
-          result = await requestJson(`https://lrclib.net/api/get?${exactQuery}`);
-          confidence = result ? scoreResult(result, searchTitle) : 0;
-          if (!result || confidence < .62) {
-            const searchQuery = new URLSearchParams({ track_name: searchTitle, artist_name: artist });
-            let candidates = await requestJson(`https://lrclib.net/api/search?${searchQuery}`);
-            if (!Array.isArray(candidates) || !candidates.length) {
-              const titleOnlyQuery = new URLSearchParams({ track_name: searchTitle });
-              candidates = await requestJson(`https://lrclib.net/api/search?${titleOnlyQuery}`);
-            }
-            if (Array.isArray(candidates) && candidates.length) {
-              const ranked = candidates.map((item) => ({ item, score: scoreResult(item, searchTitle) }))
-                .sort((left, right) => right.score - left.score);
-              if (ranked[0].score >= .56) {
-                result = ranked[0].item;
-                confidence = ranked[0].score;
-              }
-            }
-          }
-          if (result && confidence >= .56) break;
-          result = null;
-          confidence = 0;
-        }
-        if (!result || confidence < .56) return null;
-        const text = result.syncedLyrics || result.plainLyrics || "";
-        if (!text) return null;
-        const value = {
-          text,
-          source: "lrclib",
-          confidence: Math.round(confidence * 100),
-          match: {
-            title: result.trackName,
-            artist: result.artistName,
-            album: result.albumName
-          }
-        };
-        cache[publicCacheKey] = value;
-        scheduleOnlineLyricsCacheWrite();
-        return value;
-      };
-      const initialPublicLyrics = await searchPublicLyrics(publicTitles, title);
-      if (initialPublicLyrics) return initialPublicLyrics;
-
-      const chineseTitle = removeEnglishSuffixFromChineseTitle(title);
-      if (chineseTitle && !requireWordTiming) {
-        const chineseOptions = { ...options, title: chineseTitle };
-        const chineseOnlineSearch = await searchOnlineProviders(chineseOptions);
-        if (chineseOnlineSearch.result) return chineseOnlineSearch.result;
-        if (chineseOnlineSearch.lineFallback) return chineseOnlineSearch.lineFallback;
-        const chineseLiveTitle = removeLiveQualifier(chineseTitle);
-        const chinesePublicTitles = chineseLiveTitle ? [chineseTitle, chineseLiveTitle] : [chineseTitle];
-        const chinesePublicLyrics = await searchPublicLyrics(chinesePublicTitles, chineseTitle);
-        if (chinesePublicLyrics) return chinesePublicLyrics;
+          const { parseFile } = await import("music-metadata");
+          const metadata = await parseFile(filePath, { duration: false, skipCovers: true });
+          const lyrics = metadata.common.lyrics;
+          embeddedText = Array.isArray(lyrics)
+            ? lyrics.map(item => typeof item === "string" ? item : item?.text || "").filter(Boolean).join("\n")
+            : typeof lyrics === "string" ? lyrics : "";
+        } catch {}
+        if (controller.signal.aborted) return { text: "", source: null, cancelled: true };
+        try { sidecarText = decodeTextBuffer(await fs.readFile(lrcPath)); } catch {}
       }
-      return failedOrFallback();
-    } catch {
-      return onlineLineFallback || failedOrFallback();
+      if (controller.signal.aborted) return { text: "", source: null, cancelled: true };
+      const local = selectLocalLyrics(isUsableLyricText(embeddedText) ? embeddedText : "",
+        isUsableLyricText(sidecarText) ? sidecarText : "");
+      if (!onlineProviders.length || (options.mode === "auto" && !requireWordTiming && local.text)) return local;
+      if (hasNativeWordTiming(embeddedText)) return { text: embeddedText, source: "embedded", confidence: null };
+      if (hasNativeWordTiming(sidecarText)) return { text: sidecarText, source: "sidecar", confidence: null };
+      const found = await searchOnlineLyrics({
+        ...options,
+        title: cleanLyricTag(options.title) || path.basename(filePath, path.extname(filePath))
+      }, { signal: controller.signal });
+      if (found.cancelled) return found;
+      return found.text || !local.text ? found : local;
+    } finally {
+      controller.abort();
+      event.sender.removeListener("destroyed", cancel);
+      if (lyricSearchRequests.get(senderId) === controller) lyricSearchRequests.delete(senderId);
     }
   });
 
@@ -1295,7 +1156,13 @@ app.whenReady().then(async () => {
         const picture = selectCover(metadata.common.picture);
         const image = picture ? nativeImage.createFromBuffer(Buffer.from(picture.data)) : null;
         if (image && !image.isEmpty()) {
-          const jpeg = image.resize({ width: 800, height: 800, quality: "good" }).toJPEG(100);
+          const size = image.getSize();
+          const resized = Math.max(size.width, size.height) > 800
+            ? image.resize(size.width >= size.height
+              ? { width: 800, quality: "best" }
+              : { height: 800, quality: "best" })
+            : image;
+          const jpeg = resized.toJPEG(100);
           const cachedCoverPath = coverCachePath(filePath, stat);
           writtenCoverPath = cachedCoverPath;
           pendingCoverPaths.add(cachedCoverPath);
@@ -1448,8 +1315,8 @@ app.whenReady().then(async () => {
     }
   });
 
-  queueExternalAudioFiles(process.argv.slice(1));
-  createWindow();
+  applicationInitialized = true;
+  showMainWindow();
   startMyFireflyExtension({
     app,
     dispatch: sendMyFireflyCommand,
@@ -1461,7 +1328,6 @@ app.whenReady().then(async () => {
     console.error("[MyFirefly] Failed to start MedoMusic extension:", error);
   });
   setTrayEnabled(false);
-  applyGlobalShortcutSettings();
   restoreLyricsWindowVisibility();
   app.on("activate", () => {
     showMainWindow();
@@ -1474,7 +1340,7 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   isQuitting = true;
-  globalShortcut.unregisterAll();
+  globalShortcuts.stop();
   closeMusicFolderWatchers();
   for (const pending of myFireflyPending.values()) {
     clearTimeout(pending.timer);

@@ -1,15 +1,11 @@
 const { decryptQrc } = require("qrc-decoder");
 const { hasNativeWordTiming } = require("./lyrics-timing");
-const { removeLiveQualifier } = require("./lyrics-source-priority");
+const { normalizeLyricOptions, rankLyricCandidates, isUsableLyricText } = require("./lyrics-matching");
 
 const HEADERS = {
   Referer: "https://c.y.qq.com/",
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MedoMusic"
 };
-
-function normalize(value) {
-  return String(value || "").toLowerCase().normalize("NFKC").replace(/[^\p{L}\p{N}]+/gu, "");
-}
 
 function decodeXmlEntities(value) {
   return String(value || "")
@@ -23,7 +19,7 @@ function decodeXmlEntities(value) {
 }
 
 function decodeQqLyricJsonp(raw, callback) {
-  const text = String(raw || "").trim();
+  const text = String(raw || "").trim().replace(/;\s*$/u, "");
   const prefix = `${callback}(`;
   if (!text.startsWith(prefix) || !text.endsWith(")")) return null;
   const payload = JSON.parse(text.slice(prefix.length, -1));
@@ -66,7 +62,10 @@ async function searchQqSongs(query, fetchImplementation) {
     signal: AbortSignal.timeout(6500)
   });
   if (!response.ok) return [];
-  return searchSongsFromPayload(await response.json());
+  const payload = await response.json();
+  if (payload.code || payload["music.search.SearchCgiService"]?.code || payload.req_1?.code) throw new Error("qq-search-unavailable");
+  const songs = searchSongsFromPayload(payload);
+  return Array.isArray(songs) ? songs : [];
 }
 
 async function fetchQrcBySongId(songId, fetchImplementation) {
@@ -103,53 +102,42 @@ async function fetchLineLyric(songMid, fetchImplementation) {
 }
 
 async function fetchQqMusicLyricsOnce(options, fetchImplementation) {
-  const title = String(options?.title || "").trim();
-  const artist = String(options?.artist || "").trim();
-  const expectedDuration = Number(options?.duration) || 0;
+  options = normalizeLyricOptions(options);
+  const { title, artist } = options;
   if (!title) return null;
-  const songs = await searchQqSongs(`${title} ${artist}`.trim(), fetchImplementation);
-  const ranked = songs.map((song) => {
-    const songArtists = (song.singer || []).map((item) => item.name).join(" ");
-    const normalizedTitle = normalize(title);
-    const candidateTitle = normalize(song.name || song.title || song.songname);
-    const titleScore = candidateTitle === normalizedTitle ? 1 : candidateTitle.includes(normalizedTitle) ? .76 : 0;
-    const artistScore = !artist ? .5 : normalize(songArtists).includes(normalize(artist)) ? 1 : 0;
-    const duration = Number(song.interval) || 0;
-    const durationScore = !expectedDuration ? .5 : Math.max(0, 1 - Math.abs(duration - expectedDuration) / 12);
-    const plausibleMatch = titleScore > 0 && (!artist || artistScore > 0) &&
-      (!expectedDuration || !duration || Math.abs(duration - expectedDuration) <= 12);
-    return { song, artist: songArtists, plausibleMatch, score: titleScore * .58 + artistScore * .27 + durationScore * .15 };
-  }).sort((left, right) => right.score - left.score);
+  const rankSongs = songs => rankLyricCandidates(songs.map(song => ({
+    song, title: song.name || song.title || song.songname,
+    artists: (song.singer || []).map(item => item.name),
+    album: song.album?.name || song.albumname,
+    duration: Number(song.interval) || 0
+  })), options);
+  let ranked = rankSongs(await searchQqSongs(`${title} ${artist}`.trim(), fetchImplementation));
+  if (!ranked.length && artist) ranked = rankSongs(await searchQqSongs(title, fetchImplementation));
   const requireWords = options.requireWordTiming || options.mode === "network";
   let fallback = null;
-  for (const best of ranked.filter(item => item.plausibleMatch && item.score >= .62)) {
+  let failure = null;
+  for (const best of ranked.slice(0, 4)) {
     let qrcText = null;
     let text = null;
-    try { qrcText = await fetchQrcBySongId(best.song.id || best.song.songid, fetchImplementation); } catch {}
-    try { text = qrcText || await fetchLineLyric(best.song.mid || best.song.songmid, fetchImplementation); } catch {}
-    if (!text) continue;
+    try { qrcText = await fetchQrcBySongId(best.song.id || best.song.songid, fetchImplementation); } catch (error) { failure = error; }
+    try { text = qrcText || await fetchLineLyric(best.song.mid || best.song.songmid, fetchImplementation); } catch (error) { failure = error; }
+    if (!isUsableLyricText(text)) continue;
     const wordTimed = hasNativeWordTiming(text);
     const result = {
       text,
       source: wordTimed ? "qq-word" : "qq-line",
       confidence: Math.round(best.score * 100),
-      match: { title: best.song.name || best.song.title || best.song.songname, artist: best.artist }
+      match: { title: best.title, artist: best.artists.join(" / "), album: best.album || "", duration: best.duration }
     };
     if (!requireWords || wordTimed) return result;
     fallback ||= result;
   }
+  if (!fallback && failure) throw failure;
   return fallback;
 }
 
 async function fetchQqMusicLyrics(options, fetchImplementation = fetch) {
-  const result = await fetchQqMusicLyricsOnce(options, fetchImplementation).catch(() => null);
-  if (result && (!(options.requireWordTiming || options.mode === "network") || hasNativeWordTiming(result.text))) return result;
-  const retryTitle = removeLiveQualifier(options?.title);
-  if (!retryTitle) return result;
-  try {
-    const retry = await fetchQqMusicLyricsOnce({ ...options, title: retryTitle }, fetchImplementation);
-    return retry && hasNativeWordTiming(retry.text) ? retry : result || retry;
-  } catch { return result; }
+  return fetchQqMusicLyricsOnce(options, fetchImplementation);
 }
 
 module.exports = {
