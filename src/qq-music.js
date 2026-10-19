@@ -1,5 +1,5 @@
 const { decryptQrc } = require("qrc-decoder");
-const { hasNativeWordTiming, lyricTimingQuality } = require("./lyrics-timing");
+const { hasNativeWordTiming } = require("./lyrics-timing");
 const { normalizeLyricOptions, rankLyricCandidates, isUsableLyricText } = require("./lyrics-matching");
 
 const HEADERS = {
@@ -18,61 +18,13 @@ function decodeXmlEntities(value) {
     .replace(/&amp;/g, "&");
 }
 
-// fcg_query_lyric_new returns both `lyric` and `trans` as base64 LRC. The
-// translation is line-for-line aligned with the original, so both are decoded
-// from the same payload and returned together.
 function decodeQqLyricJsonp(raw, callback) {
   const text = String(raw || "").trim().replace(/;\s*$/u, "");
   const prefix = `${callback}(`;
   if (!text.startsWith(prefix) || !text.endsWith(")")) return null;
   const payload = JSON.parse(text.slice(prefix.length, -1));
   if (payload.code !== 0 || !payload.lyric) return null;
-  const lyric = Buffer.from(payload.lyric, "base64").toString("utf8");
-  const translation = typeof payload.trans === "string" && payload.trans
-    ? Buffer.from(payload.trans, "base64").toString("utf8")
-    : "";
-  return { lyric, translation };
-}
-
-// Provider result shape expects a plain LRC string; callers that want the
-// translation use decodeQqLyricPayload instead.
-function decodeQqLyricText(raw, callback) {
-  const decoded = decodeQqLyricJsonp(raw, callback);
-  return decoded ? decoded.lyric : null;
-}
-
-// Pair each original line with its translated counterpart by timestamp. QQ
-// emits both files line-aligned, but blank translation lines are normal, so the
-// match is positional-with-timestamp-check rather than a strict index walk.
-function alignQqTranslation(lyricText, translationText) {
-  if (!translationText) return null;
-  const lines = [];
-  for (const rawLine of String(translationText).split(/\r?\n/)) {
-    const stamps = [...rawLine.matchAll(/\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g)];
-    if (!stamps.length) continue;
-    const content = rawLine.replace(/\[[^\]]*\]/g, "").trim();
-    for (const stamp of stamps) {
-      const fraction = stamp[3] ? Number(stamp[3]) / (10 ** stamp[3].length) : 0;
-      lines.push({ start: Number(stamp[1]) * 60 + Number(stamp[2]) + fraction, text: content });
-    }
-  }
-  if (!lines.length) return null;
-  const originalStarts = [];
-  for (const rawLine of String(lyricText).split(/\r?\n/)) {
-    const stamps = [...rawLine.matchAll(/\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g)];
-    for (const stamp of stamps) {
-      const fraction = stamp[3] ? Number(stamp[3]) / (10 ** stamp[3].length) : 0;
-      originalStarts.push(Number(stamp[1]) * 60 + Number(stamp[2]) + fraction);
-    }
-  }
-  return originalStarts.map(start => {
-    let best = null;
-    for (const candidate of lines) {
-      const distance = Math.abs(candidate.start - start);
-      if (distance <= .35 && (!best || distance < best.distance)) best = { ...candidate, distance };
-    }
-    return best?.text || "";
-  });
+  return Buffer.from(payload.lyric, "base64").toString("utf8");
 }
 
 function extractQrcLyric(raw) {
@@ -146,31 +98,10 @@ async function fetchLineLyric(songMid, fetchImplementation) {
     headers: HEADERS,
     signal: AbortSignal.timeout(6500)
   });
-  return response.ok ? decodeQqLyricText(await response.text(), callback) : null;
+  return response.ok ? decodeQqLyricJsonp(await response.text(), callback) : null;
 }
 
-// Like fetchLineLyric but keeps the payload so the translation can be aligned
-// against the original timestamps.
-async function fetchLineLyricWithTranslation(songMid, fetchImplementation) {
-  if (!songMid) return null;
-  const callback = "MusicJsonCallback_lrc";
-  const query = new URLSearchParams({
-    callback, pcachetime: String(Date.now()), songmid: songMid,
-    g_tk: "5381", jsonpCallback: callback, loginUin: "0", hostUin: "0",
-    format: "jsonp", inCharset: "utf8", outCharset: "utf8", notice: "0",
-    platform: "yqq", needNewCode: "0"
-  });
-  const response = await fetchImplementation(`https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?${query}`, {
-    headers: HEADERS,
-    signal: AbortSignal.timeout(6500)
-  });
-  if (!response.ok) return null;
-  const decoded = decodeQqLyricJsonp(await response.text(), callback);
-  if (!decoded) return null;
-  return { lyric: decoded.lyric, translation: alignQqTranslation(decoded.lyric, decoded.translation) };
-}
-
-async function fetchQqMusicLyricsOnce(options, fetchImplementation, onCandidate) {
+async function fetchQqMusicLyricsOnce(options, fetchImplementation) {
   options = normalizeLyricOptions(options);
   const { title, artist } = options;
   if (!title) return null;
@@ -187,11 +118,9 @@ async function fetchQqMusicLyricsOnce(options, fetchImplementation, onCandidate)
   let failure = null;
   for (const best of ranked.slice(0, 4)) {
     let qrcText = null;
-    let linePayload = null;
     let text = null;
     try { qrcText = await fetchQrcBySongId(best.song.id || best.song.songid, fetchImplementation); } catch (error) { failure = error; }
-    try { linePayload = qrcText ? null : await fetchLineLyricWithTranslation(best.song.mid || best.song.songmid, fetchImplementation); } catch (error) { failure = error; }
-    text = qrcText || linePayload?.lyric || null;
+    try { text = qrcText || await fetchLineLyric(best.song.mid || best.song.songmid, fetchImplementation); } catch (error) { failure = error; }
     if (!isUsableLyricText(text)) continue;
     const wordTimed = hasNativeWordTiming(text);
     const result = {
@@ -200,29 +129,20 @@ async function fetchQqMusicLyricsOnce(options, fetchImplementation, onCandidate)
       confidence: Math.round(best.score * 100),
       match: { title: best.title, artist: best.artists.join(" / "), album: best.album || "", duration: best.duration }
     };
-    // QRC carries the translation in a separate download; line lyrics carry it
-    // in the same payload, already aligned to the original timestamps.
-    if (Array.isArray(linePayload?.translation) && linePayload.translation.some(Boolean)) {
-      result.translation = linePayload.translation;
-    }
-    onCandidate?.(result);
-    if (lyricTimingQuality(text) >= (requireWords ? 2 : 1)) return result;
-    if (lyricTimingQuality(text) > lyricTimingQuality(fallback?.text)) fallback = result;
+    if (!requireWords || wordTimed) return result;
+    fallback ||= result;
   }
   if (!fallback && failure) throw failure;
   return fallback;
 }
 
-async function fetchQqMusicLyrics(options, fetchImplementation = fetch, onCandidate = null) {
-  return fetchQqMusicLyricsOnce(options, fetchImplementation, onCandidate);
+async function fetchQqMusicLyrics(options, fetchImplementation = fetch) {
+  return fetchQqMusicLyricsOnce(options, fetchImplementation);
 }
 
 module.exports = {
   decodeQqLyricJsonp,
-  decodeQqLyricText,
-  alignQqTranslation,
   extractQrcLyric,
   searchSongsFromPayload,
-  fetchLineLyricWithTranslation,
   fetchQqMusicLyrics
 };

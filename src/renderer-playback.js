@@ -514,7 +514,6 @@ function clearCurrentPlayback() {
   lyricInspectionActive = false;
   lyricFollowAnimation?.cancel();
   lyricsStage.classList.remove("inspecting");
-  renderLyricStatus(null);
   document.querySelectorAll(".track-row.active").forEach((row) => row.classList.remove("active"));
   updatePlayButtonState(false);
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";

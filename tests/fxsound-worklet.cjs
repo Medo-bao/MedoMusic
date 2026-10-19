@@ -21,7 +21,7 @@ const root = path.resolve(__dirname, '..');
           for(let c=0;c<channels;c++)for(let i=0;i<frames;i++)b.getChannelData(c)[i]=.04*Math.sin(i*(.031+c*.027));return b;});
         let playing=context.createBufferSource();playing.buffer=buffers[0];playing.connect(entry);playing.start();
         const gains=[2,-1,3,-2,1,-1,2,-2,1,-1];
-        MedoSound.create(context,entry,context.destination).update({enabled:true,clarity:50,bass:50,ambience:50,surround:50,dynamics:50,eq:gains});
+        MedoSound.create(context,entry,context.destination).update({enabled:true,clarity:2,bass:3,ambience:50,surround:50,dynamics:50,eq:gains});
         const events=[{frame:0,index:0}];
         const pendingSwitches=counts.slice(1).map((_,i)=>context.suspend((i+1)*8192/rate).then(()=>{
           const index=i+1;playing.disconnect(entry);playing.stop();playing=context.createBufferSource();playing.buffer=buffers[index];playing.connect(entry);
@@ -49,7 +49,7 @@ const root = path.resolve(__dirname, '..');
         for(let c=0;c<channels;c++)for(let i=0;i<frames;i++)
           if(i<8192 || i>=16384)input.getChannelData(c)[i]=.08*Math.sin(i*(.017+c*.041));
         source.buffer=input;const gains=equalize?[2,2,1.5,1,0,0,0,0,.5,1]:Array(10).fill(0);
-        MedoSound.create(context,source,context.destination).update({enabled:true,clarity:50,bass:50,ambience:50,surround:50,dynamics:50,eq:gains});
+        MedoSound.create(context,source,context.destination).update({enabled:true,clarity:2,bass:3,ambience:50,surround:50,dynamics:50,eq:gains});
         source.start();const rendered=await context.startRendering(),ratio=FxSoundCore.internalRateRatio(rate),internal=rate/ratio;
         const eq=new FxSoundCore.Equalizer(rate),data=Array.from({length:channels},()=>new Float32Array(frames));
         MedoSound.frequencies.forEach((hz,i)=>eq.setBand(i,hz,gains[i]));
@@ -106,7 +106,7 @@ const root = path.resolve(__dirname, '..');
         const context=new OfflineAudioContext(2,frames,rate);await MedoSound.prepare(context);
         const input=context.createBuffer(1,frames,rate),source=context.createBufferSource();
         for(let i=0;i<frames/2;i++)input.getChannelData(0)[i]=.07*Math.sin(i*.19)+.02*Math.sin(i*.013);
-        source.buffer=input;const settings={enabled:true,clarity:50,bass:50,ambience:50,surround:50,dynamics:50,eq:[2,2,1.5,1,0,0,0,0,.5,1]};
+        source.buffer=input;const settings={enabled:true,clarity:2,bass:3,ambience:50,surround:50,dynamics:50,eq:[2,2,1.5,1,0,0,0,0,.5,1]};
         MedoSound.create(context,source,context.destination).update(settings);source.start();const rendered=await context.startRendering();
         const eq=new FxSoundCore.Equalizer(rate),clarity=new FxSoundCore.Clarity(internal),bass=new FxSoundCore.Bass(internal),maximizer=new FxSoundCore.Maximizer(internal);
         MedoSound.frequencies.forEach((frequency,i)=>eq.setBand(i,frequency,settings.eq[i]));
@@ -130,7 +130,7 @@ const root = path.resolve(__dirname, '..');
         const input=context.createBuffer(2,rate,rate),source=context.createBufferSource();
         for(let i=0;i<rate;i++)for(let ch=0;ch<2;ch++)input.getChannelData(ch)[i]=.05*Math.sin(i*(.017+ch*.23));
         source.buffer=input;const engine=MedoSound.create(context,source,context.destination);
-        const setting=percent=>({enabled:true,clarity:percent,bass:percent,surround:percent});
+        const setting=percent=>({enabled:true,clarity:percent/25,bass:percent*.06,surround:percent});
         engine.update(setting(100));source.start();const events=[{frame:0,percent:100}];
         const switches=[[.25,.1],[.5,0],[.75,100]].map(([time,percent])=>context.suspend(time).then(()=>{
           events.push({frame:Math.round(context.currentTime*rate),percent});engine.update(setting(percent));return context.resume();
@@ -159,7 +159,7 @@ const root = path.resolve(__dirname, '..');
           input.getChannelData(1)[i]=.07*Math.sin(i*.29);
         }
         source.buffer=input;
-        MedoSound.create(context,source,context.destination).update({enabled:true,clarity:percent,bass:percent,ambience:percent,surround:percent,dynamics:percent},false,true);
+        MedoSound.create(context,source,context.destination).update({enabled:true,clarity:percent/25,bass:percent*.06,ambience:percent,surround:percent,dynamics:percent},false,true);
         source.start();const rendered=await context.startRendering();
         const midi=FxSoundCore.normalizedToMidi(percent/100),clarity=new FxSoundCore.Clarity(rate),bass=new FxSoundCore.Bass(rate),maximizer=new FxSoundCore.Maximizer(rate);
         const room=new FxSoundCore.Reverb(rate,FxSoundCore.reverbParameters(rate,FxSoundCore.ambienceMidi(midi))),pair=new Float32Array(2);
@@ -203,7 +203,7 @@ const root = path.resolve(__dirname, '..');
           input.getChannelData(1)[i]=.04*Math.sin(2*Math.PI*397*i/rate);
         }
         source.buffer=input;
-        MedoSound.create(context,source,context.destination).update({enabled:true,bass:100},false,true);
+        MedoSound.create(context,source,context.destination).update({enabled:true,bass:6},false,true);
         source.start();const rendered=await context.startRendering();
         const bass=new FxSoundCore.Bass(internal),maximizer=new FxSoundCore.Maximizer(internal),pair=new Float32Array(2);
         let error=0;
@@ -262,7 +262,7 @@ const root = path.resolve(__dirname, '..');
           for (let i=0;i<data.length;i++) data[i]=.4*Math.sin(i*.29+channel)+.1*Math.sin(i*.73);
         }
         source.buffer=input;
-        MedoSound.create(context,source,context.destination).update({enabled:true,clarity:50},false,true);
+        MedoSound.create(context,source,context.destination).update({enabled:true,clarity:2},false,true);
         source.start();
         const rendered=await context.startRendering(), reference=new FxSoundCore.Clarity(internal), limiter=new FxSoundCore.Maximizer(internal), pair=new Float32Array(2);
         const drive=FxSoundCore.clarityDrive(FxSoundCore.normalizedToMidi(2/4));
@@ -279,7 +279,7 @@ const root = path.resolve(__dirname, '..');
         const input=context.createBuffer(2,rate,rate),source=context.createBufferSource();
         for(let i=0;i<rate;i++)for(let ch=0;ch<2;ch++)input.getChannelData(ch)[i]=.1*Math.sin(2*Math.PI*(125+ch*251)*i/rate);
         source.buffer=input;
-        const settings={enabled:false,clarity:50,bass:50,ambience:50,surround:50,dynamics:50,eq:[6,0,0,0,0,0,0,0,0,0]};
+        const settings={enabled:false,clarity:2,bass:3,ambience:50,surround:50,dynamics:50,eq:[6,0,0,0,0,0,0,0,0,0]};
         const engine=MedoSound.create(context,source,context.destination);engine.update(settings,false,true);source.start();
         const events=[];
         const switches=[[.25,true,false],[.5,true,true],[.75,true,false]].map(([time,enabled,compare])=>context.suspend(time).then(()=>{

@@ -18,4 +18,3 @@ Groove/Resources/*
 Groove/Resources/Fonts/*
 !Groove/Resources/Fonts/SegMVR2.ttf
 *.log
-.audit/

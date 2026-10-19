@@ -155,11 +155,9 @@ window.medo.onLyricsWindowLine((payload = {}) => {
   if (payload.secondary) document.documentElement.style.setProperty("--lyric-secondary", payload.secondary);
   if (payload.colorsOnly) return;
   const nextCurrent = payload.current || payload.title || "暂无歌词";
-  // Priority for the second row: background vocal duet line, then the existing
-  // translation, then the upcoming lyric line.
-  const secondary = payload.subline || payload.currentTranslation || payload.next ||
-    [payload.artist, payload.album].filter(Boolean).join(" · ") || "MedoMusic";
-  const nextLine = secondary;
+  const nextLine = payload.currentTranslation
+    ? payload.currentTranslation
+    : payload.next || [payload.artist, payload.album].filter(Boolean).join(" · ") || "MedoMusic";
   const incomingWords = Array.isArray(payload.words) ? payload.words : [];
   const wordMode = incomingWords.length ? "word" : "line";
   const lineChanged = current.dataset.text !== nextCurrent || next.dataset.text !== nextLine || current.dataset.wordMode !== wordMode;
@@ -169,11 +167,9 @@ window.medo.onLyricsWindowLine((payload = {}) => {
     current.dataset.wordMode = wordMode;
     activeWords = incomingWords;
     renderKaraokeText(current, nextCurrent, activeWords.length > 0);
-    const showTranslation = Boolean(payload.currentTranslation) && !payload.subline;
-    const translationKaraoke = Boolean(showTranslation && activeWords.length);
-    next.classList.toggle("current-translation", showTranslation);
+    const translationKaraoke = Boolean(payload.currentTranslation && activeWords.length);
+    next.classList.toggle("current-translation", Boolean(payload.currentTranslation));
     next.classList.toggle("translation-karaoke", translationKaraoke);
-    next.classList.toggle("background-vocal", Boolean(payload.subline));
     renderKaraokeText(next, nextLine, translationKaraoke);
     updateLyricLayout();
     if (hasRenderedLyrics) animateLyricChange();

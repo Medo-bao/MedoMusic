@@ -23,26 +23,7 @@
     const value = String(text || "");
     return /^\[\d+,\d+\].*\(\d+,\d+,\d+\)/m.test(value) ||
       /^\[\d+,\d+\].+\(\d+,\d+\)/m.test(value) ||
-      /<\d{1,3}:\d{2}(?:[.:]\d{1,3})?>[^<\r\n]+/.test(value) || hasTtmlWordTiming(value);
-  }
-
-  // TTML marks syllables with <span begin="...">. It is word-timed too,
-  // but uses a different syntax than the bracket formats above.
-  function hasTtmlWordTiming(text) {
-    const parser = typeof module === 'object' && module.exports ? require('./ttml') : globalThis.MedoTtml;
-    return parser?.hasNativeWordTiming(text) === true;
-  }
-
-  // Compare available synchronization without inventing word intervals.
-  // Mixed lyrics have native word timing too; this is a source-selection rank,
-  // not the renderer's full plain/line/mixed/word classification.
-  function lyricTimingQuality(text) {
-    const value = String(text || "");
-    if (!value.trim()) return -1;
-    if (hasNativeWordTiming(value)) return 2;
-    if (/^\[\d{1,3}:\d{2}(?:[.:]\d{1,3})?\]/m.test(value)) return 1;
-    const parser = typeof module === 'object' && module.exports ? require('./ttml') : globalThis.MedoTtml;
-    return parser?.parseTtml(value)?.lines.length ? 1 : 0;
+      /<\d{1,3}:\d{2}(?:[.:]\d{1,3})?>[^<\r\n]+/.test(value);
   }
 
   function standardizeNativeWords(words) {
@@ -101,5 +82,5 @@
     });
   }
 
-  return { completeWordTimings, resolveYrcWordStart, hasNativeWordTiming, hasTtmlWordTiming, lyricTimingQuality, standardizeNativeWords };
+  return { completeWordTimings, resolveYrcWordStart, hasNativeWordTiming, standardizeNativeWords };
 });

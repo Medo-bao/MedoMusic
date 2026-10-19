@@ -480,10 +480,6 @@
           </article>
           <section class="lyrics-stage" aria-label="歌词">
             <button id="restore-lyric-follow" class="restore-lyric-follow" title="回到当前播放的歌词">回到当前句 <span aria-hidden="true">↩</span></button>
-            <div id="lyric-status" class="lyric-status" role="status" aria-live="polite" aria-atomic="true" hidden>
-              <span class="lyric-status-message"></span>
-              <span class="lyric-status-source"></span>
-            </div>
             <div class="lyrics-viewport">
               <div id="lyrics-lines" class="lyrics-lines">
                 <p class="lyrics-empty">正在查找歌词</p>
@@ -558,38 +554,25 @@
         <button id="sound-compare" aria-pressed="false" disabled>对比原声</button>
         <button id="sound-reset">重置全部</button>
       </div>
-      <div class="sound-preset-row">
-        <div class="sound-preset-actions"><label for="sound-preset">预设</label><select id="sound-preset"><option value="flat">默认</option><option value="recommended">作者推荐</option><option value="custom">自定义</option></select><button id="sound-save">保存</button><button id="sound-save-as">另存为新预设</button><button id="sound-rename">重命名</button><button id="sound-delete">删除</button></div>
-        <div class="sound-trim-controls">
-          <label class="sound-control" data-sound-help="调整整体输出电平，正值会被动态限幅部分吸收"><span>主增益</span><output id="sound-master-gain-value"></output><input id="sound-master-gain" type="range" min="-20" max="20" step="1" value="0"></label>
-          <label class="sound-control" data-sound-help="调整左右声道平衡，0 为居中"><span>立体声平衡</span><output id="sound-balance-value"></output><input id="sound-balance" type="range" min="-20" max="20" step="1" value="0"></label>
-        </div>
-      </div>
+      <div class="sound-preset-row"><label for="sound-preset">预设</label><select id="sound-preset"><option value="flat">默认</option><option value="recommended">作者推荐</option><option value="custom">自定义</option></select><button id="sound-save">保存</button><button id="sound-save-as">另存为新预设</button><button id="sound-rename">重命名</button><button id="sound-delete">删除</button></div>
       <div class="sound-workspace">
       <section class="sound-card" aria-labelledby="effects-heading"><div class="sound-card-heading"><h3 id="effects-heading">音效处理</h3></div>
         <div class="sound-controls">
-          <label class="sound-control" data-sound-help="提升声音清晰度"><span>清晰度</span><output id="sound-clarity-value"></output><input id="sound-clarity" type="range" min="0" max="100" step="1" value="0"></label>
-          <label class="sound-control" data-sound-help="模拟空间混响"><span>环境</span><output id="sound-ambience-value"></output><input id="sound-ambience" type="range" min="0" max="100" step="1" value="0"></label>
-          <label class="sound-control" data-sound-help="拓宽声场"><span>环绕</span><output id="sound-surround-value"></output><input id="sound-surround" type="range" min="0" max="100" step="1" value="0"></label>
-          <label class="sound-control" data-sound-help="提升响度"><span>动态</span><output id="sound-dynamics-value"></output><input id="sound-dynamics" type="range" min="0" max="100" step="1" value="0"></label>
-          <label class="sound-control" data-sound-help="增强低频"><span>低音</span><output id="sound-bass-value"></output><input id="sound-bass" type="range" min="0" max="100" step="1" value="0"></label>
+          <label data-sound-help="提升声音清晰度"><span>清晰度</span><output id="sound-clarity-value"></output><input id="sound-clarity" type="range" min="0" max="100" step="1" value="0"></label>
+          <label data-sound-help="模拟空间混响"><span>环境</span><output id="sound-ambience-value"></output><input id="sound-ambience" type="range" min="0" max="100" step="1" value="0"></label>
+          <label data-sound-help="拓宽声场"><span>环绕</span><output id="sound-surround-value"></output><input id="sound-surround" type="range" min="0" max="100" step="1" value="0"></label>
+          <label data-sound-help="提升响度"><span>动态</span><output id="sound-dynamics-value"></output><input id="sound-dynamics" type="range" min="0" max="100" step="1" value="0"></label>
+          <label data-sound-help="增强低频"><span>低音</span><output id="sound-bass-value"></output><input id="sound-bass" type="range" min="0" max="100" step="1" value="0"></label>
         </div>
       </section>
       <section class="sound-card sound-equalizer" aria-labelledby="equalizer-heading">
         <div class="sound-card-heading"><h3 id="equalizer-heading">均衡器</h3><button id="sound-eq-reset" aria-label="重置均衡器">↻ 重置</button></div>
-        <div class="sound-eq-scroll"><div class="sound-eq-plot"><svg class="sound-eq-curve" viewBox="0 0 1000 184" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id="sound-eq-gradient" gradientUnits="userSpaceOnUse" x1="0" y1="92" x2="1000" y2="92"><stop class="sound-gradient-start"/><stop class="sound-gradient-end" offset="1"/></linearGradient></defs><path class="sound-zero" d="M0 92H1000"/><polyline id="sound-eq-line"/></svg><div id="sound-bands" class="sound-bands"></div></div></div>
+        <div class="sound-eq-scroll"><div class="sound-eq-plot"><svg class="sound-eq-curve" viewBox="0 0 1000 180" preserveAspectRatio="none" aria-hidden="true"><defs><linearGradient id="sound-eq-gradient" gradientUnits="userSpaceOnUse" x1="0" y1="90" x2="1000" y2="90"><stop class="sound-gradient-start"/><stop class="sound-gradient-end" offset="1"/></linearGradient></defs><path class="sound-zero" d="M0 90H1000"/><polyline id="sound-eq-line"/></svg><div id="sound-bands" class="sound-bands"></div></div></div>
       </section>
       </div>
-      <footer class="sound-footer">
-        <p id="sound-status" class="sound-status" role="status"></p>
-        <div class="sound-leveling-controls">
-          <label class="sound-control" data-sound-help="按目标 RMS 衰减过响的立体声音频，不抬高音量；滑到最右侧关闭，双击复位。"><span>归一化目标</span><output id="sound-normalization-value"></output><input id="sound-normalization" type="range" min="-40" max="0" step="1" value="0"></label>
-          <label class="sound-control" data-sound-help="自适应均衡音量，兼顾音色与峰值余量；0 为关闭，双击复位。数值代表强度，不是固定增益。"><span>音量均衡</span><output id="sound-volume-leveling-value"></output><input id="sound-volume-leveling" type="range" min="0" max="4" step="0.5" value="0"></label>
-        </div>
-      </footer>
+      <footer class="sound-footer"><p id="sound-status" class="sound-status" role="status"></p></footer>
     </div>
   </dialog>
-  <script src="./lyric-sync.js"></script>
   <script src="./lyrics-timing.js"></script>
   <dialog id="sound-rename-dialog"><form id="sound-rename-form"><h2>重命名预设</h2><label for="sound-preset-name">预设名称</label><input id="sound-preset-name" maxlength="40" required><p id="sound-name-error" role="alert"></p><div><button type="button" id="sound-rename-cancel">取消</button><button type="submit">保存名称</button></div></form></dialog>
   <dialog id="sound-delete-dialog" aria-labelledby="sound-delete-heading"><h2 id="sound-delete-heading">删除预设</h2><p id="sound-delete-message"></p><div><button id="sound-delete-cancel" autofocus>取消</button><button id="sound-delete-confirm">删除</button></div></dialog>
@@ -605,8 +588,6 @@
   <script src="./renderer-playback.js"></script>
   <script src="./shortcut-keys.js"></script>
   <script src="./shortcut-settings.js"></script>
-  <script src="./zh-convert.js"></script>
-  <script src="./ttml.js"></script>
   <script src="./renderer.js"></script>
 </body>
 </html>

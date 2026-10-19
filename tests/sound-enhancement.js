@@ -18,7 +18,7 @@ module.exports = async function(page) {
       for(let i=0;i<data.length;i++) { harmonicSin+=data[i]*Math.sin(2*Math.PI*frequency*3*i/sampleRate); harmonicCos+=data[i]*Math.cos(2*Math.PI*frequency*3*i/sampleRate); }
       return {rms:Math.sqrt(data.reduce((sum,x)=>sum+x*x,0)/data.length),peak:Math.max(...data.map(Math.abs)),finite:data.every(Number.isFinite),third:2*Math.hypot(harmonicSin,harmonicCos)/data.length};
     }
-    const off=await signal({enabled:false,bass:100},100);
+    const off=await signal({enabled:false,bass:6},100);
     const flat=await signal({enabled:true},100);
     const recommended=await signal({...MedoSound.presets.recommended,enabled:true},1000);
     const surroundOnly=await signal({enabled:true,surround:100},1000);
@@ -33,21 +33,21 @@ module.exports = async function(page) {
       if(i>=12000)nativeRoomEnergy+=nativePair[0]*nativePair[0];
     }
     const nativeRoomRms=Math.sqrt(nativeRoomEnergy/36000);
-    const hot=await signal({enabled:true,bass:100,clarity:100,eq:Array(10).fill(12),ambience:100,surround:100,dynamics:100},1000,false,.99);
+    const hot=await signal({enabled:true,bass:6,clarity:4,eq:Array(10).fill(12),ambience:100,surround:100,dynamics:100},1000,false,.99);
     const noLimiter=await signal({enabled:true,eq:[12,0,0,0,0,0,0,0,0,0]},31,false,.5);
     const unrelatedBoost=await signal({enabled:true,eq:[12,0,0,0,0,0,0,0,0,0]},1000);
     const clarityOff=await signal({enabled:true},4000);
-    const clarityOn=await signal({enabled:true,clarity:100},4000);
-    const bass=await signal({enabled:true,bass:100},90,false,.05);
-    const treble=await signal({enabled:true,bass:100},6000,false,.05);
-    const compare=await signal({enabled:true,bass:100},100,true);
-    const extreme=await signal({enabled:true,bass:100,clarity:100,eq:Array(10).fill(12),dynamics:100},1000);
+    const clarityOn=await signal({enabled:true,clarity:4},4000);
+    const bass=await signal({enabled:true,bass:6},90,false,.05);
+    const treble=await signal({enabled:true,bass:6},6000,false,.05);
+    const compare=await signal({enabled:true,bass:6},100,true);
+    const extreme=await signal({enabled:true,bass:6,clarity:4,eq:Array(10).fill(12),dynamics:100},1000);
     const dynamic=await signal({enabled:true,dynamics:100},1000);
     const dynamicLow=await signal({enabled:true,dynamics:1},1000);
     const quietOff=await signal({enabled:true},1000,false,.01);
     const quietDynamic=await signal({enabled:true,dynamics:100},1000,false,.01);
-    const clarityBass=await signal({enabled:true,clarity:100},60);
-    const rates = await Promise.all([44100,96000].map(rate => signal({enabled:true,clarity:100},4000,false,.5,rate)));
+    const clarityBass=await signal({enabled:true,clarity:4},60);
+    const rates = await Promise.all([44100,96000].map(rate => signal({enabled:true,clarity:4},4000,false,.5,rate)));
     const eq = Array(10).fill(0); eq[4] = 6;
     const originalCenter = await signal({enabled:true,eq},700);
     const centers = [...MedoSound.frequencies]; centers[4] = 700;
@@ -98,7 +98,7 @@ module.exports = async function(page) {
   assert.equal(measurements.original.right,0,'Original comparison bypasses spatial processing');
   await page.evaluate(()=>{currentView='settings';render();});
   assert.equal(await page.locator('#settings-panel > .settings-group').first().locator('h2').textContent(),'音乐库');
-  assert.equal(await page.locator('#settings-panel > .settings-group').nth(2).getAttribute('id'),'settings-sound');
+  assert.equal(await page.locator('#settings-panel > .settings-group').nth(1).getAttribute('id'),'settings-sound');
   assert.equal(await page.locator('#settings-sound #sound-settings-entry').count(),1);
   assert.match(await page.locator('#open-sound-settings').textContent(),/声音增强（实验功能）/);
   assert.equal(await page.locator('#sound-dialog').isVisible(),false);
@@ -113,7 +113,7 @@ module.exports = async function(page) {
   assert.equal(await page.locator('#sound-save').isDisabled(),true);
   assert.equal(await page.locator('#sound-save-as').isDisabled(),true);
   assert.deepEqual(await page.locator('.sound-controls input').evaluateAll(nodes=>nodes.map(n=>n.id)),
-    ['sound-clarity','sound-ambience','sound-surround','sound-dynamics','sound-bass','sound-master-gain','sound-balance']);
+    ['sound-clarity','sound-ambience','sound-surround','sound-dynamics','sound-bass']);
   for (const id of ['sound-ambience','sound-surround']) {
     await page.locator(`#${id}`).evaluate(input=>{input.value='65';});
     await page.locator(`#${id}`).dispatchEvent('input');
@@ -212,7 +212,7 @@ module.exports = async function(page) {
   await page.locator('#sound-preset').selectOption('recommended');
   assert.equal(await page.locator('#sound-save-as').isDisabled(),true);
   const recommended = await page.evaluate(()=>({eq:soundSettings.eq,centers:soundSettings.centers,effects:[...document.querySelectorAll('.sound-controls output')].map(el=>el.textContent)}));
-  assert.deepEqual(recommended,{eq:[2,2,1.5,1,0,0,0,0,.5,1],centers:[31,63,109,267,354,1000,2000,4000,8600,16000],effects:['10%','18%','13%','15%','10%','0 dB','居中']});
+  assert.deepEqual(recommended,{eq:[2,2,1.5,1,0,0,0,0,.5,1],centers:[31,63,109,267,354,1000,2000,4000,8600,16000],effects:['10%','18%','13%','15%','10%']});
   await band.fill('3'); await band.dispatchEvent('input');
   await page.locator('#sound-save-as').click();
   await page.locator('#sound-preset-name').fill('作者推荐');

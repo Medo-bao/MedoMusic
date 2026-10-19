@@ -466,4 +466,3 @@ module.exports = async function checkAppearance(page) {
   fs.writeFileSync(path.join(destination, 'checks.json'), JSON.stringify({ race, continuity, ink, bounds, fallbackChecks }, null, 2));
   console.log('Appearance passed: dark/light scenes, minimum/maximized geometry, latest-cover races, bounded fades, no-art fallback, accent contrast, pause/background/reduced motion');
 };
-

@@ -336,187 +336,11 @@
       return output;
     }
   }
-  // GraphicEq owns both stages upstream (GraphicEqSetMasterGain /
-  // GraphicEqSetBalance). They run before the per-group effect chain, so the
-  // Maximizer level detector sees the trimmed signal exactly like native.
-  function masterGain(db) {
-    const value = Number(db);
-    return f(Number.isFinite(value) && value !== 0 ? Math.pow(10, value / 20) : 1);
-  }
-  // GraphicEqSetBalance attenuates one side in dB, keeping the other at unity.
-  // Positive values favour the right side; center has no level discontinuity.
-  function balanceGain(db) {
-    const value = Number(db);
-    if (!Number.isFinite(value) || value === 0) return {left:1,right:1};
-    const balance = Math.max(-20, Math.min(20, value));
-    return {left:balance > 0 ? f(Math.pow(10,-balance/20)) : 1, right:balance < 0 ? f(Math.pow(10,balance/20)) : 1};
-  }
-  // GraphicEq / SOS normalization and volume leveling, ported from the same
-  // pinned FxSound sources as the EQ. All detector state uses native float32
-  // arithmetic and the original buffer cadence; this is not LUFS normalization.
-  const add=(a,b)=>f(a+b), sub=(a,b)=>f(a-b), mul=(a,b)=>f(a*b), div=(a,b)=>f(a/b);
-  const bound=(value,min,max)=>Math.max(min,Math.min(max,value));
-  const LEVEL = Object.fromEntries(Object.entries({
-    attack:.10,releaseFast:.05,releaseSlow:.02,releaseGap:.15,prediction:.35,predictionClamp:.15,
-    predictionMiss:.35,minRatio:.8912509381337456,tonalityRange:7,tonalitySmooth:.08,
-    muffledBoost:.12,clearReduction:.18,clearCeiling:.08,headroomSeconds:60,headroomBoost:.08,
-    headroomReduction:.14,comfort:.18,nearCeiling:.985,hit:.002,quietRms:.035,audiblePeak:.0035,
-    fullBoostPeak:.02,quietMax:10,quietRelease:.18,quietActivation:10,quietRamp:2,
-    floorReleaseRms:.06,floorRelease:.02,silenceDecay:.08,peakTarget:.98,floorRaiseSeconds:6,
-    pi:3.14159265358979323846,tiny:1e-6,energyFloor:1e-12
-  }).map(([key,value])=>[key,f(value)]));
-  class Loudness {
-    constructor(rate) {
-      this.rate=rate; this.normalizationGain=1; this.amount=0; this.target=0;
-      this.powerHistory=new Float32Array(6); this.peakHistory=new Float32Array(30);
-      this.scIn=new Float32Array(8); this.scOut=new Float32Array(8);
-      this.tone=new Float32Array(24); this.resetLeveling();
-    }
-    resetLeveling() {
-      this.gain=1; this.powerSum=0; this.powerIndex=0; this.powerCount=0;
-      this.previousAverage=0; this.previousPredicted=0; this.coefficientRate=0;
-      this.tonality=0; this.headroom=0; this.quietDuration=0; this.quietFloor=1;
-      this.peakBucket=0; this.peakSeconds=0; this.peakIndex=0; this.peakCount=0;
-      this.powerHistory.fill(0); this.peakHistory.fill(0);
-      this.scIn.fill(0); this.scOut.fill(0); this.tone.fill(0);
-    }
-    configure(amount=0) {
-      amount=bound(Number(amount)||0,0,4);
-      if(amount===this.amount)return;
-      this.amount=amount; this.target=mul(div(f(amount),4),f(.5));
-      if(!amount)this.resetLeveling();
-    }
-    normalize(output,db=0) {
-      if(output.length!==2 || !db)return;
-      const target=f(Math.pow(10,db/20)),frames=output[0].length;
-      let sum=0;
-      for(let i=0;i<frames;i++)sum=add(sum,add(mul(output[0][i],output[0][i]),mul(output[1][i],output[1][i])));
-      const rms=Math.max(LEVEL.tiny,f(Math.sqrt(div(sum,frames*2))));
-      const targetGain=bound(div(target,rms),f(.01),1),diff=Math.abs(sub(targetGain,this.normalizationGain));
-      const smoothing=targetGain>this.normalizationGain ? Math.min(f(.5),add(f(.0005),mul(diff,f(.001)))) : f(.5);
-      this.normalizationGain=add(this.normalizationGain,mul(sub(targetGain,this.normalizationGain),smoothing));
-      for(let i=0;i<frames;i++){
-        output[0][i]=mul(output[0][i],this.normalizationGain);
-        output[1][i]=mul(output[1][i],this.normalizationGain);
-      }
-    }
-    coefficients(rate) {
-      if(this.coefficientRate===rate)return;
-      const dt=div(1,rate),rc=cutoff=>div(1,mul(mul(2,LEVEL.pi),cutoff));
-      this.hpf=div(rc(120),add(rc(120),dt));
-      this.low=div(dt,add(rc(180),dt)); this.body=div(dt,add(rc(1200),dt));
-      this.presence=div(dt,add(rc(4500),dt)); this.coefficientRate=rate;
-    }
-    level(output) {
-      if(!this.target){this.gain=1;return;}
-      const channels=output.length,frames=output[0].length,excluded=channels>=6?3:-1;
-      const analyzed=channels-(excluded>=0?1:0),rate=this.rate>1000?this.rate:48000;
-      this.coefficients(rate);
-      let squares=0,peak=0,lowEnergy=0,bodyEnergy=0,presenceEnergy=0,airEnergy=0;
-      for(let i=0;i<frames;i++)for(let c=0;c<channels;c++){
-        if(c===excluded)continue;
-        const value=output[c][i],sc=mul(this.hpf,sub(add(this.scOut[c],value),this.scIn[c]));
-        this.scIn[c]=value;this.scOut[c]=sc;squares=add(squares,mul(sc,sc));peak=Math.max(peak,Math.abs(sc));
-        const index=c*3;
-        this.tone[index]=add(this.tone[index],mul(this.low,sub(value,this.tone[index])));
-        this.tone[index+1]=add(this.tone[index+1],mul(this.body,sub(value,this.tone[index+1])));
-        this.tone[index+2]=add(this.tone[index+2],mul(this.presence,sub(value,this.tone[index+2])));
-        const low=this.tone[index],body=sub(this.tone[index+1],low),presence=sub(this.tone[index+2],this.tone[index+1]),air=sub(value,this.tone[index+2]);
-        lowEnergy=add(lowEnergy,mul(low,low));bodyEnergy=add(bodyEnergy,mul(body,body));
-        presenceEnergy=add(presenceEnergy,mul(presence,presence));airEnergy=add(airEnergy,mul(air,air));
-      }
-      const power=div(squares,frames*analyzed),rms=f(Math.sqrt(power));
-      let gainStart=this.gain,gainEnd=gainStart;
-      const reduce=Math.max(this.headroom,0),boost=Math.max(-this.headroom,0),quietBefore=this.quietDuration;
-      let floor=Math.max(this.quietFloor,1);
-      const toneRatio=div(add(add(presenceEnergy,mul(airEnergy,f(.75))),LEVEL.energyFloor),add(add(mul(bodyEnergy,f(1.15)),mul(lowEnergy,f(.85))),LEVEL.energyFloor));
-      const targetTone=bound(div(f(10*Math.log10(toneRatio)),LEVEL.tonalityRange),-1,1);
-      this.tonality=add(mul(this.tonality,sub(1,LEVEL.tonalitySmooth)),mul(targetTone,LEVEL.tonalitySmooth));
-      const clear=Math.max(this.tonality,0),muffled=Math.max(-this.tonality,0),seconds=div(frames,rate);
-      const upward=bound(add(sub(1,mul(reduce,f(1.5))),mul(boost,f(.25))),0,1);
-      const downward=bound(add(f(.35),mul(upward,f(.65))),f(.35),1);
-      const guardedMuffled=mul(muffled,upward),guardedClear=mul(clear,downward);
-      const target=mul(this.target,sub(add(sub(add(1,mul(guardedMuffled,LEVEL.muffledBoost)),mul(guardedClear,LEVEL.clearReduction)),mul(boost,LEVEL.headroomBoost)),mul(reduce,LEVEL.headroomReduction)));
-      const ceiling=bound(sub(1,mul(guardedClear,LEVEL.clearCeiling)),f(.92),1);
-      let maxGain=Math.max(div(target,f(.125)),floor);
-      if(this.powerCount===6)this.powerSum=sub(this.powerSum,this.powerHistory[this.powerIndex]);else this.powerCount++;
-      this.powerHistory[this.powerIndex]=power;this.powerSum=add(this.powerSum,power);this.powerIndex=(this.powerIndex+1)%6;
-      const average=f(Math.sqrt(div(this.powerSum,this.powerCount)));
-      let predicted=average,missed=false;
-      if(this.previousAverage>LEVEL.tiny){
-        const predictedDelta=sub(this.previousPredicted,this.previousAverage),actualDelta=sub(average,this.previousAverage);
-        const threshold=Math.max(mul(this.previousAverage,f(.01)),f(1e-5));
-        missed=Math.abs(predictedDelta)>threshold && (mul(predictedDelta,actualDelta)<0 || Math.abs(actualDelta)<mul(Math.abs(predictedDelta),LEVEL.predictionMiss));
-        predicted=add(predicted,mul(sub(average,this.previousAverage),LEVEL.prediction));
-        predicted=bound(predicted,mul(average,sub(1,LEVEL.predictionClamp)),mul(average,add(1,LEVEL.predictionClamp)));
-      }
-      if(missed)predicted=average;
-      predicted=Math.max(predicted,LEVEL.tiny);this.previousAverage=average;this.previousPredicted=predicted;
-      if(rms>LEVEL.tiny){
-        const activation=bound(div(sub(this.quietDuration,LEVEL.quietActivation),LEVEL.quietRamp),0,1);
-        const quiet=bound(div(sub(LEVEL.quietRms,predicted),LEVEL.quietRms),0,1);
-        const audible=bound(div(sub(peak,LEVEL.audiblePeak),sub(LEVEL.fullBoostPeak,LEVEL.audiblePeak)),0,1);
-        const quietBoost=mul(mul(quiet,audible),activation);
-        if(quietBoost>0)maxGain=add(maxGain,mul(sub(Math.max(maxGain,LEVEL.quietMax),maxGain),quietBoost));
-        const desired=Math.max(Math.min(div(target,predicted),maxGain),floor);
-        let alpha=LEVEL.attack;
-        if(desired>=this.gain){
-          const gapRatio=div(sub(desired,this.gain),Math.max(this.gain,LEVEL.tiny));
-          alpha=gapRatio>LEVEL.releaseGap?LEVEL.releaseSlow:LEVEL.releaseFast;
-          alpha=mul(alpha,bound(sub(add(1,mul(guardedMuffled,f(.20))),mul(guardedClear,f(.35))),f(.55),f(1.20)));
-          alpha=Math.max(alpha,mul(LEVEL.quietRelease,quietBoost));
-        }
-        gainEnd=add(mul(this.gain,sub(1,alpha)),mul(desired,alpha));
-      }
-      if(gainEnd<gainStart)gainEnd=Math.max(gainEnd,mul(gainStart,LEVEL.minRatio));
-      if(peak>LEVEL.tiny){const safe=div(ceiling,peak);gainEnd=Math.min(gainEnd,safe);gainStart=Math.min(gainStart,safe);}
-      gainStart=bound(gainStart,0,maxGain);gainEnd=bound(gainEnd,0,maxGain);this.gain=gainEnd;
-      let postSquares=0,postPeak=0,hits=0;
-      for(let i=0;i<frames;i++){
-        const gain=add(gainStart,mul(div(i,frames),sub(gainEnd,gainStart)));
-        for(let c=0;c<channels;c++){
-          if(c===excluded)continue;
-          const value=mul(output[c][i],gain),absolute=Math.abs(value);
-          postSquares=add(postSquares,mul(value,value));postPeak=Math.max(postPeak,absolute);
-          if(absolute>=mul(ceiling,LEVEL.nearCeiling))hits++;
-          output[c][i]=bound(value,-ceiling,ceiling);
-        }
-      }
-      const postRms=f(Math.sqrt(div(postSquares,frames*analyzed)));
-      this.peakBucket=Math.max(this.peakBucket,postPeak);this.peakSeconds=add(this.peakSeconds,seconds);
-      while(this.peakSeconds>=1){
-        this.peakHistory[this.peakIndex]=this.peakBucket;this.peakIndex=(this.peakIndex+1)%30;
-        if(this.peakCount<30)this.peakCount++;
-        this.peakSeconds=sub(this.peakSeconds,1);this.peakBucket=0;
-      }
-      let rollingPeak=this.peakBucket;
-      for(let i=0;i<this.peakCount;i++)rollingPeak=Math.max(rollingPeak,this.peakHistory[i]);
-      this.quietDuration=peak>LEVEL.audiblePeak && postRms<LEVEL.quietRms?add(this.quietDuration,seconds):0;
-      if(quietBefore>=LEVEL.quietActivation && gainEnd>div(target,f(.125)) && gainEnd>floor)floor=gainEnd;
-      const quietTarget=mul(ceiling,LEVEL.peakTarget);
-      if(this.peakCount===30 && (quietBefore>=LEVEL.quietActivation || floor>1) && rollingPeak>LEVEL.audiblePeak && rollingPeak<quietTarget && reduce<f(.25)){
-        const desired=bound(mul(floor,div(quietTarget,Math.max(rollingPeak,LEVEL.tiny))),floor,LEVEL.quietMax);
-        const alpha=bound(div(seconds,LEVEL.floorRaiseSeconds),f(.0005),f(.05));
-        floor=add(mul(floor,sub(1,alpha)),mul(desired,alpha));
-      }
-      if(peak<=LEVEL.audiblePeak)floor=add(floor,mul(sub(1,floor),LEVEL.silenceDecay));
-      else if(postRms>LEVEL.floorReleaseRms)floor=add(floor,mul(sub(1,floor),LEVEL.floorRelease));
-      this.quietFloor=floor<f(1.0001)?1:floor;
-      const hitRatio=div(hits,frames*analyzed),headroom=bound(div(sub(ceiling,postPeak),ceiling),0,1);
-      let targetHeadroom=0;
-      if(hitRatio>LEVEL.hit)targetHeadroom=bound(div(hitRatio,f(.02)),0,1);
-      else if(postPeak>=mul(ceiling,LEVEL.nearCeiling))targetHeadroom=bound(div(sub(div(postPeak,ceiling),LEVEL.nearCeiling),sub(1,LEVEL.nearCeiling)),0,1);
-      else if(headroom>LEVEL.comfort)targetHeadroom=-bound(div(sub(headroom,LEVEL.comfort),f(.25)),0,1);
-      const alpha=bound(div(seconds,LEVEL.headroomSeconds),f(.0005),f(.05));
-      this.headroom=add(mul(this.headroom,sub(1,alpha)),mul(targetHeadroom,alpha));
-    }
-    process(output,normalization=0) { this.normalize(output,normalization);this.level(output); }
-  }
   // One buffer-level chain keeps the native silence gate shared by all stages.
   class Chain {
     constructor(sampleRate) {
       this.ratio=internalRateRatio(sampleRate);this.rate=sampleRate/this.ratio;
-      this.eq=new Equalizer(sampleRate);this.leveling=new Loudness(sampleRate);this.channels=0;this.groups=[];
+      this.eq=new Equalizer(sampleRate);this.channels=0;this.groups=[];
       this.reverbTable=Array.from({length:128},(_,midi)=>reverbParameters(this.rate,ambienceMidi(midi)));
       // Prepare every native handle before playback. A format switch only clears
       // histories; it must not rebuild coefficient tables on the audio thread.
@@ -537,7 +361,6 @@
     process(input,output,settings) {
       const channels=output.length,frames=output[0].length;
       const equalize=channels===1 || channels===2 || channels===6 || channels===8;
-      this.leveling.configure(settings.volumeLeveling);
       if(input.length && this.channels!==channels)this.configureChannels(channels);
       for(let channel=0;channel<channels;channel++)for(let i=0;i<frames;i++){
         const value=input[channel]?.[i]||0;
@@ -545,8 +368,6 @@
         output[channel][i]=settings.bypass || !equalize ? value : this.eq.processSample(value,channel,channels);
       }
       if(settings.bypass)return;
-      this.applyMasterTrim(output,settings);
-      if(equalize)this.leveling.process(output,settings.normalization);
       for(const group of this.groups){
         const {offset,count,role,pair}=group,mono=count===1;
         let active=role==='front';
@@ -581,25 +402,8 @@
         }
       }
     }
-    // Native SOS output: EQ * master gain * stereo balance. The trim is
-    // skipped for unsupported (quad) input because that path bypasses the EQ
-    // block entirely upstream, including its gain stages.
-    applyMasterTrim(output,settings) {
-      const channels = output.length;
-      if(channels!==1 && channels!==2 && channels!==6 && channels!==8)return;
-      const gain = masterGain(settings.masterGain);
-      // Native mono/surround SOS paths apply master gain to every channel;
-      // independent left/right balance belongs to the stereo path only.
-      const balance = channels===2 ? balanceGain(settings.balance) : {left:1,right:1};
-      const trim = gain !== 1 || balance.left !== 1 || balance.right !== 1;
-      if(!trim) return;
-      for(let channel=0;channel<channels;channel++)for(let i=0;i<output[channel].length;i++){
-        const side = channels===2 ? (channel===0 ? balance.left : balance.right) : 1;
-        output[channel][i] = f(f(output[channel][i] * gain) * side);
-      }
-    }
   }
-  const api = { Chain, Loudness, clarityCoefficients, Clarity, widenStereo, Maximizer, maximizerRelease, dynamicsGain, Reverb, reverbParameters, parametricCoefficients, Bass, Equalizer, normalizedToMidi, clarityDrive, surroundIntensity, ambienceMidi, dynamicMidi, internalRateRatio, masterGain, balanceGain };
+  const api = { Chain, clarityCoefficients, Clarity, widenStereo, Maximizer, maximizerRelease, dynamicsGain, Reverb, reverbParameters, parametricCoefficients, Bass, Equalizer, normalizedToMidi, clarityDrive, surroundIntensity, ambienceMidi, dynamicMidi, internalRateRatio };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.FxSoundCore = api;
   root.FxSoundCoreModule = installFxSound;
@@ -698,15 +502,11 @@ registerProcessor('fxsound-equalizer',FxSoundEqualizer);
 class FxSoundChain extends AudioWorkletProcessor {
   static get parameterDescriptors(){return [...FxSoundEqualizer.parameterDescriptors,
     ...['clarity','surround','dynamics','ambience','bass','clarityOn','surroundOn','bassOn'].map(name=>({
-      name,defaultValue:name==='dynamics'?1:0,minValue:0,maxValue:127,automationRate:'k-rate'})),
-    {name:'masterGain',defaultValue:0,minValue:-20,maxValue:20,automationRate:'k-rate'},
-    {name:'normalization',defaultValue:0,minValue:-40,maxValue:0,automationRate:'k-rate'},
-    {name:'volumeLeveling',defaultValue:0,minValue:0,maxValue:4,automationRate:'k-rate'},
-    {name:'balance',defaultValue:0,minValue:-20,maxValue:20,automationRate:'k-rate'}];}
+      name,defaultValue:name==='dynamics'?1:0,minValue:0,maxValue:127,automationRate:'k-rate'}))];}
   constructor(){super();this.chain=new FxSoundCore.Chain(sampleRate);this.settings={};}
   process(inputs,outputs,parameters){
     for(let i=0;i<10;i++)this.chain.eq.setBand(i,parameters[`frequency${i}`][0],parameters[`gain${i}`][0]);
-    for(const name of ['bypass','clarity','surround','dynamics','ambience','bass','clarityOn','surroundOn','bassOn','masterGain','balance','normalization','volumeLeveling'])
+    for(const name of ['bypass','clarity','surround','dynamics','ambience','bass','clarityOn','surroundOn','bassOn'])
       this.settings[name]=parameters[name][0];
     this.chain.process(inputs[0],outputs[0],this.settings);return true;
   }
