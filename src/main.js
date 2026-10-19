@@ -8,7 +8,7 @@ const { parseZpl } = require("./zpl");
 const { pruneCoverCache } = require("./cover-cache");
 const { decodeTextBuffer } = require("./text-decoder");
 const { createMediaFileResponse } = require("./media-file-response");
-const { hasNativeWordTiming } = require("./lyrics-timing");
+const { hasNativeWordTiming, lyricTimingQuality } = require("./lyrics-timing");
 const { createOnlineLyricsSearch, LYRICS_CACHE_VERSION } = require("./lyrics-search");
 const { cleanLyricTag, isUsableLyricText } = require("./lyrics-matching");
 const { resolveOnlineLyricProviders, selectLocalLyrics } = require("./lyrics-source-priority");
@@ -775,6 +775,9 @@ app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) return;
   queueExternalAudioFiles(process.argv.slice(1));
   getMetadataCache().catch(() => {});
+  // Retire credentials saved by the removed account-only lyrics provider.
+  await fs.rm(path.join(app.getPath("userData"), "apple-music.json"), { force: true })
+    .catch(error => console.warn("Retired lyrics settings cleanup failed", error.code));
   const backgroundImages = createBackgroundImageStore(app.getPath("userData"), nativeImage);
   backgroundMaterialMode = (await backgroundImages.get()).material;
   const updateBackground = async operation => {
@@ -953,11 +956,12 @@ app.whenReady().then(async () => {
     event.sender.once("destroyed", cancel);
     try {
       const lrcPath = path.join(path.dirname(filePath), `${path.basename(filePath, path.extname(filePath))}.lrc`);
-      const requireWordTiming = options.mode === "network" || options.requireWordTiming === true;
-      const onlineProviders = resolveOnlineLyricProviders(options.mode, requireWordTiming);
+      const mode = options.mode || "auto";
+      const requireWordTiming = mode === "network" || options.requireWordTiming === true;
+      const onlineProviders = resolveOnlineLyricProviders(mode, requireWordTiming);
       let embeddedText = "";
       let sidecarText = "";
-      if (!options.force && !options.ignoreLocal) {
+      if (mode === "local" || (!options.force && !options.ignoreLocal)) {
         try {
           const { parseFile } = await import("music-metadata");
           const metadata = await parseFile(filePath, { duration: false, skipCovers: true });
@@ -972,15 +976,18 @@ app.whenReady().then(async () => {
       if (controller.signal.aborted) return { text: "", source: null, cancelled: true };
       const local = selectLocalLyrics(isUsableLyricText(embeddedText) ? embeddedText : "",
         isUsableLyricText(sidecarText) ? sidecarText : "");
-      if (!onlineProviders.length || (options.mode === "auto" && !requireWordTiming && local.text)) return local;
-      if (hasNativeWordTiming(embeddedText)) return { text: embeddedText, source: "embedded", confidence: null };
-      if (hasNativeWordTiming(sidecarText)) return { text: sidecarText, source: "sidecar", confidence: null };
+      if (!onlineProviders.length || (local.text && (!requireWordTiming && mode === "auto" || hasNativeWordTiming(local.text)))) return local;
       const found = await searchOnlineLyrics({
         ...options,
         title: cleanLyricTag(options.title) || path.basename(filePath, path.extname(filePath))
       }, { signal: controller.signal });
       if (found.cancelled) return found;
-      return found.text || !local.text ? found : local;
+      // Automatic word lookup upgrades local lyrics only when synchronization
+      // improves. Keep the online retry deadline for a local fallback.
+      if (local.text && lyricTimingQuality(local.text) >= lyricTimingQuality(found.text)) {
+        return { ...local, retryAt: found.retryAt };
+      }
+      return found;
     } finally {
       controller.abort();
       event.sender.removeListener("destroyed", cancel);

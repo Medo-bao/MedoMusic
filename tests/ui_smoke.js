@@ -109,6 +109,9 @@ async function run() {
       getLyricsWindowState: async () => ({ locked: false, visible: false }),
       lockLyricsWindow: () => {},
       onLyricsWindowLockState: () => () => {},
+      getAppleMusicSettings: async () => ({ enabled: false, storefront: "us", configured: false }),
+      setAppleMusicSettings: async (values) => ({ enabled: true, storefront: values?.storefront || "us", configured: Boolean(values?.mediaUserToken) }),
+      clearAppleMusicSettings: async () => ({ enabled: false, storefront: "us", configured: false }),
       readLyrics: async (options) => {
         window.__lyricRequests.push({ ...options });
         return { text: "[00:00.00]Demo lyric", source: options.ignoreLocal ? `${options.mode}-line` : "sidecar" };

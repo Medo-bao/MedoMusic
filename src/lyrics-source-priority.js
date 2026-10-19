@@ -1,11 +1,19 @@
+const { lyricTimingQuality } = require("./lyrics-timing");
+
+// Account-free providers; LRCLIB is handled separately as a line fallback.
 function resolveOnlineLyricProviders(mode, requireWordTiming = false) {
   if (mode === "local") return [];
-  if (mode === "auto" || mode === "network" || !mode) return ["qq", "netease"];
+  if (mode === "rotation" || mode === "auto" || mode === "network" || !mode) return ["qq", "netease"];
   if (requireWordTiming && (mode === "qq" || mode === "netease")) return [mode, mode === "qq" ? "netease" : "qq"];
   return [mode === "netease" ? "netease" : "qq"];
 }
 
 function selectLocalLyrics(embeddedText, sidecarText) {
+  // Keep embedded precedence on ties, but do not hide a timed sidecar behind
+  // plain embedded text (or native words behind an ordinary LRC).
+  if (sidecarText && lyricTimingQuality(sidecarText) > lyricTimingQuality(embeddedText)) {
+    return { text: sidecarText, source: "sidecar", confidence: null };
+  }
   if (embeddedText) return { text: embeddedText, source: "embedded", confidence: null };
   if (sidecarText) return { text: sidecarText, source: "sidecar", confidence: null };
   return { text: "", source: null };

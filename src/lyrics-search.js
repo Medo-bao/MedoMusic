@@ -1,10 +1,10 @@
 const { fetchQqMusicLyrics } = require("./qq-music");
 const { fetchNeteaseLyrics } = require("./netease-eapi");
-const { hasNativeWordTiming } = require("./lyrics-timing");
+const { hasNativeWordTiming, lyricTimingQuality } = require("./lyrics-timing");
 const { resolveOnlineLyricProviders, removeLiveQualifier, removeEnglishSuffixFromChineseTitle } = require("./lyrics-source-priority");
 const { normalizeLyricOptions, normalizeLyricTag, rankLyricCandidates, isUsableLyricText } = require("./lyrics-matching");
 
-const LYRICS_CACHE_VERSION = 3;
+const LYRICS_CACHE_VERSION = 8;
 const EMPTY_RESULT = { text: "", source: null };
 
 async function withinDeadline(task, parentSignal, timeoutMs) {
@@ -43,6 +43,21 @@ function createOnlineLyricsSearch({
     }
 
     let fallback = null;
+    let fallbackTitleIndex = Infinity;
+    const targetQuality = requireWordTiming ? 2 : 1;
+    // Manual word refresh still exhausts the word sources, but its line
+    // fallback follows the same provider/candidate order as a line lookup.
+    // Reuse the lines already fetched instead of starting a second search.
+    const keepLineSourceOrder = requireWordTiming && options.force;
+    const retainFallback = (found, titleIndex) => {
+      const quality = lyricTimingQuality(found.text), previousQuality = lyricTimingQuality(fallback?.text);
+      if (quality > previousQuality || quality === previousQuality &&
+          (titleIndex < fallbackTitleIndex || titleIndex === fallbackTitleIndex &&
+            !keepLineSourceOrder && (Number(found.confidence) || 0) > (Number(fallback?.confidence) || 0))) {
+        fallback = found;
+        fallbackTitleIndex = titleIndex;
+      }
+    };
     let networkFailed = false;
     let requests = 0;
     let result;
@@ -66,7 +81,7 @@ function createOnlineLyricsSearch({
                   throw error;
                 }
               };
-              return await task(lyricFetch);
+              return await task(lyricFetch, providerSignal);
             }, searchSignal, providerTimeoutMs);
           } catch {
             if (!signal?.aborted) networkFailed = true;
@@ -74,7 +89,7 @@ function createOnlineLyricsSearch({
           }
         };
 
-        const searchPublicLyrics = async (searchOptions, lyricFetch) => {
+        const searchPublicLyrics = async (searchOptions, lyricFetch, onCandidate) => {
           const readJson = async query => {
             const response = await lyricFetch(query, { headers: { "User-Agent": userAgent } });
             return response.ok ? await response.json() : null;
@@ -84,49 +99,62 @@ function createOnlineLyricsSearch({
               isUsableLyricText(item.syncedLyrics || item.plainLyrics)).map(item => ({
                 item, title: item.trackName, artist: item.artistName, album: item.albumName, duration: Number(item.duration)
               }));
-            const best = rankLyricCandidates(candidates, searchOptions)[0];
+            const best = rankLyricCandidates(candidates, searchOptions).sort((left, right) =>
+              lyricTimingQuality(right.item.syncedLyrics || right.item.plainLyrics) - lyricTimingQuality(left.item.syncedLyrics || left.item.plainLyrics) || right.score - left.score)[0];
             if (!best) return null;
-            return {
+            const found = {
               text: best.item.syncedLyrics || best.item.plainLyrics, source: "lrclib",
               confidence: Math.round(best.score * 100),
               match: { title: best.title, artist: best.artist, album: best.album || "", duration: best.duration }
             };
+            onCandidate(found);
+            return found;
           };
           const { title, artist, album, duration } = searchOptions;
+          let fallback = null;
+          const retain = found => {
+            if (found && (lyricTimingQuality(found.text) > lyricTimingQuality(fallback?.text) ||
+                lyricTimingQuality(found.text) === lyricTimingQuality(fallback?.text) && found.confidence > fallback.confidence)) fallback = found;
+            return fallback;
+          };
           if (artist && album && duration) {
             const exactQuery = new URLSearchParams({ track_name: title, artist_name: artist, album_name: album, duration: String(duration) });
-            const exact = choose(await readJson(`https://lrclib.net/api/get?${exactQuery}`));
-            if (exact) return exact;
+            const exact = retain(choose(await readJson(`https://lrclib.net/api/get?${exactQuery}`)));
+            if (lyricTimingQuality(exact?.text) >= 1) return exact;
           }
           const query = new URLSearchParams({ track_name: title });
           if (artist) query.set("artist_name", artist);
-          const selected = choose(await readJson(`https://lrclib.net/api/search?${query}`));
-          if (selected || !artist) return selected;
-          return choose(await readJson(`https://lrclib.net/api/search?${new URLSearchParams({ track_name: title })}`));
+          const selected = retain(choose(await readJson(`https://lrclib.net/api/search?${query}`)));
+          if (lyricTimingQuality(selected?.text) >= 1 || !artist) return selected;
+          return retain(choose(await readJson(`https://lrclib.net/api/search?${new URLSearchParams({ track_name: title })}`)));
         };
 
         const chineseTitle = removeEnglishSuffixFromChineseTitle(options.title);
         const titles = [...new Set([options.title, removeLiveQualifier(options.title), chineseTitle,
           chineseTitle && removeLiveQualifier(chineseTitle)].filter(Boolean))];
         // Exhaust original metadata before relaxing Live qualifiers or bilingual title suffixes.
-        for (const title of titles) {
+        for (const [titleIndex, title] of titles.entries()) {
           searchSignal.throwIfAborted();
           const searchOptions = { ...options, title, requireWordTiming };
+          const captureCandidate = found => retainFallback(found, titleIndex);
           for (const provider of providers) {
             searchSignal.throwIfAborted();
-            const found = await runProvider(lyricFetch => provider === "qq"
-              ? fetchQqMusicLyrics(searchOptions, lyricFetch)
-              : fetchNeteaseLyrics(searchOptions, lyricFetch));
+            const found = await runProvider((lyricFetch, providerSignal) => {
+              const publish = found => { if (!providerSignal.aborted) captureCandidate(found); };
+              return provider === "qq" ? fetchQqMusicLyrics(searchOptions, lyricFetch, publish)
+                : fetchNeteaseLyrics(searchOptions, lyricFetch, publish);
+            });
             if (!found || !isUsableLyricText(found.text)) continue;
-            if (!requireWordTiming || hasNativeWordTiming(found.text)) return found;
-            fallback ||= found;
+            captureCandidate(found);
+            if (lyricTimingQuality(found.text) >= targetQuality) return fallback;
           }
-          // LRCLIB supplies line lyrics; it cannot improve an existing word-mode line fallback.
-          if (!fallback) {
-            const found = await runProvider(lyricFetch => searchPublicLyrics(searchOptions, lyricFetch));
+          // LRCLIB can improve plain text, but cannot improve timed line lyrics.
+          if (lyricTimingQuality(fallback?.text) < 1) {
+            const found = await runProvider((lyricFetch, providerSignal) => searchPublicLyrics(searchOptions, lyricFetch,
+              found => { if (!providerSignal.aborted) captureCandidate(found); }));
             if (found) {
-              if (!requireWordTiming) return found;
-              fallback = found;
+              captureCandidate(found);
+              if (lyricTimingQuality(found.text) >= targetQuality) return fallback;
             }
           }
         }

@@ -1,5 +1,5 @@
 const crypto = require("node:crypto");
-const { hasNativeWordTiming } = require("./lyrics-timing");
+const { hasNativeWordTiming, lyricTimingQuality } = require("./lyrics-timing");
 const { normalizeLyricOptions, scoreLyricCandidate, rankLyricCandidates, isUsableLyricText } = require("./lyrics-matching");
 
 const EAPI_URL = "https://interface3.music.163.com/eapi/song/lyric/v1";
@@ -84,7 +84,7 @@ async function searchNeteaseSongs(options, fetchImplementation = fetch) {
   return Array.isArray(songs) ? songs : [];
 }
 
-async function fetchNeteaseLyricsOnce(options, fetchImplementation) {
+async function fetchNeteaseLyricsOnce(options, fetchImplementation, onCandidate) {
   options = normalizeLyricOptions(options);
   const rankSongs = songs => rankLyricCandidates(rankNeteaseSongs(songs, options), options);
   let ranked = rankSongs(await searchNeteaseSongs(options, fetchImplementation));
@@ -107,15 +107,16 @@ async function fetchNeteaseLyricsOnce(options, fetchImplementation) {
       confidence: Math.round(best.score * 100),
       match: { title: best.title, artist: best.artist, album: best.album || "", duration: best.duration }
     };
-    if (!requireWords || wordTimed) return result;
-    fallback ||= result;
+    onCandidate?.(result);
+    if (lyricTimingQuality(text) >= (requireWords ? 2 : 1)) return result;
+    if (lyricTimingQuality(text) > lyricTimingQuality(fallback?.text)) fallback = result;
   }
   if (!fallback && failure) throw failure;
   return fallback;
 }
 
-async function fetchNeteaseLyrics(options, fetchImplementation = fetch) {
-  return fetchNeteaseLyricsOnce(options, fetchImplementation);
+async function fetchNeteaseLyrics(options, fetchImplementation = fetch, onCandidate = null) {
+  return fetchNeteaseLyricsOnce(options, fetchImplementation, onCandidate);
 }
 
 module.exports = {
