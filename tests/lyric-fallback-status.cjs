@@ -130,9 +130,9 @@ async function main() {
         const search = createOnlineLyricsSearch({ getCache: async () => cache, fetchImplementation: sources(config), now: () => 100000 });
         const found = await search(options);
         assert.equal(found.source, config.expected); assert.equal(found.text, line); assert.equal(found.match.artist, 'Singer'); assert.equal(found.retryAt, 160000);
-        assert.equal(Object.values(cache)[0].version, 8); cases.push({ source: found.source, confidence: found.confidence, duration: found.match.duration });
+        assert.equal(Object.values(cache)[0].version, LYRICS_CACHE_VERSION); cases.push({ source: found.source, confidence: found.confidence, duration: found.match.duration });
       }
-      assert.equal(LYRICS_CACHE_VERSION, 8); return { cases, cacheVersion: 8 };
+      return { cases, cacheVersion: LYRICS_CACHE_VERSION };
     });
     await scenario(4, 'Provider timeout retains a published line; parent cancellation stores no result', async () => {
       const cache = {}, search = createOnlineLyricsSearch({ getCache: async () => cache, fetchImplementation: sources({ qqDuration: 120, hang: true }), providerTimeoutMs: 60, requestTimeoutMs: 1000, totalTimeoutMs: 2000 });
@@ -169,7 +169,7 @@ async function main() {
       const state = await page.evaluate(async () => { await renderAppInfo(); return { about: document.querySelector('#about-version').textContent, message: document.querySelector('.lyric-status-message').textContent, source: document.querySelector('.lyric-status-source').textContent, outsideScroller: !lyricsLines.contains(document.querySelector('#lyric-status')) }; });
       assert.match(state.about, /1\.6\.4$/); assert.equal(state.message, '暂未找到逐字歌词'); assert.equal(state.source, 'QQ 音乐 · 逐行歌词'); assert.equal(state.outsideScroller, true);
       const cacheVersion = await app.evaluate(({ app }) => { const path = process.getBuiltinModule('path'); return process.getBuiltinModule('module').createRequire(path.join(app.getAppPath(), 'package.json'))('./src/lyrics-search').LYRICS_CACHE_VERSION; });
-      assert.equal(cacheVersion, 8); assert.deepEqual(errors, []); return { ...info, ...state, cacheVersion, rendererErrors: errors };
+      assert.equal(cacheVersion, LYRICS_CACHE_VERSION); assert.deepEqual(errors, []); return { ...info, ...state, cacheVersion, rendererErrors: errors };
     } finally { await app.close(); }
   });
   assert.equal(report.results.length, 6); console.log(JSON.stringify({ total: 6, passed: report.passed, failed: report.failed }));

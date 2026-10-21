@@ -440,6 +440,26 @@
               <button class="tray-option active" data-tray-value="false" role="radio" aria-checked="true">关闭</button>
             </div>
           </div>
+          <div class="display-setting sleep-timer-setting">
+            <div><h3>定时关闭</h3><p>到时自动退出软件，后台播放时同样生效。</p><p id="sleep-timer-status" role="status">未开启定时关闭</p></div>
+            <form id="sleep-timer-form" class="sleep-timer-controls">
+              <div class="sleep-timer-control">
+                <select id="sleep-timer-duration" aria-label="定时关闭时长">
+                  <option value="15">15 分钟</option>
+                  <option value="30" selected>30 分钟</option>
+                  <option value="45">45 分钟</option>
+                  <option value="60">1 小时</option>
+                  <option value="90">1 小时 30 分钟</option>
+                  <option value="120">2 小时</option>
+                  <option value="custom">自定义</option>
+                </select>
+                <svg class="sleep-timer-chevron" viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>
+              </div>
+              <label id="sleep-timer-custom-control" class="sleep-timer-custom" hidden><input id="sleep-timer-minutes" type="number" min="1" max="1440" step="1" value="30" aria-label="自定义关闭时长（分钟）" required disabled><span>分钟</span></label>
+              <button id="sleep-timer-start" type="submit" class="secondary-button" disabled>开始定时</button>
+              <button id="sleep-timer-cancel" type="button" class="secondary-button" hidden>取消定时</button>
+            </form>
+          </div>
         </div>
 
         <div class="settings-group about-group" id="settings-about" aria-labelledby="settings-about-title">
@@ -608,5 +628,6 @@
   <script src="./zh-convert.js"></script>
   <script src="./ttml.js"></script>
   <script src="./renderer.js"></script>
+  <script src="./renderer-sleep-timer.js"></script>
 </body>
 </html>

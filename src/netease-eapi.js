@@ -1,5 +1,6 @@
 const crypto = require("node:crypto");
 const { hasNativeWordTiming, lyricTimingQuality } = require("./lyrics-timing");
+const { findNativeWordCandidate } = require("./lyrics-candidates");
 const { normalizeLyricOptions, scoreLyricCandidate, rankLyricCandidates, isUsableLyricText } = require("./lyrics-matching");
 
 const EAPI_URL = "https://interface3.music.163.com/eapi/song/lyric/v1";
@@ -84,7 +85,7 @@ async function searchNeteaseSongs(options, fetchImplementation = fetch) {
   return Array.isArray(songs) ? songs : [];
 }
 
-async function fetchNeteaseLyricsOnce(options, fetchImplementation, onCandidate) {
+async function fetchNeteaseLyricsOnce(options, fetchImplementation, onCandidate, onFailure) {
   options = normalizeLyricOptions(options);
   const rankSongs = songs => rankLyricCandidates(rankNeteaseSongs(songs, options), options);
   let ranked = rankSongs(await searchNeteaseSongs(options, fetchImplementation));
@@ -92,31 +93,51 @@ async function fetchNeteaseLyricsOnce(options, fetchImplementation, onCandidate)
   const requireWords = options.requireWordTiming || options.mode === "network";
   let fallback = null;
   let failure = null;
-  for (const best of ranked.filter(item => item.song.id).slice(0, 4)) {
-    let payload;
-    try {
-      payload = await fetchNeteaseNewLyrics(best.song.id, fetchImplementation);
-      if (payload?.code && payload.code !== 200) throw new Error("netease-lyrics-unavailable");
-    } catch (error) { failure = error; continue; }
+  let fallbackIndex = Infinity;
+  const candidates = ranked.filter(item => item.song.id).slice(0, 4);
+  const recordFailure = error => { failure = error; onFailure?.(error); };
+  const lookup = async (best, signal = null) => {
+    const fetchCandidate = signal ? (url, init) => fetchImplementation(url, { ...init,
+      signal: AbortSignal.any([init.signal, signal]) }) : fetchImplementation;
+    const payload = await fetchNeteaseNewLyrics(best.song.id, fetchCandidate);
+    if (payload?.code && payload.code !== 200) throw new Error("netease-lyrics-unavailable");
     const wordTimed = hasNativeWordTiming(payload?.yrc?.lyric);
     const text = wordTimed ? payload.yrc.lyric : payload?.lrc?.lyric || "";
-    if (!isUsableLyricText(text)) continue;
-    const result = {
+    if (!isUsableLyricText(text)) return null;
+    return {
       text,
       source: wordTimed ? "netease-word" : "netease-line",
       confidence: Math.round(best.score * 100),
       match: { title: best.title, artist: best.artist, album: best.album || "", duration: best.duration }
     };
-    onCandidate?.(result);
-    if (lyricTimingQuality(text) >= (requireWords ? 2 : 1)) return result;
-    if (lyricTimingQuality(text) > lyricTimingQuality(fallback?.text)) fallback = result;
+  };
+  const retain = (result, index) => {
+    const quality = lyricTimingQuality(result.text), previousQuality = lyricTimingQuality(fallback?.text);
+    if (quality > previousQuality || quality === previousQuality && index < fallbackIndex) {
+      fallback = result;
+      fallbackIndex = index;
+    }
+    onCandidate?.(result, index);
+  };
+  if (requireWords) {
+    const native = await findNativeWordCandidate(candidates, lookup, retain, recordFailure);
+    if (native) return native;
+  } else {
+    for (const [index, best] of candidates.entries()) {
+      try {
+        const result = await lookup(best);
+        if (!result) continue;
+        retain(result, index);
+        if (lyricTimingQuality(result.text) >= 1) return result;
+      } catch (error) { recordFailure(error); }
+    }
   }
   if (!fallback && failure) throw failure;
   return fallback;
 }
 
-async function fetchNeteaseLyrics(options, fetchImplementation = fetch, onCandidate = null) {
-  return fetchNeteaseLyricsOnce(options, fetchImplementation, onCandidate);
+async function fetchNeteaseLyrics(options, fetchImplementation = fetch, onCandidate = null, onFailure = null) {
+  return fetchNeteaseLyricsOnce(options, fetchImplementation, onCandidate, onFailure);
 }
 
 module.exports = {

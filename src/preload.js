@@ -83,6 +83,14 @@ contextBridge.exposeInMainWorld("medo", {
     return () => ipcRenderer.removeListener("window:maximized", listener);
   },
   closeWindow: () => ipcRenderer.send("window:close"),
+  getSleepTimer: () => ipcRenderer.invoke("app:sleep-timer:get"),
+  startSleepTimer: (minutes) => ipcRenderer.invoke("app:sleep-timer:start", minutes),
+  cancelSleepTimer: () => ipcRenderer.invoke("app:sleep-timer:cancel"),
+  onSleepTimer: (callback) => {
+    const listener = (_event, state) => callback(state);
+    ipcRenderer.on("app:sleep-timer", listener);
+    return () => ipcRenderer.removeListener("app:sleep-timer", listener);
+  },
   setCloseBehavior: (value) => ipcRenderer.send("app:set-close-behavior", value),
   setTrayEnabled: (enabled) => ipcRenderer.send("app:set-tray-enabled", Boolean(enabled)),
   setGlobalShortcuts: (settings) => ipcRenderer.send("app:set-global-shortcuts", settings),

@@ -1,5 +1,6 @@
 const { decryptQrc } = require("qrc-decoder");
 const { hasNativeWordTiming, lyricTimingQuality } = require("./lyrics-timing");
+const { findNativeWordCandidate } = require("./lyrics-candidates");
 const { normalizeLyricOptions, rankLyricCandidates, isUsableLyricText } = require("./lyrics-matching");
 
 const HEADERS = {
@@ -170,7 +171,7 @@ async function fetchLineLyricWithTranslation(songMid, fetchImplementation) {
   return { lyric: decoded.lyric, translation: alignQqTranslation(decoded.lyric, decoded.translation) };
 }
 
-async function fetchQqMusicLyricsOnce(options, fetchImplementation, onCandidate) {
+async function fetchQqMusicLyricsOnce(options, fetchImplementation, onCandidate, onFailure) {
   options = normalizeLyricOptions(options);
   const { title, artist } = options;
   if (!title) return null;
@@ -185,27 +186,43 @@ async function fetchQqMusicLyricsOnce(options, fetchImplementation, onCandidate)
   const requireWords = options.requireWordTiming || options.mode === "network";
   let fallback = null;
   let failure = null;
-  for (const best of ranked.slice(0, 4)) {
-    let qrcText = null;
-    let linePayload = null;
-    let text = null;
-    try { qrcText = await fetchQrcBySongId(best.song.id || best.song.songid, fetchImplementation); } catch (error) { failure = error; }
-    try { linePayload = qrcText ? null : await fetchLineLyricWithTranslation(best.song.mid || best.song.songmid, fetchImplementation); } catch (error) { failure = error; }
-    text = qrcText || linePayload?.lyric || null;
-    if (!isUsableLyricText(text)) continue;
-    const wordTimed = hasNativeWordTiming(text);
+  const recordFailure = error => { failure = error; onFailure?.(error); };
+  const candidates = ranked.slice(0, 4);
+  const makeResult = (best, text, linePayload = null) => {
     const result = {
       text,
-      source: wordTimed ? "qq-word" : "qq-line",
+      source: hasNativeWordTiming(text) ? "qq-word" : "qq-line",
       confidence: Math.round(best.score * 100),
       match: { title: best.title, artist: best.artists.join(" / "), album: best.album || "", duration: best.duration }
     };
-    // QRC carries the translation in a separate download; line lyrics carry it
-    // in the same payload, already aligned to the original timestamps.
     if (Array.isArray(linePayload?.translation) && linePayload.translation.some(Boolean)) {
       result.translation = linePayload.translation;
     }
-    onCandidate?.(result);
+    return result;
+  };
+  // A slow ordinary lyric download must not consume the word-search window
+  // before later matching recordings have had their QRC checked.
+  if (requireWords) {
+    const native = await findNativeWordCandidate(candidates, async (best, signal) => {
+      const fetchCandidate = (url, init) => fetchImplementation(url, { ...init,
+        signal: AbortSignal.any([init.signal, signal]) });
+      const text = await fetchQrcBySongId(best.song.id || best.song.songid, fetchCandidate);
+      return isUsableLyricText(text) ? makeResult(best, text) : null;
+    }, (found, index) => onCandidate?.(found, index), recordFailure);
+    if (native) return native;
+  }
+  for (const best of candidates) {
+    let qrcText = null;
+    let linePayload = null;
+    let text = null;
+    if (!requireWords) {
+      try { qrcText = await fetchQrcBySongId(best.song.id || best.song.songid, fetchImplementation); } catch (error) { recordFailure(error); }
+    }
+    try { linePayload = qrcText ? null : await fetchLineLyricWithTranslation(best.song.mid || best.song.songmid, fetchImplementation); } catch (error) { recordFailure(error); }
+    text = qrcText || linePayload?.lyric || null;
+    if (!isUsableLyricText(text)) continue;
+    const result = makeResult(best, text, linePayload);
+    onCandidate?.(result, candidates.indexOf(best));
     if (lyricTimingQuality(text) >= (requireWords ? 2 : 1)) return result;
     if (lyricTimingQuality(text) > lyricTimingQuality(fallback?.text)) fallback = result;
   }
@@ -213,8 +230,8 @@ async function fetchQqMusicLyricsOnce(options, fetchImplementation, onCandidate)
   return fallback;
 }
 
-async function fetchQqMusicLyrics(options, fetchImplementation = fetch, onCandidate = null) {
-  return fetchQqMusicLyricsOnce(options, fetchImplementation, onCandidate);
+async function fetchQqMusicLyrics(options, fetchImplementation = fetch, onCandidate = null, onFailure = null) {
+  return fetchQqMusicLyricsOnce(options, fetchImplementation, onCandidate, onFailure);
 }
 
 module.exports = {

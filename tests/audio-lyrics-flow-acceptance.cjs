@@ -172,9 +172,9 @@ async function main() {
         assert.equal(found.text, line);
         assert.equal(found.source, mode === 'later-qq' ? 'qq-line' : mode === 'netease' ? 'netease-line' : 'lrclib');
         const count = calls.length; await search({ title: 'Fixture', artist: 'Singer', duration: 120, mode: 'auto' }); assert.equal(calls.length, count);
-        assert.equal(Object.values(cache)[0].version, 8); cases.push({ mode, source: found.source, requests: count });
+        assert.equal(Object.values(cache)[0].version, LYRICS_CACHE_VERSION); cases.push({ mode, source: found.source, requests: count });
       }
-      assert.equal(LYRICS_CACHE_VERSION, 8); return { cases, cacheVersion: 8 };
+      return { cases, cacheVersion: LYRICS_CACHE_VERSION };
     });
 
     await scenario(4, 'Failed refresh retains lyrics/translations; cancellation and metadata prevent stale results', async () => {

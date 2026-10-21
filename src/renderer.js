@@ -102,6 +102,7 @@ let searchTimer = null;
 const lyricsCache = new Map();
 const lyricsRequests = new Map();
 const lyricRefreshProviders = new Map();
+let lyricRetryState = null;
 const automaticFolderScans = new Map();
 const folderScanTickets = new Map();
 let nextFolderScanTicket = 0;
@@ -1090,6 +1091,7 @@ function syncDesktopLyricLockSetting(locked) {
 
 function applyWordLyricsSetting(enabled, userInitiated = false) {
   wordLyricsEnabled = Boolean(enabled);
+  if (!wordLyricsEnabled || userInitiated) clearLyricRetry();
   localStorage.setItem("medo.wordLyricsEnabled", String(wordLyricsEnabled));
   if (userInitiated) localStorage.setItem("medo.wordLyricsPreferenceSet", "true");
   document.querySelectorAll(".word-lyrics-option").forEach((button) => {
@@ -1251,7 +1253,47 @@ function cacheLyricEntry(trackId, entry, track = tracks.find(item => item.id ===
   return entry;
 }
 
+function clearLyricRetry() {
+  clearTimeout(lyricRetryState?.timer);
+  lyricRetryState = null;
+}
+
+function scheduleLyricRetry(track, mode = null) {
+  const entry = lyricsCache.get(track.id);
+  if (!wordLyricsEnabled || tracks[currentIndex]?.id !== track.id ||
+      !entry?.wordTimingRequested || MedoLyricSync.hasWordLevelLines(entry.lines)) {
+    if (lyricRetryState?.trackId === track.id) clearLyricRetry();
+    return;
+  }
+  if (lyricsRequests.has(track.id) || !Number.isFinite(entry.retryAt)) return;
+  const metadataKey = lyricMetadataKey(track);
+  if (!lyricRetryState || lyricRetryState.trackId !== track.id || lyricRetryState.metadataKey !== metadataKey) {
+    clearLyricRetry();
+    lyricRetryState = { trackId: track.id, metadataKey, attempts: 0, timer: null, mode: mode || "auto" };
+  }
+  const state = lyricRetryState;
+  clearTimeout(state.timer);
+  state.timer = null;
+  if (state.attempts >= 3) return;
+  state.timer = setTimeout(() => {
+    state.timer = null;
+    if (lyricRetryState !== state) return;
+    if (!wordLyricsEnabled || tracks[currentIndex]?.id !== track.id || lyricMetadataKey(track) !== state.metadataKey) {
+      clearLyricRetry();
+      return;
+    }
+    if (lyricsRequests.has(track.id)) return;
+    if (lyricsCache.get(track.id)?.retryAt > Date.now()) {
+      scheduleLyricRetry(track);
+      return;
+    }
+    state.attempts++;
+    ensureLyrics(track, false, state.mode === "auto" ? null : state.mode);
+  }, Math.min(2147483647, Math.max(1, entry.retryAt - Date.now())));
+}
+
 function cancelPendingLyrics(exceptTrackId = null) {
+  if (!exceptTrackId || lyricRetryState?.trackId !== exceptTrackId) clearLyricRetry();
   let cancelled = false;
   for (const id of lyricsRequests.keys()) {
     if (id === exceptTrackId) continue;
@@ -1263,6 +1305,7 @@ function cancelPendingLyrics(exceptTrackId = null) {
 
 async function ensureLyrics(track, force = false, modeOverride = null) {
   if (!track) return;
+  if (force) clearLyricRetry();
   cancelPendingLyrics(track.id);
   const requestMode = modeOverride || "auto";
   const requireWordTiming = wordLyricsEnabled || requestMode === "network";
@@ -1280,10 +1323,14 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
   const existingRequest = lyricsRequests.get(track.id);
   const compatibleRequest = existingRequest && existingRequest.metadataKey === metadataKey &&
     (!requireWordTiming || existingRequest.wordTimingRequested === true);
-  if (!force && (compatibleCache || compatibleRequest)) return existingRequest;
+  if (!force && (compatibleCache || compatibleRequest)) {
+    scheduleLyricRetry(track);
+    return existingRequest;
+  }
   if (cachedLyrics && !compatibleCache && !previousLyrics) lyricsCache.delete(track.id);
   if (existingRequest) cancelPendingLyrics();
   if (metadataChanged) {
+    clearLyricRetry();
     lyricTranslations.delete(track.id);
     lyricTranslationRequests.delete(track.id);
   }
@@ -1293,7 +1340,9 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
     previousLyrics.retryAt = result?.retryAt || Date.now() + (result?.error ? 15000 : 60000);
     setBoundedCache(lyricsCache, track.id, previousLyrics);
     if (force && tracks[currentIndex]?.id === track.id) {
-      showActionFeedback(result?.error ? "歌词重新查找失败，已保留原歌词" : "未找到可用歌词，已保留原歌词");
+      showActionFeedback(result?.error ? "歌词重新查找失败，已保留原歌词" :
+        requireWordTiming && MedoLyricSync.hasWordLevelLines(previousLyrics.lines)
+          ? "未找到新的逐字歌词，已保留原歌词" : "未找到可用歌词，已保留原歌词");
     }
   };
   let request;
@@ -1321,7 +1370,7 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
       const parsed = parseLyrics(result?.text, track.duration);
       const previousIsWord = previousLyrics && MedoLyricSync.hasWordLevelLines(previousLyrics.lines);
       if (previousLyrics && (!parsed.lines.length ||
-          (!force && !modeOverride && previousIsWord && !MedoLyricSync.hasWordLevelLines(parsed.lines)))) {
+          ((requireWordTiming || !force && !modeOverride) && previousIsWord && !MedoLyricSync.hasWordLevelLines(parsed.lines)))) {
         retainPreviousLyrics(result);
         return;
       }
@@ -1362,6 +1411,7 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
       lyricsRequests.delete(track.id);
       if (tracks[currentIndex]?.id !== track.id) return;
       const loadedLyrics = lyricsCache.get(track.id);
+      scheduleLyricRetry(track, requestMode);
       window.medo.updateLyricsWindow({
         title: track.title,
         artist: track.artist,
@@ -3886,9 +3936,15 @@ document.querySelector("#open-playback-detail").addEventListener("click", () => 
   openPlaybackDetail();
 });
 document.querySelector("#back-button").addEventListener("click", goBack);
+function syncSidebarState() {
+  document.querySelector(".app-shell").classList.toggle("sidebar-collapsed", sidebarCollapsed);
+  document.querySelector(".menu-button").setAttribute("aria-expanded", String(!sidebarCollapsed));
+  document.querySelector(".side-search input").inert = sidebarCollapsed;
+  document.querySelector(".playlist-list").inert = sidebarCollapsed;
+}
 document.querySelector(".menu-button").addEventListener("click", () => {
   sidebarCollapsed = !sidebarCollapsed;
-  document.querySelector(".app-shell").classList.toggle("sidebar-collapsed", sidebarCollapsed);
+  syncSidebarState();
   localStorage.setItem("medo.sidebarCollapsed", String(sidebarCollapsed));
 });
 const sidebarResizer = document.querySelector("#sidebar-resizer");
@@ -4683,7 +4739,7 @@ removeRedundantMusicFolders();
 document.querySelector("#toggle-detail-track").classList.add("active");
 document.querySelector("#toggle-detail-queue").classList.add("active");
 updatePlayModeButton();
-document.querySelector(".app-shell").classList.toggle("sidebar-collapsed", sidebarCollapsed);
+syncSidebarState();
 document.documentElement.style.setProperty("--sidebar-width", `${sidebarWidth}px`);
 render();
 scheduleListeningCalendarRollover();

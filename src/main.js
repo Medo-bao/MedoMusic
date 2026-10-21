@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, globalShortcut, ipcMain, nativeImage, nativeTheme, Tray, Menu, protocol, screen, shell } = require("electron");
+const { app, BrowserWindow, dialog, globalShortcut, ipcMain, nativeImage, nativeTheme, powerMonitor, Tray, Menu, protocol, screen, shell } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const fsSync = require("node:fs");
@@ -17,6 +17,7 @@ const { attachWindowMaterial } = require("./window-material");
 const { createBackgroundImageStore } = require("./background-image-store");
 const { startupBounds, attachWindowScaling } = require("./window-scaling");
 const { createGlobalShortcutManager } = require("./global-shortcuts");
+const { createSleepTimer } = require("./sleep-timer");
 
 const WINDOWS_APP_USER_MODEL_ID = "com.medomusic.desktop";
 const WINDOWS_TRAY_GUID = "8c33d388-8b65-4e7c-a54d-1af447cd8bfa";
@@ -49,6 +50,15 @@ let myFireflyExtension = null;
 const myFireflyPending = new Map();
 let closeBehavior = "background";
 let isQuitting = false;
+const sleepTimer = createSleepTimer({
+  onExpire() {
+    isQuitting = true;
+    app.quit();
+  },
+  onChange(state) {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send("app:sleep-timer", state);
+  }
+});
 let metadataCache = null;
 let metadataCacheLoad = null;
 const pendingCoverPaths = new Set();
@@ -835,6 +845,10 @@ app.whenReady().then(async () => {
     await shell.openExternal("https://github.com/Medo-bao/MedoMusic");
     return true;
   });
+  ipcMain.handle("app:sleep-timer:get", () => sleepTimer.getState());
+  ipcMain.handle("app:sleep-timer:start", (_event, minutes) => sleepTimer.start(minutes));
+  ipcMain.handle("app:sleep-timer:cancel", () => sleepTimer.cancel());
+  powerMonitor.on("resume", sleepTimer.check);
   ipcMain.handle("app:check-update", async (_event, options) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
@@ -1347,6 +1361,7 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  sleepTimer.cancel();
   globalShortcuts.stop();
   closeMusicFolderWatchers();
   for (const pending of myFireflyPending.values()) {

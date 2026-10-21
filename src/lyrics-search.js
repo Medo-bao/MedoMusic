@@ -4,7 +4,7 @@ const { hasNativeWordTiming, lyricTimingQuality } = require("./lyrics-timing");
 const { resolveOnlineLyricProviders, removeLiveQualifier, removeEnglishSuffixFromChineseTitle } = require("./lyrics-source-priority");
 const { normalizeLyricOptions, normalizeLyricTag, rankLyricCandidates, isUsableLyricText } = require("./lyrics-matching");
 
-const LYRICS_CACHE_VERSION = 8;
+const LYRICS_CACHE_VERSION = 10;
 const EMPTY_RESULT = { text: "", source: null };
 
 async function withinDeadline(task, parentSignal, timeoutMs) {
@@ -44,18 +44,24 @@ function createOnlineLyricsSearch({
 
     let fallback = null;
     let fallbackTitleIndex = Infinity;
+    let fallbackProviderIndex = Infinity;
+    let fallbackCandidateIndex = Infinity;
     const targetQuality = requireWordTiming ? 2 : 1;
     // Manual word refresh still exhausts the word sources, but its line
     // fallback follows the same provider/candidate order as a line lookup.
     // Reuse the lines already fetched instead of starting a second search.
     const keepLineSourceOrder = requireWordTiming && options.force;
-    const retainFallback = (found, titleIndex) => {
+    const retainFallback = (found, titleIndex, providerIndex = providers.length, candidateIndex = Infinity) => {
       const quality = lyricTimingQuality(found.text), previousQuality = lyricTimingQuality(fallback?.text);
+      const earlierCandidate = providerIndex < fallbackProviderIndex ||
+        providerIndex === fallbackProviderIndex && candidateIndex < fallbackCandidateIndex;
       if (quality > previousQuality || quality === previousQuality &&
           (titleIndex < fallbackTitleIndex || titleIndex === fallbackTitleIndex &&
-            !keepLineSourceOrder && (Number(found.confidence) || 0) > (Number(fallback?.confidence) || 0))) {
+            (keepLineSourceOrder ? earlierCandidate : (Number(found.confidence) || 0) > (Number(fallback?.confidence) || 0)))) {
         fallback = found;
         fallbackTitleIndex = titleIndex;
+        fallbackProviderIndex = providerIndex;
+        fallbackCandidateIndex = candidateIndex;
       }
     };
     let networkFailed = false;
@@ -63,23 +69,53 @@ function createOnlineLyricsSearch({
     let result;
     try {
       result = await withinDeadline(async searchSignal => {
-        const runProvider = async task => {
+        const runProvider = async (task, wordSource = false) => {
           try {
             return await withinDeadline(async providerSignal => {
               const lyricFetch = async (url, init = {}) => {
-                searchSignal.throwIfAborted();
-                providerSignal.throwIfAborted();
-                if (++requests > maxRequests) throw new Error("lyrics-request-limit");
-                const requestSignal = AbortSignal.any([providerSignal, AbortSignal.timeout(requestTimeoutMs),
-                  ...(init.signal ? [init.signal] : [])]);
-                try {
-                  const response = await fetchImplementation(url, { ...init, signal: requestSignal });
-                  if (!response.ok && response.status !== 404) networkFailed = true;
-                  return response;
-                } catch (error) {
-                  if (!signal?.aborted) networkFailed = true;
-                  throw error;
-                }
+                const canRetry = wordSource && !String(url).includes("fcg_query_lyric_new");
+                let attempts = 0;
+                const reportFailure = () => { if (!signal?.aborted && !init.signal?.aborted) networkFailed = true; };
+                const canTryAgain = () => canRetry && attempts < 2 && requests < maxRequests &&
+                  !providerSignal.aborted && !searchSignal.aborted && !init.signal?.aborted;
+                const send = async () => {
+                  for (;;) {
+                    searchSignal.throwIfAborted();
+                    providerSignal.throwIfAborted();
+                    init.signal?.throwIfAborted();
+                    if (++requests > maxRequests) throw new Error("lyrics-request-limit");
+                    attempts++;
+                    const requestSignal = AbortSignal.any([providerSignal, AbortSignal.timeout(requestTimeoutMs),
+                      ...(init.signal ? [init.signal] : [])]);
+                    try {
+                      const response = await fetchImplementation(url, { ...init, signal: requestSignal });
+                      if (!response.ok && response.status !== 404) reportFailure();
+                      if (response.status >= 500 && canTryAgain()) continue;
+                      return response;
+                    } catch (error) {
+                      reportFailure();
+                      if (canTryAgain()) continue;
+                      throw error;
+                    }
+                  }
+                };
+                let response = await send();
+                // Keep the same retry allowance and deadline through body reads.
+                const read = async method => {
+                  try {
+                    return await response[method]();
+                  } catch (error) {
+                    reportFailure();
+                    if (!canTryAgain()) throw error;
+                    response = await send();
+                    if (!response.ok) throw new Error(`lyrics-body-http-${response.status}`);
+                    return read(method);
+                  }
+                };
+                return {
+                  ok: response.ok, status: response.status,
+                  text: () => read("text"), json: () => read("json")
+                };
               };
               return await task(lyricFetch, providerSignal);
             }, searchSignal, providerTimeoutMs);
@@ -132,40 +168,51 @@ function createOnlineLyricsSearch({
         const chineseTitle = removeEnglishSuffixFromChineseTitle(options.title);
         const titles = [...new Set([options.title, removeLiveQualifier(options.title), chineseTitle,
           chineseTitle && removeLiveQualifier(chineseTitle)].filter(Boolean))];
+        const findPublicFallback = async (searchOptions, titleIndex) => {
+          const found = await runProvider((lyricFetch, providerSignal) => searchPublicLyrics(searchOptions, lyricFetch,
+            found => { if (!providerSignal.aborted) retainFallback(found, titleIndex); }));
+          if (found) retainFallback(found, titleIndex);
+        };
         // Exhaust original metadata before relaxing Live qualifiers or bilingual title suffixes.
         for (const [titleIndex, title] of titles.entries()) {
           searchSignal.throwIfAborted();
           const searchOptions = { ...options, title, requireWordTiming };
-          const captureCandidate = found => retainFallback(found, titleIndex);
-          for (const provider of providers) {
+          for (const [providerIndex, provider] of providers.entries()) {
             searchSignal.throwIfAborted();
+            const captureCandidate = (found, candidateIndex) => retainFallback(found, titleIndex, providerIndex, candidateIndex);
             const found = await runProvider((lyricFetch, providerSignal) => {
-              const publish = found => { if (!providerSignal.aborted) captureCandidate(found); };
-              return provider === "qq" ? fetchQqMusicLyrics(searchOptions, lyricFetch, publish)
-                : fetchNeteaseLyrics(searchOptions, lyricFetch, publish);
-            });
-            if (!found || !isUsableLyricText(found.text)) continue;
-            captureCandidate(found);
-            if (lyricTimingQuality(found.text) >= targetQuality) return fallback;
+              const publish = (found, index) => { if (!providerSignal.aborted) captureCandidate(found, index); };
+              const failed = () => { if (!signal?.aborted) networkFailed = true; };
+              return provider === "qq" ? fetchQqMusicLyrics(searchOptions, lyricFetch, publish, failed)
+                : fetchNeteaseLyrics(searchOptions, lyricFetch, publish, failed);
+            }, requireWordTiming);
+            if (found && isUsableLyricText(found.text)) captureCandidate(found);
+            if (lyricTimingQuality(fallback?.text) >= targetQuality) return fallback;
           }
           // LRCLIB can improve plain text, but cannot improve timed line lyrics.
-          if (lyricTimingQuality(fallback?.text) < 1) {
-            const found = await runProvider((lyricFetch, providerSignal) => searchPublicLyrics(searchOptions, lyricFetch,
-              found => { if (!providerSignal.aborted) captureCandidate(found); }));
-            if (found) {
-              captureCandidate(found);
-              if (lyricTimingQuality(found.text) >= targetQuality) return fallback;
-            }
+          if (!requireWordTiming && lyricTimingQuality(fallback?.text) < 1) {
+            await findPublicFallback(searchOptions, titleIndex);
+            if (lyricTimingQuality(fallback?.text) >= targetQuality) return fallback;
+          }
+        }
+        // Line-only services come after every word-capable title/source pass.
+        if (requireWordTiming && lyricTimingQuality(fallback?.text) < 1) {
+          for (const [titleIndex, title] of titles.entries()) {
+            searchSignal.throwIfAborted();
+            await findPublicFallback({ ...options, title, requireWordTiming }, titleIndex);
+            if (lyricTimingQuality(fallback?.text) >= 1) break;
           }
         }
         return fallback || (networkFailed ? { ...EMPTY_RESULT, error: "network" } : { ...EMPTY_RESULT });
       }, signal, totalTimeoutMs);
     } catch {
+      networkFailed = true;
       result = fallback || { ...EMPTY_RESULT, error: "timeout" };
     }
     if (signal?.aborted) return { ...EMPTY_RESULT, cancelled: true };
     const lifetime = result.text
-      ? requireWordTiming && !hasNativeWordTiming(result.text) ? 60000 : 30 * 86400000
+      ? requireWordTiming && !hasNativeWordTiming(result.text)
+        ? networkFailed ? 15000 : 60000 : 30 * 86400000
       : result.error ? 15000 : 120000;
     const timestamp = now();
     delete cache[cacheKey];

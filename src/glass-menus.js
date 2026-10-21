@@ -1,6 +1,7 @@
 /* Theme-aware menus shared by track, playlist and select controls. */
 window.MedoMenus = (() => {
   let dismiss = null;
+  let activeAnchor = null;
   const action = (label, name) => ({ label, value: { action: name } });
   const targets = names => [
     action('创建新播放列表', 'create-playlist'),
@@ -9,6 +10,7 @@ window.MedoMenus = (() => {
   ];
   function show(items, anchor) {
     dismiss?.();
+    activeAnchor = anchor;
     return new Promise(resolve => {
       const controller = new AbortController();
       const signal = controller.signal;
@@ -21,6 +23,7 @@ window.MedoMenus = (() => {
         done = true; controller.abort();
         panels.forEach(panel => panel.remove());
         dismiss = null;
+        activeAnchor = null;
         if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
         resolve(value);
       };
@@ -100,6 +103,8 @@ window.MedoMenus = (() => {
       const root = create(items, pointer ? anchor.clientX : rect?.left || 8, pointer ? anchor.clientY : rect?.bottom || 46);
       (root.querySelector('button.checked:not(:disabled)') || root.querySelector('button:not(:disabled)') || root).focus();
       document.addEventListener('pointerdown', event => {
+        // Let the select click toggle its own menu before outside dismissal clears it.
+        if (event.button === 0 && anchor instanceof HTMLSelectElement && anchor.contains(event.target)) return;
         if (!panels.some(panel => panel.contains(event.target))) finish(null);
       }, { capture: true, signal });
       window.addEventListener('blur', () => finish(null), { signal });
@@ -128,6 +133,7 @@ window.MedoMenus = (() => {
   document.querySelectorAll('select').forEach(select => {
     const open = async () => {
       if (select.disabled) return;
+      if (activeAnchor === select) { dismiss?.(); return; }
       const value = await show([...select.options].map(option => ({
         label: option.textContent, value: option.value, disabled: option.disabled, checked: option.selected,
         contextMenu: select.id === 'sound-preset' ? event => option.dispatchEvent(new MouseEvent('contextmenu', {
