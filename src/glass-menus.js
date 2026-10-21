@@ -109,6 +109,7 @@ window.MedoMenus = (() => {
       }, { capture: true, signal });
       window.addEventListener('blur', () => finish(null), { signal });
       window.addEventListener('resize', () => finish(null), { signal });
+      if (host instanceof HTMLDialogElement) host.addEventListener('close', () => finish(null), { signal });
       document.addEventListener('scroll', event => {
         if (!panels.some(panel => panel.contains(event.target))) finish(null);
       }, { capture: true, signal });
@@ -150,5 +151,5 @@ window.MedoMenus = (() => {
       if (['Enter', ' ', 'ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); open(); }
     });
   });
-  return { show, playlist, track, chooseTarget };
+  return { show, playlist, track, chooseTarget, close: () => dismiss?.() };
 })();

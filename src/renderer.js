@@ -172,6 +172,7 @@ function saveSoundPresetRecords() {
 }
 
 let selectionActionsHideTimer = null;
+let selectionActionsShowFrame = null;
 let volumeBubbleHideTimer = null;
 let volumePointerActive = false;
 let dragAutoScrollFrame = null;
@@ -2139,12 +2140,23 @@ function setSelectionActionsVisible(visible) {
   document.querySelector("#remove-selected").hidden = !playlists.some(playlist => playlist.name === currentPlaylist);
   const actions = document.querySelector("#selection-actions");
   clearTimeout(selectionActionsHideTimer);
+  cancelAnimationFrame(selectionActionsShowFrame);
+  selectionActionsShowFrame = null;
+  actions.inert = !visible;
   if (visible) {
     actions.hidden = false;
-    requestAnimationFrame(() => actions.classList.add("visible"));
+    selectionActionsShowFrame = requestAnimationFrame(() => {
+      selectionActionsShowFrame = null;
+      actions.classList.add("visible");
+    });
     return;
   }
   actions.classList.remove("visible");
+  if (currentView === "player" || currentView === "settings") {
+    actions.hidden = true;
+    return;
+  }
+  if (actions.hidden) return;
   selectionActionsHideTimer = setTimeout(() => {
     if (!actions.classList.contains("visible")) actions.hidden = true;
   }, 220);
@@ -2396,11 +2408,18 @@ function reorderTrack(draggedId, targetId) {
   render();
 }
 
+function closePageMenus() {
+  window.MedoMenus.close();
+  const picker = document.querySelector("#listening-month-picker");
+  if (picker.matches(":popover-open")) picker.hidePopover();
+}
+
 function applyViewShellState({ preservePlaybackDetailActive = false } = {}) {
   persistNavigation();
   updateMiniCoverState();
   const settingsOpen = currentView === "settings";
   const playbackDetailOpen = currentView === "player";
+  document.querySelector(".sidebar").inert = playbackDetailOpen;
   const main = document.querySelector("main");
   main.classList.toggle("settings-open", settingsOpen);
   main.classList.toggle("playlist-open", Boolean(currentPlaylist || currentCollection || currentView === "favorites") && !settingsOpen);
@@ -2424,6 +2443,7 @@ function render() {
   updatePlaylistSaveControls();
   const main = document.querySelector("main");
   const key = JSON.stringify([currentView, currentPlaylist, currentSort, currentCollection]);
+  if (key !== renderedPageKey) closePageMenus();
   if (renderedPageKey !== null) pageScrollPositions.set(renderedPageKey, main.scrollTop);
   const savedScrollTop = query !== renderedSearch ? 0 : (pageScrollPositions.get(key) || 0);
   renderedPageKey = key;
@@ -3646,6 +3666,7 @@ function openPlaybackDetail() {
 
 async function closePlaybackDetail() {
   if (currentView !== "player") return;
+  closePageMenus();
   const transitionId = ++playbackTransitionId;
   const main = document.querySelector("main");
   main.classList.add("playback-detail-closing");

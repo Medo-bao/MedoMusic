@@ -399,7 +399,7 @@ nav { display: grid; flex: 0 0 auto; }
 .sidebar .playlist-favorite-slot .playlist-item-name,
 .sidebar .playlist-favorite-slot .playlist-count {
   opacity: 1;
-  visibility: visible;
+  visibility: inherit;
   transition: opacity 140ms ease 60ms, visibility 0s;
 }
 .sidebar .playlist-title-arrow { transition: opacity 140ms ease 60ms, visibility 0s, transform var(--motion-medium) var(--ease-out), color var(--motion-fast) ease; }
