@@ -7,7 +7,7 @@ const progress = document.querySelector("#progress");
 const volume = document.querySelector("#volume");
 const favoriteButton = document.querySelector("#favorite-button");
 const missingArt = "../Groove/Assets/MissingAlbumArt.jpg";
-const { completeWordTimings, resolveYrcWordStart } = window.MedoLyricsTiming;
+const { completeWordTimings, resolveYrcWordStart, parseLyricMetadataLine, parseLyricInformationLine } = window.MedoLyricsTiming;
 
 function updatePlayButtonState(playing) {
   document.body.classList.toggle("is-playing", playing);
@@ -1110,7 +1110,6 @@ function applyWordLyricsSetting(enabled, userInitiated = false) {
 function parseLyrics(text, duration = 0) {
   let offset = 0;
   const lines = [];
-  const metadataLine = /^\[(ar|ti|al|by|re|ve|length):/i;
   // Offline TTML carries syllable timing, background vocals and per-line
   // translations in one document; when it is present every other branch is
   // skipped because the parser already produced the final line list.
@@ -1121,24 +1120,20 @@ function parseLyrics(text, duration = 0) {
     lines.push(...ttml.lines.filter(line => line.text));
     return finishLyricLines(lines, duration, ttml);
   }
-  for (const rawLine of String(text || "").replace(/^\uFEFF/, "").split(/\r?\n/)) {
-    if (/^\s*\{"t":\d+,"c":\[/.test(rawLine)) {
-      try {
-        const information = JSON.parse(rawLine.trim());
-        const text = Array.isArray(information.c)
-          ? information.c.map((item) => String(item?.tx || "")).join("").trim()
-          : "";
-        const start = Number(information.t) / 1000 + offset / 1000;
-        if (text && Number.isFinite(start)) lines.push({ start, text, information: true });
-      } catch {}
+  for (const rawLine of String(text || "").replace(/^\uFEFF/, "").split(/\r\n?|\n/)) {
+    const information = parseLyricInformationLine(rawLine);
+    if (information) {
+      if (information.text) lines.push({ start: information.start + offset / 1000,
+        text: information.text, information: true });
       continue;
     }
-    const offsetMatch = rawLine.match(/^\[offset:([+-]?\d+)\]/i);
-    if (offsetMatch) {
-      offset = Number(offsetMatch[1]) || 0;
+    const metadata = parseLyricMetadataLine(rawLine);
+    if (metadata) {
+      if (metadata.offset !== undefined && /^[+-]?\d+$/.test(metadata.offset.trim())) {
+        offset = Number(metadata.offset) || 0;
+      }
       continue;
     }
-    if (metadataLine.test(rawLine)) continue;
     const yrcLine = rawLine.match(/^\[(\d+),(\d+)\](.*)$/);
     if (yrcLine) {
       const rawLineStart = Number(yrcLine[1]) / 1000;

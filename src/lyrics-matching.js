@@ -1,3 +1,4 @@
+const { parseLyricMetadataLine, parseLyricInformationLine } = require("./lyrics-timing");
 const UNKNOWN_TAG = /^(?:未知(?:艺术家|歌手|专辑)?|unknown(?:\s+(?:artist|album))?|n\/a)$/iu;
 const VERSION_TAGS = [
   ["live", /\blive\b|现场|演唱会/iu],
@@ -222,8 +223,10 @@ function isUsableLyricText(value) {
     return Boolean(ttml?.lines.some(line => isUsableLyricText(line.text)));
   }
   if (!text || /^(?:<!doctype|<html|<\?xml)/iu.test(text)) return false;
-  return text.split(/\r?\n/u).some(line => {
-    const content = line.replace(/^\[(?:ar|ti|al|by|offset|length|re|ve):[^\]]*\]\s*$/iu, "")
+  return text.split(/\r\n?|\n/u).some(line => {
+    if (parseLyricMetadataLine(line)) return false;
+    const information = parseLyricInformationLine(line);
+    const content = (information ? information.text : line)
       .replace(/\[[\d:.,]+\]|<\d[\d:.,]*>|\([\d,]+\)/gu, "").trim();
     return content && !/^(?:纯音乐[，,]?请欣赏|此歌曲为没有填词的纯音乐[，,]?请您欣赏[。.]?|instrumental|no lyrics)$/iu.test(content);
   });

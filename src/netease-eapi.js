@@ -72,7 +72,7 @@ async function searchNeteaseSongs(options, fetchImplementation = fetch) {
   const { title, artist } = normalizeLyricOptions(options);
   if (!title) return [];
   const query = new URLSearchParams({
-    s: `${title} ${artist}`.trim(), type: "1", offset: "0", total: "true", limit: "12"
+    s: `${title} ${artist}`.trim(), type: "1", offset: "0", total: "true", limit: "30"
   });
   const response = await fetchImplementation(`https://music.163.com/api/cloudsearch/pc?${query}`, {
     headers: { Referer: "https://music.163.com/", "User-Agent": USER_AGENT },
@@ -87,21 +87,19 @@ async function searchNeteaseSongs(options, fetchImplementation = fetch) {
 
 async function fetchNeteaseLyricsOnce(options, fetchImplementation, onCandidate, onFailure) {
   options = normalizeLyricOptions(options);
-  const rankSongs = songs => rankLyricCandidates(rankNeteaseSongs(songs, options), options);
-  let ranked = rankSongs(await searchNeteaseSongs(options, fetchImplementation));
-  if (!ranked.length && options.artist) ranked = rankSongs(await searchNeteaseSongs({ ...options, artist: "" }, fetchImplementation));
+  const rankSongs = songs => rankLyricCandidates(rankNeteaseSongs(songs, options).filter(item => item.song.id), options);
   const requireWords = options.requireWordTiming || options.mode === "network";
   let fallback = null;
   let failure = null;
   let fallbackIndex = Infinity;
-  const candidates = ranked.filter(item => item.song.id).slice(0, 4);
+  const checked = new Set();
   const recordFailure = error => { failure = error; onFailure?.(error); };
   const lookup = async (best, signal = null) => {
     const fetchCandidate = signal ? (url, init) => fetchImplementation(url, { ...init,
       signal: AbortSignal.any([init.signal, signal]) }) : fetchImplementation;
     const payload = await fetchNeteaseNewLyrics(best.song.id, fetchCandidate);
     if (payload?.code && payload.code !== 200) throw new Error("netease-lyrics-unavailable");
-    const wordTimed = hasNativeWordTiming(payload?.yrc?.lyric);
+    const wordTimed = hasNativeWordTiming(payload?.yrc?.lyric) && isUsableLyricText(payload.yrc.lyric);
     const text = wordTimed ? payload.yrc.lyric : payload?.lrc?.lyric || "";
     if (!isUsableLyricText(text)) return null;
     return {
@@ -119,17 +117,37 @@ async function fetchNeteaseLyricsOnce(options, fetchImplementation, onCandidate,
     }
     onCandidate?.(result, index);
   };
-  if (requireWords) {
-    const native = await findNativeWordCandidate(candidates, lookup, retain, recordFailure);
-    if (native) return native;
-  } else {
-    for (const [index, best] of candidates.entries()) {
-      try {
-        const result = await lookup(best);
-        if (!result) continue;
-        retain(result, index);
-        if (lyricTimingQuality(result.text) >= 1) return result;
-      } catch (error) { recordFailure(error); }
+  for (const [pass, artist] of (options.artist ? [options.artist, ""] : [""]).entries()) {
+    if (pass && lyricTimingQuality(fallback?.text) >= 1) break;
+    let ranked;
+    try { ranked = rankSongs(await searchNeteaseSongs({ ...options, artist }, fetchImplementation)); }
+    catch (error) {
+      if (!pass) throw error;
+      recordFailure(error);
+      break;
+    }
+    const candidates = [];
+    for (const best of ranked) {
+      const id = best.song.id;
+      if (!id || checked.has(String(id))) continue;
+      checked.add(String(id));
+      candidates.push(best);
+      if (candidates.length === 4) break;
+    }
+    const offset = pass * 4;
+    if (requireWords) {
+      const native = await findNativeWordCandidate(candidates, lookup,
+        (found, index) => retain(found, offset + index), recordFailure);
+      if (native) return native;
+    } else {
+      for (const [index, best] of candidates.entries()) {
+        try {
+          const result = await lookup(best);
+          if (!result) continue;
+          retain(result, offset + index);
+          if (lyricTimingQuality(result.text) >= 1) return result;
+        } catch (error) { recordFailure(error); }
+      }
     }
   }
   if (!fallback && failure) throw failure;

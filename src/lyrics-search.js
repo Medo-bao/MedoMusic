@@ -4,17 +4,25 @@ const { hasNativeWordTiming, lyricTimingQuality } = require("./lyrics-timing");
 const { resolveOnlineLyricProviders, removeLiveQualifier, removeEnglishSuffixFromChineseTitle } = require("./lyrics-source-priority");
 const { normalizeLyricOptions, normalizeLyricTag, rankLyricCandidates, isUsableLyricText } = require("./lyrics-matching");
 
-const LYRICS_CACHE_VERSION = 10;
+const LYRICS_CACHE_VERSION = 12;
 const EMPTY_RESULT = { text: "", source: null };
 
 async function withinDeadline(task, parentSignal, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new DOMException("Lyrics search timed out", "TimeoutError")), timeoutMs);
   const signal = parentSignal ? AbortSignal.any([parentSignal, controller.signal]) : controller.signal;
+  let onAbort;
+  const aborted = new Promise((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
   try {
     signal.throwIfAborted();
-    return await task(signal);
+    // Body readers and provider cleanup can fail to settle after aborting.
+    // Enforce the deadline while late results remain guarded by this signal.
+    return await Promise.race([task(signal), aborted]);
   } finally {
+    signal.removeEventListener("abort", onAbort);
     clearTimeout(timer);
   }
 }

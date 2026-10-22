@@ -3,6 +3,43 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root) root.MedoLyricsTiming = api;
 })(typeof window !== "undefined" ? window : globalThis, () => {
+  // Recognize complete file attributes, including adjacent fields. Restrict
+  // names so section labels and bracketed text in lyrics stay visible.
+  function parseLyricMetadataLine(value) {
+    let remaining = String(value || "").trim();
+    if (!remaining) return null;
+    const fields = {};
+    while (remaining) {
+      const field = remaining.match(/^\[(ar|ti|al|au|by|la|re|ve|length|offset|kana|id|hash|sign|total|language|tool):/iu);
+      if (!field) return null;
+      let depth = 1;
+      let end = field[0].length;
+      for (; end < remaining.length; end++) {
+        if (remaining[end] === "[") depth++;
+        else if (remaining[end] === "]" && --depth === 0) break;
+      }
+      if (depth) return null;
+      fields[field[1].toLowerCase()] = remaining.slice(field[0].length, end);
+      remaining = remaining.slice(end + 1).trim();
+    }
+    return fields;
+  }
+
+  function parseLyricInformationLine(value) {
+    const text = String(value || "").trim();
+    if (!text.startsWith("{")) return null;
+    try {
+      const data = JSON.parse(text);
+      if (typeof data?.t !== "number" || !Number.isFinite(data.t) || !Object.hasOwn(data, "c")) return null;
+      return { start: data.t / 1000,
+        text: Array.isArray(data.c) ? data.c.map(item => typeof item?.tx === "string" ? item.tx : "").join("").trim() : "" };
+    } catch {
+      // A damaged recognizable credits wrapper must not become visible JSON.
+      return /"t"\s*:\s*-?\d/.test(text) && /"c"\s*:\s*\[/.test(text)
+        ? { start: 0, text: "" } : null;
+    }
+  }
+
   function fallbackLineEnd(line, duration) {
     const start = Number(line?.start) || 0;
     if (Number.isFinite(duration) && duration > start) return duration;
@@ -101,5 +138,6 @@
     });
   }
 
-  return { completeWordTimings, resolveYrcWordStart, hasNativeWordTiming, hasTtmlWordTiming, lyricTimingQuality, standardizeNativeWords };
+  return { completeWordTimings, resolveYrcWordStart, hasNativeWordTiming, hasTtmlWordTiming,
+    lyricTimingQuality, standardizeNativeWords, parseLyricMetadataLine, parseLyricInformationLine };
 });
