@@ -44,7 +44,7 @@ async function showPlaylistContextMenu(playlistName, favoritesList, event) {
     const insertAt = currentId ? Math.max(0, remaining.indexOf(currentId) + 1) : 0;
     remaining.splice(insertAt, 0, ...validIds);
     playbackQueueIds = remaining;
-    schedulePersist();
+    schedulePersist(["queue", "playback"]);
     if (queueWasEmpty) {
       const firstIndex = tracks.findIndex((track) => track.id === validIds[0]);
       if (firstIndex >= 0) playTrack(firstIndex, true);
@@ -55,7 +55,7 @@ async function showPlaylistContextMenu(playlistName, favoritesList, event) {
     const target = playlists.find((playlist) => playlist.name === result.playlist);
     if (!target) return;
     if (!addTracksToPlaylist(target, validIds)) return;
-    persist();
+    persist(["tracks", "playlists", "playback"]);
     renderPlaylists();
   } else if (result.action === "rename") {
     renamePlaylist(playlistName);
@@ -84,7 +84,7 @@ async function choosePlaylist() {
     item.classList.toggle("active", item.dataset.sort === "songs");
   });
   setActiveNav(null);
-  persist();
+  persist(["tracks", "playlists", "playback"]);
   render();
 }
 
@@ -104,7 +104,7 @@ async function addSongsToCurrentPlaylist() {
     .filter((id, index, values) => values.indexOf(id) === index);
   const added = playlist.trackIds.filter(id => !previousIds.has(id)).length;
   showActionFeedback(`已添加 ${added} 首到“${playlist.name}”，重复跳过 ${newTracks.length - added} 首`);
-  persist();
+  persist(["tracks", "playlists", "playback"]);
   render();
 }
 
@@ -164,7 +164,7 @@ async function renamePlaylist(playlistName) {
     track.playlists = track.playlists.map((name) => name === previousName ? nextName : name);
   });
   if (currentPlaylist === previousName) currentPlaylist = nextName;
-  persist();
+  persist(["tracks", "playlists", "playback"]);
   render();
 }
 
@@ -186,7 +186,7 @@ async function deletePlaylist(playlistName) {
     currentView = "library";
     setActiveNav(document.querySelector('[data-view="library"]'));
   }
-  persist();
+  persist(["tracks", "playlists", "playback"]);
   render();
 }
 
@@ -225,7 +225,7 @@ async function createPlaylistWithTracks(ids) {
   const playlist = { name, path: null, trackIds: [] };
   playlists.push(playlist);
   addTracksToPlaylist(playlist, trackIds);
-  persist();
+  persist(["tracks", "playlists", "playback"]);
   renderPlaylists();
   showActionFeedback(`已创建“${name}”，并添加 ${trackIds.length} 首歌曲`);
   return playlist;
@@ -273,7 +273,7 @@ async function savePlaybackQueueAsPlaylist() {
     if (!queueIds.includes(track.id)) return;
     track.playlists = [...new Set([...(track.playlists || []), name])];
   });
-  persist();
+  persist(["tracks", "playlists", "playback"]);
   renderPlaylists();
 }
 
@@ -288,7 +288,7 @@ async function migratePlaylistOrder() {
     changed = true;
   }
   if (changed) {
-    persist();
+    persist(["tracks", "playlists", "playback"]);
     render();
   }
 }
@@ -311,7 +311,7 @@ function createPlaylistFromExtension(name, trackIds = []) {
   tracks.forEach((track) => {
     if (ids.includes(track.id)) track.playlists = [...new Set([...(track.playlists || []), normalized])];
   });
-  persist();
+  persist(["tracks", "playlists", "playback"]);
   render();
   return playlists.at(-1);
 }
@@ -334,7 +334,7 @@ function updatePlaylistFromExtension(currentName, changes = {}) {
   playlist.name = nextName;
   playlist.trackIds = nextIds;
   if (currentPlaylist === currentName) currentPlaylist = nextName;
-  persist();
+  persist(["tracks", "playlists", "playback"]);
   render();
   return playlist;
 }
@@ -347,7 +347,7 @@ function deletePlaylistFromExtension(name) {
     track.playlists = (track.playlists || []).filter((value) => value !== name);
   });
   if (currentPlaylist === name) currentPlaylist = null;
-  persist();
+  persist(["tracks", "playlists", "playback"]);
   render();
   return { deleted: name };
 }

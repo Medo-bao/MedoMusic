@@ -121,6 +121,10 @@ let lyricDragStartOffset = 0;
 let lyricDraggedDistance = 0;
 let lyricFollowAnimation = null;
 let renderedLyricsState = null;
+let renderedLyricElements = [];
+let lastDesktopLyricsState = null;
+let lyricPresentationSuspended = true;
+const lyricWordMetrics = new WeakMap();
 let lyricPointerInside = false;
 let detailTrackVisible = true;
 let detailQueueVisible = true;
@@ -201,7 +205,9 @@ function ensureAudioProcessing() {
   if (!outputAudioContext) {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass) return;
-    outputAudioContext = new AudioContextClass({ latencyHint: "playback" });
+    // Transport controls need a short output buffer. Keep the prepared context
+    // running during pauses so resuming never waits for the audio device to wake.
+    outputAudioContext = new AudioContextClass({ latencyHint: "interactive" });
     outputAudioSource = outputAudioContext.createMediaElementSource(audio);
     outputFadeGain = outputAudioContext.createGain();
     outputAudioSource.connect(outputFadeGain).connect(outputAudioContext.destination);
@@ -253,7 +259,7 @@ function applyPlaybackFadeSetting(enabled) {
   });
   if (!playbackFadeEnabled) {
     const shouldPause = playbackPausePending;
-    resetPlaybackFade();
+    resetPlaybackFade(shouldPause || audio.paused ? 0 : 1);
     if (shouldPause) audio.pause();
   }
 }
@@ -1048,7 +1054,7 @@ function applyDesktopLyricColors(primary = desktopLyricPrimaryColor, secondary =
     localStorage.setItem("medo.desktopLyricPrimaryColor", desktopLyricPrimaryColor);
     localStorage.setItem("medo.desktopLyricSecondaryColor", desktopLyricSecondaryColor);
   }
-  window.medo.updateLyricsWindow({
+  sendLyricsWindowState({
     colorsOnly: true,
     primary: desktopLyricPrimaryColor,
     secondary: desktopLyricSecondaryColor
@@ -1408,7 +1414,7 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
       if (tracks[currentIndex]?.id !== track.id) return;
       const loadedLyrics = lyricsCache.get(track.id);
       scheduleLyricRetry(track, requestMode);
-      window.medo.updateLyricsWindow({
+      sendLyricsWindowState({
         title: track.title,
         artist: track.artist,
         album: track.album,
@@ -1584,6 +1590,7 @@ function renderLyrics(track) {
       Math.abs(nearest.offsetTop + nearest.offsetHeight / 2 + oldOffset) ? line : nearest, null);
   const anchorPosition = anchor ? anchor.offsetTop + anchor.offsetHeight / 2 + oldOffset : 0;
   renderedLyricsState = state;
+  renderedLyricElements = [];
   if (!preserveInspection) {
     clearTimeout(lyricInspectionRestoreTimer);
     lyricInspectionActive = false;
@@ -1616,7 +1623,7 @@ function renderLyrics(track) {
     retry.textContent = "重新查找";
     retry.onclick = () => { ensureLyrics(track, true); renderLyrics(track); };
     container.querySelector(".lyrics-empty").append(retry);
-    window.medo.updateLyricsWindow({
+    sendLyricsWindowState({
       title: track.title,
       artist: track.artist,
       album: track.album,
@@ -1680,6 +1687,7 @@ function renderLyrics(track) {
       item.append(background);
     }
     container.append(item);
+    renderedLyricElements.push(item);
   });
   if (preserveInspection) {
     const lines = [...container.querySelectorAll(".lyric-line[data-start]")];
@@ -1697,7 +1705,12 @@ function updateWordHighlight(line, element) {
   if (!line?.words?.length || !element) return;
   const karaoke = element.querySelector(".lyric-karaoke");
   if (!karaoke) return;
-  const totalCharacters = Math.max(1, line.words.reduce((total, word) => total + [...word.text].length, 0));
+  let metrics = lyricWordMetrics.get(line.words);
+  if (!metrics) {
+    const lengths = line.words.map(word => [...word.text].length);
+    metrics = { lengths, total: Math.max(1, lengths.reduce((sum, value) => sum + value, 0)) };
+    lyricWordMetrics.set(line.words, metrics);
+  }
   let completedCharacters = 0;
   for (let index = 0; index < line.words.length; index += 1) {
     const word = line.words[index];
@@ -1705,24 +1718,38 @@ function updateWordHighlight(line, element) {
     const nextStart = Number(line.words[index + 1]?.start);
     const end = Number(word.end) > start ? Number(word.end) : Number.isFinite(nextStart) ? nextStart : start + .48;
     const progress = Math.max(0, Math.min(1, (audio.currentTime + .04 - start) / Math.max(.08, end - start)));
-    const length = [...word.text].length;
+    const length = metrics.lengths[index];
     if (progress >= 1) completedCharacters += length;
     else {
       completedCharacters += length * progress;
       break;
     }
   }
-  element.style.setProperty("--line-progress", `${Math.max(0, Math.min(100, completedCharacters / totalCharacters * 100))}%`);
+  const value = `${Math.max(0, Math.min(100, completedCharacters / metrics.total * 100))}%`;
+  if (element.style.getPropertyValue("--line-progress") !== value) element.style.setProperty("--line-progress", value);
+}
+
+function sendLyricsWindowState(payload) {
+  lastDesktopLyricsState = null;
+  window.medo.updateLyricsWindow(payload);
 }
 
 function updateDesktopLyrics(track, lyrics, index) {
   const line = lyrics.lines[index];
+  const translation = lyricTranslationEnabled && !hiddenLyricTranslations.has(track.id)
+    ? lyricTranslationFor(track.id, lyrics, index) : null;
+  const state = [track.id, lyrics, index, wordLyricsEnabled, translation, desktopLyricPrimaryColor,
+    desktopLyricSecondaryColor, track.title, track.artist, track.album, !audio.paused];
+  if (lastDesktopLyricsState?.every((value, offset) => value === state[offset])) {
+    window.medo.updateLyricsWindow({ positionOnly: true, position: audio.currentTime, playing: !audio.paused });
+    return;
+  }
+  lastDesktopLyricsState = state;
   window.medo.updateLyricsWindow({
     current: line?.text,
     words: wordLyricsEnabled && MedoLyricSync.hasNativeLineTiming(line) ? line.words.map((word) => ({ start: word.start, end: word.end, text: word.text })) : [],
     position: audio.currentTime,
-    currentTranslation: lyricTranslationEnabled && !hiddenLyricTranslations.has(track.id)
-      ? lyricTranslationFor(track.id, lyrics, index) : null,
+    currentTranslation: translation,
     subline: line?.subline?.text || null,
     next: lyrics.lines[index + 1]?.text,
     title: track.title,
@@ -1739,8 +1766,9 @@ function animateLyricFollow(container, active) {
   const target = `translateY(${-active.offsetTop - active.offsetHeight / 2}px)`;
   const liveTransform = getComputedStyle(container).transform;
   lyricFollowAnimation?.cancel();
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  if (lyricPresentationSuspended || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
     container.style.transform = target;
+    lyricPresentationSuspended = false;
     return;
   }
   container.style.transform = target;
@@ -1765,19 +1793,23 @@ function updateLyricsAtTime() {
   const track = tracks[currentIndex];
   const lyrics = track && lyricsCache.get(track.id);
   if (!lyrics?.synced || !lyrics.lines.length) return;
-  let index = -1;
-  for (let i = 0; i < lyrics.lines.length; i += 1) {
-    if (lyrics.lines[i].start > audio.currentTime + 0.08) break;
-    index = i;
+  let low = 0, high = lyrics.lines.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (lyrics.lines[middle].start <= audio.currentTime + .08) low = middle + 1;
+    else high = middle;
   }
-  const elements = [...document.querySelectorAll("#lyrics-lines .lyric-line")];
+  const index = low - 1;
+  updateDesktopLyrics(track, lyrics, index);
+  if (backgroundMode || currentView !== "player") { lyricPresentationSuspended = true; return; }
+  const container = document.querySelector("#lyrics-lines");
+  if (renderedLyricElements[0]?.parentElement !== container) renderedLyricElements = [...container.querySelectorAll(".lyric-line")];
+  const elements = renderedLyricElements;
   if (index === activeLyricIndex) {
     updateWordHighlight(lyrics.lines[index], elements[index]);
-    updateDesktopLyrics(track, lyrics, index);
     return;
   }
   activeLyricIndex = index;
-  const container = document.querySelector("#lyrics-lines");
   elements.forEach((element, itemIndex) => {
     element.classList.toggle("active", itemIndex === index);
     element.classList.toggle("past", itemIndex < index);
@@ -1785,7 +1817,6 @@ function updateLyricsAtTime() {
     if (itemIndex !== index) element.style.setProperty("--line-progress", "0%");
   });
   const active = elements[index];
-  updateDesktopLyrics(track, lyrics, index);
   if (active && !lyricInspectionActive) {
     animateLyricFollow(container, active);
     updateWordHighlight(lyrics.lines[index], active);
@@ -1800,19 +1831,23 @@ function visibleTracks() {
     ? selectedPlaylist.trackIds
       .map((id) => tracksById.get(id))
       .filter(Boolean)
-    : [...tracks];
+    : currentView === "now" ? playbackQueueIds.map(id => tracksById.get(id)).filter(Boolean)
+      : currentView === "recent" ? recent.map(id => tracksById.get(id)).filter(Boolean) : [...tracks];
 
+  const recentIds = new Set(recent);
+  const queueIds = new Set(playbackQueueIds);
   result = result.filter((track) => {
     if (track.transient && !currentPlaylist && currentView !== "now") return false;
     if (currentPlaylist && !selectedPlaylist?.trackIds?.length && !track.playlists?.includes(currentPlaylist)) return false;
-    if (currentView === "recent" && !recent.includes(track.id)) return false;
-    if (currentView === "now" && !playbackQueueIds.includes(track.id)) return false;
+    if (currentView === "recent" && !recentIds.has(track.id)) return false;
+    if (currentView === "now" && !queueIds.has(track.id)) return false;
     if (currentView === "favorites" && !favorites.has(track.id)) return false;
     if (currentCollection) {
       const value = currentCollection.type === "artists" ? (track.artist || "未知艺术家") : (track.album || "未知专辑");
       if (value !== currentCollection.name) return false;
       if (currentCollection.format && String(track.format || "").toUpperCase() !== currentCollection.format) return false;
     }
+    if (!query) return true;
     return `${track.title} ${track.artist || ""} ${track.album} ${(track.playlists || []).join(" ")}`
       .toLowerCase().includes(query);
   });
@@ -1871,7 +1906,7 @@ async function loadMetadata(track) {
       track.sampleRate = metadata.sampleRate || null;
       track.bitsPerSample = metadata.bitsPerSample || null;
     }
-    schedulePersist();
+    schedulePersist("tracks");
     const collectionIdentityChanged =
       (currentSort === "artists" && previousArtist !== track.artist) ||
       (currentSort === "albums" && previousAlbum !== track.album);
@@ -2046,7 +2081,7 @@ function attachPlaylistDrag(button, playlistName) {
             const [moved] = playlists.splice(sourceIndex, 1);
             const targetIndex = playlists.findIndex((playlist) => playlist.name === targetName);
             playlists.splice(Math.max(0, targetIndex), 0, moved);
-            persist();
+            persist("playlists");
           }
         }
       }
@@ -2541,10 +2576,10 @@ function renderPage(savedScrollTop) {
 
   if (currentView === "playlists") {
     trackList.className = "track-list playlist-overview-list";
+    const playlistOverviewIndex = new Map(tracks.map(track => [track.id, track]));
     const items = playlists.map((playlist) => {
-      const firstTrack = playlist.trackIds
-        ?.map((trackId) => tracks.find((track) => track.id === trackId))
-        .find(Boolean);
+      const firstId = playlist.trackIds?.find(id => playlistOverviewIndex.has(id));
+      const firstTrack = playlistOverviewIndex.get(firstId);
       return {
         name: playlist.name,
         count: playlist.trackIds?.length || 0,
@@ -2806,14 +2841,14 @@ function renderPage(savedScrollTop) {
         const queueIndex = Math.max(-1, playbackQueueIds.indexOf(tracks[currentIndex]?.id));
         playbackQueueIds.splice(queueIndex + 1, 0, track.id);
         showActionFeedback("已安排为下一首播放");
-        schedulePersist();
+        schedulePersist(["queue", "playback"]);
         if (queueWasEmpty) playTrack(actualIndex, true);
       } else if (result.action === "add-to-queue") {
         const queueWasEmpty = !playbackQueueIds.some((id) => tracks.some((item) => item.id === id));
         playbackQueueIds = playbackQueueIds.filter((id) => id !== track.id);
         playbackQueueIds.push(track.id);
         showActionFeedback("已添加到正在播放");
-        schedulePersist();
+        schedulePersist(["queue", "playback"]);
         if (queueWasEmpty) playTrack(actualIndex, true);
       } else if (result.action === "create-playlist") {
         await createPlaylistWithTracks([track.id]);
@@ -3099,7 +3134,7 @@ function attachQueueDrag(button, trackId) {
           if (from >= 0 && to >= 0) {
             playbackQueueIds.splice(from, 1);
             playbackQueueIds.splice(to, 0, trackId);
-            persist();
+            persist(["queue", "playback"]);
           }
         }
         cleanup();
@@ -3205,7 +3240,7 @@ function renderPlaybackDetail() {
 function toggleFavorite(id = tracks[currentIndex]?.id) {
   if (!id) return;
   favorites.has(id) ? favorites.delete(id) : favorites.add(id);
-  schedulePersist();
+  schedulePersist("favorites");
   updateFavoriteButton();
   renderPlaylists();
   document.querySelectorAll(".track-row").forEach((row) => {
@@ -3287,7 +3322,7 @@ function setFavoriteFromExtension(trackId, favorite) {
   const shouldFavorite = favorite !== false;
   if (shouldFavorite) favorites.add(trackId);
   else favorites.delete(trackId);
-  persist();
+  persist("favorites");
   updateFavoriteButton();
   renderPlaylists();
   return extensionTrack(track);
@@ -3358,7 +3393,7 @@ async function handleMyFireflyCommand(payload = {}) {
       } else {
         throw new Error("unsupported-control-action");
       }
-      persist();
+      persist(["playback", "settings"]);
       return extensionPlaybackState();
     }
     default:
@@ -3706,7 +3741,7 @@ async function closePlaybackDetail() {
       { duration: 260, easing: "cubic-bezier(.22,1,.36,1)" }
     );
   });
-  persist();
+  persist("playback");
 }
 
 function animateViewSurface() {
@@ -3756,7 +3791,7 @@ async function choosePlaylistCover() {
   const playlist = playlists.find((item) => item.name === currentPlaylist);
   if (!playlist) return;
   playlist.cover = cover;
-  persist();
+  persist("playlists");
   renderPlaylistHero(visibleTracks());
 }
 
@@ -3785,7 +3820,7 @@ document.querySelector("#recent-play-count-sort").addEventListener("click", (eve
   recentSortByPlays = !recentSortByPlays;
   event.currentTarget.classList.toggle("active", recentSortByPlays);
   event.currentTarget.setAttribute("aria-pressed", String(recentSortByPlays));
-  persist();
+  persist("settings");
   render();
   animateContentChange();
 });
@@ -3800,7 +3835,7 @@ document.querySelector("#detail-clear-queue").addEventListener("click", (event) 
   shuffleHistoryIndex = -1;
   lastPreviousRestartAt = 0;
   lastPreviousRestartTrackId = null;
-  persist();
+  persist(["queue", "playback"]);
   closePlaybackDetail();
 });
 document.querySelector("#detail-refresh-lyrics").addEventListener("click", async (event) => {
@@ -3843,7 +3878,7 @@ function queueSelectedTracks(playNext) {
   playbackQueueIds = remaining;
   selectedTrackIds.clear();
   multiSelectionMode = false;
-  persist();
+  persist(["queue", "playback"]);
   render();
 }
 document.querySelector("#next-selected").addEventListener("click", () => queueSelectedTracks(true));
@@ -4178,7 +4213,7 @@ document.querySelector("#volume-button").addEventListener("click", () => {
   audio.muted = !audio.muted;
   updateMuteButton();
   window.medo.setTrayMuted(audio.muted);
-  schedulePersist();
+  schedulePersist("playback");
 });
 window.medo.onLyricsWindowVisibility((visible) => {
   document.querySelector("#desktop-lyrics-button").classList.toggle("active", visible);
@@ -4580,7 +4615,7 @@ document.addEventListener("keydown", (event) => {
     applyOutputVolume();
     updateVolumeDisplay();
     showVolumeBubble(true);
-    schedulePersist();
+    schedulePersist("playback");
     return;
   }
   if (!audio.src || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
@@ -4592,7 +4627,7 @@ document.addEventListener("keydown", (event) => {
   updateRangeGradient(progress, audio.duration ? audio.currentTime / audio.duration : 0);
   document.querySelector("#current-time").textContent = formatTime(audio.currentTime);
   updateLyricsAtTime();
-  schedulePersist();
+  schedulePersist("playback");
 });
 
 audio.addEventListener("play", () => {
@@ -4613,27 +4648,28 @@ audio.addEventListener("ratechange", accumulateListeningTime);
 });
 audio.addEventListener("pause", () => {
   if (!audio.paused) return;
-  resetPlaybackFade();
+  resetPlaybackFade(0);
   if (switchingPlaybackGeneration !== 0) return;
   updatePlayButtonState(false);
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
   activeLyricIndex = -1;
   updateLyricsAtTime();
-  schedulePersist();
+  schedulePersist("playback");
 });
 audio.addEventListener("timeupdate", () => {
   accumulateListeningTime();
-  if (backgroundMode) updateLyricsAtTime();
-  if (backgroundMode && performance.now() - lastBackgroundUiUpdate < 1000) return;
-  lastBackgroundUiUpdate = performance.now();
+  updateLyricsAtTime();
+
   if (performance.now() - lastPlaybackStateSave > 5000) {
     lastPlaybackStateSave = performance.now();
     persistPlaybackState();
   }
-  progress.value = audio.duration ? (audio.currentTime / audio.duration) * 100 : 0;
-  updateRangeGradient(progress, audio.duration ? audio.currentTime / audio.duration : 0);
-  document.querySelector("#current-time").textContent = formatTime(audio.currentTime);
-  if (!backgroundMode) updateLyricsAtTime();
+  if (!backgroundMode) {
+    progress.value = audio.duration ? (audio.currentTime / audio.duration) * 100 : 0;
+    updateRangeGradient(progress, audio.duration ? audio.currentTime / audio.duration : 0);
+    const time = document.querySelector("#current-time"), value = formatTime(audio.currentTime);
+    if (time.textContent !== value) time.textContent = value;
+  }
   if ("mediaSession" in navigator && audio.duration && performance.now() - lastMediaSessionUpdate > 1000) {
     lastMediaSessionUpdate = performance.now();
     try {
@@ -4671,7 +4707,7 @@ volume.addEventListener("input", () => {
   applyOutputVolume();
   updateVolumeDisplay();
   showVolumeBubble(!volumePointerActive);
-  schedulePersist();
+  schedulePersist("playback");
 });
 volume.addEventListener("pointerdown", () => {
   volumePointerActive = true;
@@ -4696,7 +4732,11 @@ window.addEventListener("beforeunload", persist);
 function updateBackgroundMode() {
   backgroundMode = document.hidden || !nativeWindowVisible;
   document.body.classList.toggle("background-mode", backgroundMode);
-  if (backgroundMode) coverAtmosphere.finish();
+  if (backgroundMode) {
+    coverAtmosphere.finish();
+    lyricPresentationSuspended = true;
+    lyricFollowAnimation?.finish();
+  }
   if (!backgroundMode) {
     lastBackgroundUiUpdate = 0;
     updateListeningTimeDisplay();
@@ -4788,10 +4828,12 @@ window.medo.onTrayCommand(({ command, value }) => {
     ensureAudioProcessing();
     applyOutputVolume();
     updateVolumeDisplay();
+    schedulePersist("playback");
   } else if (command === "toggle-mute") {
     audio.muted = !audio.muted;
     updateMuteButton();
     window.medo.setTrayMuted(audio.muted);
+    schedulePersist("playback");
   } else if (command === "set-mode") {
     playMode = value;
     if (playMode === "shuffle") {
@@ -4800,7 +4842,7 @@ window.medo.onTrayCommand(({ command, value }) => {
       shuffleHistoryIds = [];
       shuffleHistoryIndex = -1;
     }
-    persist();
+    persist("settings");
     updatePlayModeButton();
   } else if (command === "desktop-lyric-size") {
     applyDesktopLyricSize(value);

@@ -51,7 +51,11 @@
       "THIRD_PARTY_NOTICES.md",
       "package.json",
       "!node_modules/koffi/{lib/native,vendor}/**/*.{h,hh,hpp,c,cc,cpp}",
-      "!node_modules/pako/dist/*.js"
+      "!node_modules/pako/dist/*.js",
+      "!node_modules/**/*.map",
+      "!node_modules/**/*.d.ts",
+      "!node_modules/**/{README,readme,CHANGELOG,HISTORY}*",
+      "!node_modules/koffi/doc/**"
     ],
     "extraResources": [
       {

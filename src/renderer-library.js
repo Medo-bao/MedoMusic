@@ -38,11 +38,29 @@ function isCurrentFolderScan(scan) {
     musicFolders.some(item => normalizedWindowsPath(item) === scan.key);
 }
 
-async function scanCurrentFolder(folder) {
+const folderScanTasks = new Map();
+
+function scanCurrentFolder(folder, changed = false) {
+  const key = normalizedWindowsPath(folder);
+  const running = folderScanTasks.get(key);
+  if (running) {
+    if (!isCurrentFolderScan(running.scan)) return running.promise.then(() => scanCurrentFolder(folder, changed));
+    if (changed) running.again = true;
+    return running.promise;
+  }
   const scan = beginFolderScan(folder);
-  if (!scan) return null;
-  const result = await window.medo.scanFolder(folder).catch(() => null);
-  return isCurrentFolderScan(scan) ? result : null;
+  if (!scan) return Promise.resolve(null);
+  const task = { scan, again: false, promise: null };
+  task.promise = (async () => {
+    let result;
+    do {
+      task.again = false;
+      result = await window.medo.scanFolder(folder).catch(() => null);
+    } while (task.again && isCurrentFolderScan(scan));
+    return isCurrentFolderScan(scan) ? result : null;
+  })().finally(() => { if (folderScanTasks.get(key) === task) folderScanTasks.delete(key); });
+  folderScanTasks.set(key, task);
+  return task.promise;
 }
 
 function scheduleAutomaticFolderScan(folder) {
@@ -52,7 +70,7 @@ function scheduleAutomaticFolderScan(folder) {
   clearTimeout(automaticFolderScans.get(normalized));
   automaticFolderScans.set(normalized, setTimeout(async () => {
     automaticFolderScans.delete(normalized);
-    const result = await scanCurrentFolder(managedFolder);
+    const result = await scanCurrentFolder(managedFolder, true);
     if (result) applyFolderScan(result);
   }, 500));
 }
@@ -227,7 +245,7 @@ function applyFolderScan(result, commit = true) {
 }
 
 async function rescanFolder(folder) {
-  const result = await scanCurrentFolder(folder);
+  const result = await scanCurrentFolder(folder, true);
   if (result) applyFolderScan(result);
 }
 
@@ -238,7 +256,7 @@ async function refreshMusicLibrary() {
   button.textContent = "正在刷新…";
   try {
     for (const folder of [...musicFolders]) {
-      const result = await scanCurrentFolder(folder);
+      const result = await scanCurrentFolder(folder, true);
       if (result) applyFolderScan(result, false);
     }
     tracks.forEach((track) => {
@@ -266,9 +284,8 @@ async function rebuildMusicLibraryIndex() {
     const batches = [];
     let failedFolderCount = 0;
     for (const folder of [...musicFolders]) {
-      const scan = beginFolderScan(folder);
-      if (!scan) continue;
-      const result = await window.medo.scanFolder(folder).catch(() => null);
+      const result = await scanCurrentFolder(folder, true);
+      const scan = { key: normalizedWindowsPath(folder), ticket: folderScanTickets.get(normalizedWindowsPath(folder)) };
       if (!isCurrentFolderScan(scan)) continue;
       if (!result) {
         failedFolderCount += 1;

@@ -306,7 +306,9 @@ function resumePlayback() {
 function pausePlayback() {
   if (audio.paused || playbackPausePending) return;
   if (!playbackFadeEnabled || !outputFadeGain || outputAudioContext.state !== "running" || audio.ended) {
-    resetPlaybackFade();
+    // Gate the final output as well as the media element; queued media frames
+    // and effect tails must not keep sounding after an immediate pause.
+    resetPlaybackFade(0);
     audio.pause();
     return;
   }
@@ -317,7 +319,7 @@ function pausePlayback() {
   playbackFadePauseTimer = setTimeout(() => {
     if (!playbackPausePending) return;
     audio.pause();
-    resetPlaybackFade();
+    resetPlaybackFade(0);
   }, 240);
 }
 
@@ -365,7 +367,7 @@ async function playTrack(index, preserveQueue = false, preservePreviousNavigatio
   }
   if (!playbackQueueIds.length) playbackQueueIds = [tracks[index].id];
   const track = tracks[index];
-  window.medo.updateLyricsWindow({ noLyrics: false, playing: true });
+  sendLyricsWindowState({ noLyrics: false, playing: true });
   const resolvedSource = await window.medo.resolveMediaSource(track.path).catch(() => null);
   if (generation !== playbackGeneration) return;
   index = tracks.findIndex((candidate) => candidate.id === track.id);
@@ -396,7 +398,7 @@ async function playTrack(index, preserveQueue = false, preservePreviousNavigatio
     });
   }
   switchingPlaybackGeneration = generation;
-  resetPlaybackFade();
+  resetPlaybackFade(0);
   stopListeningTime();
   audio.pause();
   if (generation !== playbackGeneration) return;
@@ -457,7 +459,7 @@ async function playTrack(index, preserveQueue = false, preservePreviousNavigatio
   } catch {
     // Visual metadata, artwork and lyrics are isolated from audio playback.
   }
-  schedulePersist();
+  schedulePersist(["tracks", "recent", "queue", "playback"]);
   if (currentView === "recent" || currentView === "now") {
     render();
   } else {
@@ -481,7 +483,7 @@ function togglePlayback() {
     if (first) {
       if (!playbackQueueIds.length) {
         playbackQueueIds = [first.id];
-        persist();
+        persist(["queue", "playback"]);
       }
       playTrack(tracks.findIndex((track) => track.id === first.id), true);
     }
@@ -497,10 +499,12 @@ function togglePlayback() {
 }
 
 function clearCurrentPlayback() {
+  lastDesktopLyricsState = null;
+  renderedLyricElements = [];
   cancelPendingLyrics();
   playbackGeneration += 1;
   switchingPlaybackGeneration = 0;
-  resetPlaybackFade();
+  resetPlaybackFade(0);
   stopListeningTime();
   audio.pause();
   audio.removeAttribute("src");
@@ -547,7 +551,7 @@ function nextTrack(direction = 1) {
       if (!queueIds.includes(candidate.id)) {
         queueIds.splice(0, 0, candidate.id);
         playbackQueueIds = queueIds;
-        persist();
+        persist(["queue", "playback"]);
       }
       return playTrack(tracks.findIndex((track) => track.id === candidate.id), true);
     }
@@ -564,7 +568,7 @@ function nextTrack(direction = 1) {
       document.querySelector("#current-time").textContent = formatTime(0);
       lastPreviousRestartAt = now;
       lastPreviousRestartTrackId = currentId;
-      schedulePersist();
+      schedulePersist("playback");
       return;
     }
     continuingPreviousNavigation = true;
