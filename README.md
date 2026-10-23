@@ -4,8 +4,8 @@
 
 
 ## 歌词和桌面歌词
-<img width="1920" height="1230" alt="image" src="https://github.com/user-attachments/assets/03370f22-8cef-4a20-bc28-904c36708e08" />
-<img width="1920" height="1230" alt="image" src="https://github.com/user-attachments/assets/c44d3396-0306-469d-863b-7d7a565360fe" />
+<img width="1920" height="1230" alt="image" src="https://github.com/user-attachments/assets/03370f22-8cef-4a20-bc28-904c36708e08" /><img width="1920" height="1230" alt="image" src="https://github.com/user-attachments/assets/c44d3396-0306-469d-863b-7d7a565360fe" />
+
 
 
 ## 自定义背景和透明玻璃
