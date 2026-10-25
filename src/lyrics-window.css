@@ -90,6 +90,17 @@ body { margin: 0; overflow: hidden; background: transparent; font-family: "Segoe
   background-clip: text;
 }
 #desktop-next-lyric.current-translation:has(.desktop-karaoke-base) { background: none; }
+/* Background vocal line from Apple TTML duets: italic and warmer so it reads
+   as a second voice instead of the next lyric. */
+#desktop-next-lyric.background-vocal {
+  opacity: .92;
+  font-style: italic;
+  background: linear-gradient(90deg,
+    color-mix(in srgb, var(--lyric-secondary, #d934ff) 55%, white) 0%,
+    color-mix(in srgb, var(--lyric-primary, #2864ff) 65%, white) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+}
 .dragging .lyrics-island { cursor: grabbing; }
 .locked.pointer-inside .lyrics-island { opacity: 0; }
 .paused .lyrics-island { opacity: 0; }

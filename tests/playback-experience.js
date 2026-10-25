@@ -74,7 +74,17 @@ module.exports = async function checkPlaybackExperience(page) {
     await tick();
     reports.singleShuffle = playCalls;
     audio.play = originalPlay;
-    lyricsCache.set("Solo", { synced: true, lines: Array.from({ length: 30 }, (_, i) => ({ start: i, text: `阅读歌词 ${i}` })) });
+    // A real cached entry carries metadataKey/retryAt/networkOnly; without them
+    // ensureLyrics() treats the seed as stale and replaces it mid-assertion.
+    const soloTrack = tracks[0];
+    lyricsCache.set("Solo", {
+      synced: true,
+      networkOnly: true,
+      level: "line",
+      metadataKey: lyricMetadataKey(soloTrack),
+      retryAt: Date.now() + 3600000,
+      lines: Array.from({ length: 30 }, (_, i) => ({ start: i, text: `阅读歌词 ${i}` }))
+    });
     renderedLyricsState = null;
     currentView = "player";
     render();

@@ -44,7 +44,7 @@ const {_electron}=require('playwright');const root=path.resolve(__dirname,'..');
     const entry=context.createGain(),observer=new AudioWorkletNode(context,'fx-observer',{numberOfInputs:3,channelCount:8,channelCountMode:'clamped-max',processorOptions:{control,sampleReference}});
     const marker=new AudioWorkletNode(context,'fx-marker',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[1]});marker.connect(observer,0,1);entry.connect(observer,0,2);
     observer.connect(context.destination);const engine=control?{update(){}}:MedoSound.create(context,entry,observer);if(control)entry.connect(observer);
-    const settings={enabled:true,clarity:4,bass:6,ambience:100,surround:100,dynamics:100,eq:[12,-12,12,-12,12,-12,12,-12,12,-12]};
+    const settings={enabled:true,clarity:100,bass:100,ambience:100,surround:100,dynamics:100,eq:[12,-12,12,-12,12,-12,12,-12,12,-12]};
     engine.update(settings);
     const formats=[2,8,1,6],sources=[];let playing=null,last=null,changes=0;
     const buffers=formats.map(channels=>{const buffer=context.createBuffer(channels,context.sampleRate,context.sampleRate);

@@ -19,7 +19,7 @@ async function run() {
       if (!metadata.cover) throw new Error('The fixture must have embedded album art');
       tracks = [{...metadata,id:'cover-protocol',path:musicPath,metadataLoaded:true}];
       currentIndex=0;currentView='player';playbackQueueIds=['cover-protocol'];
-      lyricsCache.set('cover-protocol',{networkOnly:true,synced:false,lines:[]});
+      lyricsCache.set('cover-protocol', {networkOnly:true,synced:false,lines:[]});
       applyTheme('light');render();
       const decoding = [];
       for (const cors of [false,true]) {

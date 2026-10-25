@@ -12,28 +12,42 @@ function writeStoredValue(key, value) {
   if (localStorage.getItem(key) !== String(value)) localStorage.setItem(key, value);
 }
 
-function persist() {
+const persistedSections = ["tracks", "playlists", "folders", "favorites", "recent", "queue", "settings", "playback"];
+const pendingPersistSections = new Set();
+
+function persist(sections = persistedSections) {
+  // beforeunload supplies an Event; a plain persist() remains a complete flush.
+  if (!Array.isArray(sections)) sections = typeof sections === "string" ? [sections] : persistedSections;
+  sections.forEach(section => pendingPersistSections.add(section));
+  clearTimeout(persistTimer);
+  persistTimer = null;
   persistNavigation();
-  const storedTracks = tracks
-    .filter((track) => !track.transient)
-    .map(({ transient, ...track }) => track);
-  writeStoredValue("medo.tracks", JSON.stringify(storedTracks));
-  writeStoredValue("medo.playlists", JSON.stringify(playlists));
-  writeStoredValue("medo.musicFolders", JSON.stringify(musicFolders));
-  writeStoredValue("medo.favorites", JSON.stringify([...favorites]));
-  writeStoredValue("medo.recent", JSON.stringify(recent));
-  writeStoredValue("medo.playStats", JSON.stringify(playStats));
-  writeStoredValue("medo.theme", theme);
-  writeStoredValue("medo.displayMode", displayMode);
-  const persistentTrackIds = new Set(storedTracks.map((track) => track.id));
-  writeStoredValue("medo.playbackQueue", JSON.stringify(
-    playbackQueueIds.filter((id) => persistentTrackIds.has(id))
-  ));
-  writeStoredValue("medo.librarySort", librarySort);
-  writeStoredValue("medo.recentSortByPlays", String(recentSortByPlays));
-  writeStoredValue("medo.sidebarCollapsed", String(sidebarCollapsed));
-  writeStoredValue("medo.playMode", playMode);
-  persistPlaybackState();
+  const changed = pendingPersistSections;
+  if (changed.has("tracks")) {
+    const storedTracks = tracks.filter(track => !track.transient).map(({ transient, ...track }) => track);
+    writeStoredValue("medo.tracks", JSON.stringify(storedTracks));
+  }
+  if (changed.has("playlists")) writeStoredValue("medo.playlists", JSON.stringify(playlists));
+  if (changed.has("folders")) writeStoredValue("medo.musicFolders", JSON.stringify(musicFolders));
+  if (changed.has("favorites")) writeStoredValue("medo.favorites", JSON.stringify([...favorites]));
+  if (changed.has("recent")) {
+    writeStoredValue("medo.recent", JSON.stringify(recent));
+    writeStoredValue("medo.playStats", JSON.stringify(playStats));
+  }
+  if (changed.has("queue") || changed.has("tracks")) {
+    const persistentTrackIds = new Set(tracks.filter(track => !track.transient).map(track => track.id));
+    writeStoredValue("medo.playbackQueue", JSON.stringify(playbackQueueIds.filter(id => persistentTrackIds.has(id))));
+  }
+  if (changed.has("settings")) {
+    writeStoredValue("medo.theme", theme);
+    writeStoredValue("medo.displayMode", displayMode);
+    writeStoredValue("medo.librarySort", librarySort);
+    writeStoredValue("medo.recentSortByPlays", String(recentSortByPlays));
+    writeStoredValue("medo.sidebarCollapsed", String(sidebarCollapsed));
+    writeStoredValue("medo.playMode", playMode);
+  }
+  if (changed.has("playback")) persistPlaybackState();
+  changed.clear();
 }
 
 function persistPlaybackState() {
@@ -66,13 +80,15 @@ function storeListeningDays(days) {
   }
 }
 
-function schedulePersist() {
+function schedulePersist(sections = persistedSections) {
+  if (typeof sections === "string") sections = [sections];
+  sections.forEach(section => pendingPersistSections.add(section));
   clearTimeout(persistTimer);
-  persistTimer = setTimeout(persist, 300);
+  persistTimer = setTimeout(() => persist([]), 300);
 }
 
 function persistNavigation() {
-  localStorage.setItem("medo.navigation", JSON.stringify({
+  writeStoredValue("medo.navigation", JSON.stringify({
     view: currentView === "player" ? viewBeforePlayer : currentView,
     playlist: currentPlaylist,
     sort: currentSort,

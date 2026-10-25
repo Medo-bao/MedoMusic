@@ -7,7 +7,7 @@ const progress = document.querySelector("#progress");
 const volume = document.querySelector("#volume");
 const favoriteButton = document.querySelector("#favorite-button");
 const missingArt = "../Groove/Assets/MissingAlbumArt.jpg";
-const { completeWordTimings, resolveYrcWordStart } = window.MedoLyricsTiming;
+const { completeWordTimings, resolveYrcWordStart, parseLyricMetadataLine, parseLyricInformationLine } = window.MedoLyricsTiming;
 
 function updatePlayButtonState(playing) {
   document.body.classList.toggle("is-playing", playing);
@@ -102,6 +102,7 @@ let searchTimer = null;
 const lyricsCache = new Map();
 const lyricsRequests = new Map();
 const lyricRefreshProviders = new Map();
+let lyricRetryState = null;
 const automaticFolderScans = new Map();
 const folderScanTickets = new Map();
 let nextFolderScanTicket = 0;
@@ -120,6 +121,10 @@ let lyricDragStartOffset = 0;
 let lyricDraggedDistance = 0;
 let lyricFollowAnimation = null;
 let renderedLyricsState = null;
+let renderedLyricElements = [];
+let lastDesktopLyricsState = null;
+let lyricPresentationSuspended = true;
+const lyricWordMetrics = new WeakMap();
 let lyricPointerInside = false;
 let detailTrackVisible = true;
 let detailQueueVisible = true;
@@ -137,15 +142,24 @@ let lastPreviousRestartAt = 0;
 let lastPreviousRestartTrackId = null;
 let desiredVolume = Number(volume.value);
 let outputAudioContext = null;
+let outputAudioSource = null;
 let outputFadeGain = null;
 let playbackFadeEnabled = localStorage.getItem("medo.playbackFadeEnabled") === "true";
 let playbackFadeEnvelope = null;
 let playbackPausePending = false;
 let playbackFadePauseTimer = null;
 let soundEngine = null;
+let soundInitialization = null;
+let soundFailure = null;
 let soundCompare = false;
-let soundSettings = MedoSound.normalize(loadJson("medo.sound", {preset:"flat"}));
+let soundSettings = MedoSound.fromStorage(loadJson("medo.sound", {preset:"flat"}));
 const soundPresetRecords = loadJson("medo.soundPresets", {});
+for (const record of Object.values(soundPresetRecords)) {
+  if (record?.settings) record.settings = MedoSound.fromStorage(record.settings);
+}
+localStorage.setItem("medo.soundPresets", JSON.stringify(soundPresetRecords));
+const storedSoundCustom = loadJson("medo.soundCustom", null);
+if (storedSoundCustom) localStorage.setItem("medo.soundCustom", JSON.stringify(MedoSound.fromStorage(storedSoundCustom)));
 const deletedSoundPresets = new Set(loadJson("medo.deletedSoundPresets", []));
 if (deletedSoundPresets.has(soundSettings.preset)) {
   soundSettings = MedoSound.normalize({...savedSoundPreset("flat"),preset:"flat",enabled:soundSettings.enabled});
@@ -155,13 +169,14 @@ function soundPresetSnapshot(settings) {
   return JSON.stringify(values);
 }
 function savedSoundPreset(id) {
-  return soundPresetRecords[id]?.settings || (id === "custom" ? loadJson("medo.soundCustom", {}) : MedoSound.presets[id]);
+  return soundPresetRecords[id]?.settings || (id === "custom" ? MedoSound.fromStorage(loadJson("medo.soundCustom", {})) : MedoSound.presets[id]);
 }
 function saveSoundPresetRecords() {
   localStorage.setItem("medo.soundPresets", JSON.stringify(soundPresetRecords));
 }
 
 let selectionActionsHideTimer = null;
+let selectionActionsShowFrame = null;
 let volumeBubbleHideTimer = null;
 let volumePointerActive = false;
 let dragAutoScrollFrame = null;
@@ -190,20 +205,38 @@ function ensureAudioProcessing() {
   if (!outputAudioContext) {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass) return;
-    outputAudioContext = new AudioContextClass({ latencyHint: "playback" });
-    const source = outputAudioContext.createMediaElementSource(audio);
+    // Transport controls need a short output buffer. Keep the prepared context
+    // running during pauses so resuming never waits for the audio device to wake.
+    outputAudioContext = new AudioContextClass({ latencyHint: "interactive" });
+    outputAudioSource = outputAudioContext.createMediaElementSource(audio);
     outputFadeGain = outputAudioContext.createGain();
-    source.connect(outputFadeGain).connect(outputAudioContext.destination);
-    MedoSound.prepare(outputAudioContext).then(() => {
-      source.disconnect(outputFadeGain);
-      soundEngine = MedoSound.create(outputAudioContext, source, outputFadeGain);
-      soundEngine.update(soundSettings, soundCompare, true);
-    }).catch(error => {
-      console.error('Sound processing initialization failed', error);
+    outputAudioSource.connect(outputFadeGain).connect(outputAudioContext.destination);
+  }
+  if (!soundEngine && !soundInitialization && (!soundFailure || soundSettings.enabled)) {
+    soundFailure = null;
+    const restoreOriginalAudio = error => {
+      soundEngine?.dispose();
+      soundEngine = null;
+      // Web Audio deduplicates an existing connection; this also covers a
+      // failure before the initial dry connection was removed.
+      outputAudioSource.connect(outputFadeGain);
       soundSettings.enabled = false;
+      soundCompare = false;
+      soundFailure = '声音增强暂不可用，已恢复原声，可重新开启重试';
+      console.error('Sound processing failed', error);
       updateSoundSettings();
-      document.querySelector('#sound-status').textContent = '声音增强初始化失败，请重新启动播放器';
-    });
+    };
+    soundInitialization = MedoSound.prepare(outputAudioContext).then(() => {
+      const engine = MedoSound.create(outputAudioContext, outputAudioSource, outputFadeGain, restoreOriginalAudio);
+      try {
+        engine.update(soundSettings, soundCompare, true);
+        outputAudioSource.disconnect(outputFadeGain);
+        soundEngine = engine;
+      } catch (error) {
+        engine.dispose();
+        throw error;
+      }
+    }).catch(restoreOriginalAudio).finally(() => { soundInitialization = null; });
   }
   if (outputAudioContext.state === "suspended") {
     outputAudioContext.resume().catch(() => {});
@@ -226,7 +259,7 @@ function applyPlaybackFadeSetting(enabled) {
   });
   if (!playbackFadeEnabled) {
     const shouldPause = playbackPausePending;
-    resetPlaybackFade();
+    resetPlaybackFade(shouldPause || audio.paused ? 0 : 1);
     if (shouldPause) audio.pause();
   }
 }
@@ -234,6 +267,18 @@ function applyPlaybackFadeSetting(enabled) {
 document.querySelectorAll(".playback-fade-option").forEach(button => {
   button.addEventListener("click", () => applyPlaybackFadeSetting(button.dataset.playbackFadeValue === "on"));
 });
+
+function formatGainDb(value) {
+  const db = Number(value) || 0;
+  if (db === 0) return "0 dB";
+  return `${db > 0 ? "+" : ""}${db} dB`;
+}
+
+function formatBalance(value) {
+  const db = Number(value) || 0;
+  if (db === 0) return "居中";
+  return db > 0 ? `右 +${db} dB` : `左 +${Math.abs(db)} dB`;
+}
 
 function updateSoundSettings() {
   soundSettings = MedoSound.normalize(soundSettings);
@@ -263,12 +308,30 @@ function updateSoundSettings() {
   compare.disabled = !soundSettings.enabled;
   compare.setAttribute("aria-pressed", String(soundCompare));
   compare.textContent = soundCompare ? "返回增强" : "对比原声";
-  for (const key of ["clarity", "ambience", "surround", "dynamics", "bass"]) {
-    const percent = soundSettings[key] / (key === "bass" ? 6 : key === "clarity" ? 4 : 100) * 100;
+  const effectMax = MedoSound.EFFECT_RANGE.max;
+  for (const key of MedoSound.EFFECT_KEYS) {
+    const percent = soundSettings[key] / effectMax * 100;
     document.querySelector(`#sound-${key}`).value = percent;
     document.querySelector(`#sound-${key}`).style.setProperty("--fill", `${percent}%`);
     document.querySelector(`#sound-${key}-value`).textContent = `${Math.round(percent)}%`;
   }
+  const gainRange = MedoSound.MASTER_GAIN_RANGE, balanceRange = MedoSound.BALANCE_RANGE;
+  const gainFill = (soundSettings.masterGain - gainRange.min) / (gainRange.max - gainRange.min) * 100;
+  const balanceFill = (soundSettings.balance - balanceRange.min) / (balanceRange.max - balanceRange.min) * 100;
+  document.querySelector("#sound-master-gain").value = soundSettings.masterGain;
+  document.querySelector("#sound-master-gain").style.setProperty("--fill", `${gainFill}%`);
+  document.querySelector("#sound-master-gain-value").textContent = formatGainDb(soundSettings.masterGain);
+  document.querySelector("#sound-balance").value = soundSettings.balance;
+  document.querySelector("#sound-balance").style.setProperty("--fill", `${balanceFill}%`);
+  document.querySelector("#sound-balance-value").textContent = formatBalance(soundSettings.balance);
+  const normalization = document.querySelector("#sound-normalization");
+  normalization.value = soundSettings.normalization;
+  normalization.style.setProperty("--fill", `${(soundSettings.normalization + 40) / 40 * 100}%`);
+  document.querySelector("#sound-normalization-value").textContent = soundSettings.normalization ? `${soundSettings.normalization} dBFS` : "关闭";
+  const leveling = document.querySelector("#sound-volume-leveling");
+  leveling.value = soundSettings.volumeLeveling;
+  leveling.style.setProperty("--fill", `${soundSettings.volumeLeveling / 4 * 100}%`);
+  document.querySelector("#sound-volume-leveling-value").textContent = soundSettings.volumeLeveling ? `${soundSettings.volumeLeveling.toFixed(1)} / 4` : "关闭";
   document.querySelectorAll(".sound-band").forEach((label, i) => {
     label.querySelector("input").value = soundSettings.eq[i];
     label.querySelector("output").textContent = `${soundSettings.eq[i] > 0 ? "+" : ""}${soundSettings.eq[i]} dB`;
@@ -288,10 +351,11 @@ function updateSoundSettings() {
     knob.querySelector(".knob-dot").setAttribute("cx", 22 + 17 * Math.cos(angle));
     knob.querySelector(".knob-dot").setAttribute("cy", 22 + 17 * Math.sin(angle));
   });
-  document.querySelector("#sound-eq-line").setAttribute("points", soundSettings.eq.map((gain, i) => `${(i + .5) * 100},${90 - gain * 6.75}`).join(" "));
+  // The 184px track has a 14px thumb: centers span 7..177, with 0 dB at 92.
+  document.querySelector("#sound-eq-line").setAttribute("points", soundSettings.eq.map((gain, i) => `${(i + .5) * 100},${92 - gain * (85 / 12)}`).join(" "));
   document.querySelector("#sound-entry-status").textContent = soundSettings.enabled ? "已启用" : "已关闭";
   document.querySelector("#sound-settings-entry").dataset.enabled = String(soundSettings.enabled);
-  document.querySelector("#sound-status").textContent = !soundSettings.enabled ? "声音增强已关闭" : soundCompare ? "正在试听原声，音效设置已保留" : "声音增强已启用";
+  document.querySelector("#sound-status").textContent = soundFailure || (!soundSettings.enabled ? "声音增强已关闭" : soundCompare ? "正在试听原声，音效设置已保留" : "声音增强已启用");
 }
 for (const [i, frequency] of MedoSound.frequencies.entries()) {
   const label = document.createElement("div");
@@ -407,9 +471,32 @@ for (const [i, frequency] of MedoSound.frequencies.entries()) {
   label.append(knob);
   document.querySelector("#sound-bands").append(label);
 }
-for (const key of ["clarity", "ambience", "surround", "dynamics", "bass"]) {
+for (const key of MedoSound.EFFECT_KEYS) {
   document.querySelector(`#sound-${key}`).addEventListener("input", event => {
-    soundSettings[key] = Number(event.target.value) / 100 * (key === "bass" ? 6 : key === "clarity" ? 4 : 100); updateSoundSettings();
+    soundSettings[key] = Number(event.target.value) / 100 * MedoSound.EFFECT_RANGE.max; updateSoundSettings();
+  });
+  document.querySelector(`#sound-${key}`).addEventListener("dblclick", () => {
+    soundSettings[key] = 0; updateSoundSettings();
+  });
+}
+document.querySelector("#sound-master-gain").addEventListener("input", event => {
+  soundSettings.masterGain = Number(event.target.value); updateSoundSettings();
+});
+document.querySelector("#sound-master-gain").addEventListener("dblclick", () => {
+  soundSettings.masterGain = 0; updateSoundSettings();
+});
+document.querySelector("#sound-balance").addEventListener("input", event => {
+  soundSettings.balance = Number(event.target.value); updateSoundSettings();
+});
+document.querySelector("#sound-balance").addEventListener("dblclick", () => {
+  soundSettings.balance = 0; updateSoundSettings();
+});
+for (const [id, key] of [["sound-normalization", "normalization"], ["sound-volume-leveling", "volumeLeveling"]]) {
+  document.querySelector(`#${id}`).addEventListener("input", event => {
+    soundSettings[key] = Number(event.target.value); updateSoundSettings();
+  });
+  document.querySelector(`#${id}`).addEventListener("dblclick", () => {
+    soundSettings[key] = 0; updateSoundSettings();
   });
 }
 document.querySelectorAll("[data-sound-help]").forEach(element => {
@@ -760,9 +847,8 @@ function applyCloseBehavior(value) {
 function reloadCurrentLyrics({ networkProvider = null } = {}) {
   const track = tracks[currentIndex];
   if (!track) return Promise.resolve();
-  lyricsCache.delete(track.id);
-  lyricTranslations.delete(track.id);
-  const request = ensureLyrics(track, Boolean(networkProvider), networkProvider);
+  cancelPendingLyrics();
+  const request = ensureLyrics(track, true, networkProvider);
   if (currentView === "player") renderLyrics(track);
   return request;
 }
@@ -968,7 +1054,7 @@ function applyDesktopLyricColors(primary = desktopLyricPrimaryColor, secondary =
     localStorage.setItem("medo.desktopLyricPrimaryColor", desktopLyricPrimaryColor);
     localStorage.setItem("medo.desktopLyricSecondaryColor", desktopLyricSecondaryColor);
   }
-  window.medo.updateLyricsWindow({
+  sendLyricsWindowState({
     colorsOnly: true,
     primary: desktopLyricPrimaryColor,
     secondary: desktopLyricSecondaryColor
@@ -1012,6 +1098,7 @@ function syncDesktopLyricLockSetting(locked) {
 
 function applyWordLyricsSetting(enabled, userInitiated = false) {
   wordLyricsEnabled = Boolean(enabled);
+  if (!wordLyricsEnabled || userInitiated) clearLyricRetry();
   localStorage.setItem("medo.wordLyricsEnabled", String(wordLyricsEnabled));
   if (userInitiated) localStorage.setItem("medo.wordLyricsPreferenceSet", "true");
   document.querySelectorAll(".word-lyrics-option").forEach((button) => {
@@ -1020,8 +1107,8 @@ function applyWordLyricsSetting(enabled, userInitiated = false) {
     button.setAttribute("aria-checked", String(active));
   });
   const track = tracks[currentIndex];
-  if (userInitiated && track) reloadCurrentLyrics({ networkProvider: wordLyricsEnabled ? "network" : null });
-  else if (track && currentView === "player") renderLyrics(track);
+  if (userInitiated && track) ensureLyrics(track);
+  if (track && currentView === "player") renderLyrics(track);
   activeLyricIndex = -1;
   updateLyricsAtTime();
 }
@@ -1029,25 +1116,30 @@ function applyWordLyricsSetting(enabled, userInitiated = false) {
 function parseLyrics(text, duration = 0) {
   let offset = 0;
   const lines = [];
-  const metadataLine = /^\[(ar|ti|al|by|re|ve|length):/i;
-  for (const rawLine of String(text || "").replace(/^\uFEFF/, "").split(/\r?\n/)) {
-    if (/^\s*\{"t":\d+,"c":\[/.test(rawLine)) {
-      try {
-        const information = JSON.parse(rawLine.trim());
-        const text = Array.isArray(information.c)
-          ? information.c.map((item) => String(item?.tx || "")).join("").trim()
-          : "";
-        const start = Number(information.t) / 1000 + offset / 1000;
-        if (text && Number.isFinite(start)) lines.push({ start, text, information: true });
-      } catch {}
+  // Offline TTML carries syllable timing, background vocals and per-line
+  // translations in one document; when it is present every other branch is
+  // skipped because the parser already produced the final line list.
+  const ttml = typeof window !== "undefined" && window.MedoTtml
+    ? window.MedoTtml.parseTtml(text)
+    : null;
+  if (ttml) {
+    lines.push(...ttml.lines.filter(line => line.text));
+    return finishLyricLines(lines, duration, ttml);
+  }
+  for (const rawLine of String(text || "").replace(/^\uFEFF/, "").split(/\r\n?|\n/)) {
+    const information = parseLyricInformationLine(rawLine);
+    if (information) {
+      if (information.text) lines.push({ start: information.start + offset / 1000,
+        text: information.text, information: true });
       continue;
     }
-    const offsetMatch = rawLine.match(/^\[offset:([+-]?\d+)\]/i);
-    if (offsetMatch) {
-      offset = Number(offsetMatch[1]) || 0;
+    const metadata = parseLyricMetadataLine(rawLine);
+    if (metadata) {
+      if (metadata.offset !== undefined && /^[+-]?\d+$/.test(metadata.offset.trim())) {
+        offset = Number(metadata.offset) || 0;
+      }
       continue;
     }
-    if (metadataLine.test(rawLine)) continue;
     const yrcLine = rawLine.match(/^\[(\d+),(\d+)\](.*)$/);
     if (yrcLine) {
       const rawLineStart = Number(yrcLine[1]) / 1000;
@@ -1088,6 +1180,13 @@ function parseLyrics(text, duration = 0) {
       });
     }
   }
+  return finishLyricLines(lines, duration);
+}
+
+// Shared tail of both parsers: estimate missing timelines, sort, fill word
+// ends, then classify the file as plain/line/mixed/word.
+function finishLyricLines(lines, duration = 0, metadata = null) {
+  lines = lines.map(convertLyricLine);
   const synced = lines.some((line) => line.start !== null);
   if (!synced && Number.isFinite(duration) && duration > 20 && lines.length > 1) {
     const start = Math.min(12, duration * .06);
@@ -1104,15 +1203,99 @@ function parseLyrics(text, duration = 0) {
   const hasTimeline = lines.some((line) => line.start !== null);
   if (hasTimeline) lines.sort((a, b) => (a.start ?? Number.MAX_VALUE) - (b.start ?? Number.MAX_VALUE));
   const timedLines = hasTimeline ? completeWordTimings(lines, duration) : lines;
-  const level = timedLines.some((line) => line.words?.length) ? "word" : hasTimeline ? "line" : "plain";
-  return { synced: hasTimeline, level, lines: timedLines };
+  const level = window.MedoLyricSync
+    ? window.MedoLyricSync.lyricSyncLevel(timedLines, hasTimeline)
+    : (timedLines.some((line) => line.words?.length) ? "word" : hasTimeline ? "line" : "plain");
+  const result = { synced: hasTimeline, level, lines: timedLines };
+  if (metadata?.writers?.length) result.writers = metadata.writers;
+  return result;
+}
+
+// Simplifies traditional Chinese and keeps per-line translation/background
+// data in the shape the renderer and desktop lyric window consume.
+function convertLyricLine(line) {
+  const convert = (value) => typeof value === "string" && window.MedoZhConvert?.isTraditional(value)
+    ? window.MedoZhConvert.toSimplified(value)
+    : value;
+  const converted = { ...line, text: convert(line.text) };
+  if (Array.isArray(line.words)) {
+    converted.words = line.words.map(word => ({ ...word, text: convert(word.text) }));
+  }
+  if (line.translations && typeof line.translations === "object") {
+    converted.translations = Object.fromEntries(
+      Object.entries(line.translations).map(([language, value]) => [language, convert(value)])
+    );
+  }
+  if (line.subline) {
+    converted.subline = {
+      ...line.subline,
+      text: convert(line.subline.text),
+      ...(Array.isArray(line.subline.words)
+        ? { words: line.subline.words.map(word => ({ ...word, text: convert(word.text) })) }
+        : {})
+    };
+  }
+  return converted;
 }
 
 function lyricMetadataKey(track) {
-  return JSON.stringify([track.path, track.title || "", track.artist || "", track.album || "", Math.round(track.duration || 0)]);
+  // Track identity for lyric caching. The track id already scopes the entry to a file, so the signature only needs the tags that change what a provider returns; including the path would invalidate entries whenever a caller synthesises a track without one.
+  return JSON.stringify([track.title || "", track.artist || "", track.album || "", Math.round(track.duration || 0)]);
+}
+
+// Cache entries written by ensureLyrics carry the metadata signature plus a
+// retry deadline. Seeds that only pass line data are completed here so a valid
+// entry is never discarded just for missing bookkeeping fields.
+function cacheLyricEntry(trackId, entry, track = tracks.find(item => item.id === trackId) || null) {
+  if (!entry) return entry;
+  if (track && !entry.metadataKey) entry.metadataKey = lyricMetadataKey(track);
+  if (!Number.isFinite(entry.retryAt)) {
+    entry.retryAt = Date.now() + (entry.error ? 15000 : entry.text || entry.lines?.length ? 30 * 86400000 : 120000);
+  }
+  return entry;
+}
+
+function clearLyricRetry() {
+  clearTimeout(lyricRetryState?.timer);
+  lyricRetryState = null;
+}
+
+function scheduleLyricRetry(track, mode = null) {
+  const entry = lyricsCache.get(track.id);
+  if (!wordLyricsEnabled || tracks[currentIndex]?.id !== track.id ||
+      !entry?.wordTimingRequested || MedoLyricSync.hasWordLevelLines(entry.lines)) {
+    if (lyricRetryState?.trackId === track.id) clearLyricRetry();
+    return;
+  }
+  if (lyricsRequests.has(track.id) || !Number.isFinite(entry.retryAt)) return;
+  const metadataKey = lyricMetadataKey(track);
+  if (!lyricRetryState || lyricRetryState.trackId !== track.id || lyricRetryState.metadataKey !== metadataKey) {
+    clearLyricRetry();
+    lyricRetryState = { trackId: track.id, metadataKey, attempts: 0, timer: null, mode: mode || "auto" };
+  }
+  const state = lyricRetryState;
+  clearTimeout(state.timer);
+  state.timer = null;
+  if (state.attempts >= 3) return;
+  state.timer = setTimeout(() => {
+    state.timer = null;
+    if (lyricRetryState !== state) return;
+    if (!wordLyricsEnabled || tracks[currentIndex]?.id !== track.id || lyricMetadataKey(track) !== state.metadataKey) {
+      clearLyricRetry();
+      return;
+    }
+    if (lyricsRequests.has(track.id)) return;
+    if (lyricsCache.get(track.id)?.retryAt > Date.now()) {
+      scheduleLyricRetry(track);
+      return;
+    }
+    state.attempts++;
+    ensureLyrics(track, false, state.mode === "auto" ? null : state.mode);
+  }, Math.min(2147483647, Math.max(1, entry.retryAt - Date.now())));
 }
 
 function cancelPendingLyrics(exceptTrackId = null) {
+  if (!exceptTrackId || lyricRetryState?.trackId !== exceptTrackId) clearLyricRetry();
   let cancelled = false;
   for (const id of lyricsRequests.keys()) {
     if (id === exceptTrackId) continue;
@@ -1124,24 +1307,46 @@ function cancelPendingLyrics(exceptTrackId = null) {
 
 async function ensureLyrics(track, force = false, modeOverride = null) {
   if (!track) return;
+  if (force) clearLyricRetry();
   cancelPendingLyrics(track.id);
-  const requestMode = modeOverride || (wordLyricsEnabled ? "network" : "auto");
-  const networkOnlyRequest = wordLyricsEnabled || Boolean(modeOverride);
-  const cachedLyrics = lyricsCache.get(track.id);
+  const requestMode = modeOverride || "auto";
+  const requireWordTiming = wordLyricsEnabled || requestMode === "network";
+  const cachedLyrics = cacheLyricEntry(track.id, lyricsCache.get(track.id), track);
   const metadataKey = lyricMetadataKey(track);
-  const compatibleCache = cachedLyrics && cachedLyrics.metadataKey === metadataKey && cachedLyrics.retryAt > Date.now() &&
-    (!networkOnlyRequest || cachedLyrics.networkOnly === true);
+  // Entries loaded by ensureLyrics always carry a metadataKey; seeds that only
+  // supplied line data get one from cacheLyricEntry, so a missing key means
+  // "older seed" rather than "different track". Only a real mismatch
+  // invalidates the cache.
+  const storedKey = cachedLyrics?.metadataKey;
+  const metadataChanged = Boolean(cachedLyrics) && typeof storedKey === "string" && storedKey !== metadataKey;
+  const previousLyrics = !metadataChanged && cachedLyrics?.lines?.length ? cachedLyrics : null;
+  const compatibleCache = Boolean(cachedLyrics) && !metadataChanged && cachedLyrics.retryAt > Date.now() &&
+    (!requireWordTiming || MedoLyricSync.hasWordLevelLines(cachedLyrics.lines) || cachedLyrics.wordTimingRequested === true);
   const existingRequest = lyricsRequests.get(track.id);
   const compatibleRequest = existingRequest && existingRequest.metadataKey === metadataKey &&
-    (!networkOnlyRequest || existingRequest.networkOnly === true);
-  if (!force && (compatibleCache || compatibleRequest)) return existingRequest;
-  if (cachedLyrics && !compatibleCache) lyricsCache.delete(track.id);
+    (!requireWordTiming || existingRequest.wordTimingRequested === true);
+  if (!force && (compatibleCache || compatibleRequest)) {
+    scheduleLyricRetry(track);
+    return existingRequest;
+  }
+  if (cachedLyrics && !compatibleCache && !previousLyrics) lyricsCache.delete(track.id);
   if (existingRequest) cancelPendingLyrics();
-  if (force) {
-    lyricsCache.delete(track.id);
+  if (metadataChanged) {
+    clearLyricRetry();
     lyricTranslations.delete(track.id);
     lyricTranslationRequests.delete(track.id);
   }
+  const retainPreviousLyrics = result => {
+    previousLyrics.wordTimingRequested = requireWordTiming;
+    previousLyrics.refreshError = result?.error || (!result?.text ? "not-found" : null);
+    previousLyrics.retryAt = result?.retryAt || Date.now() + (result?.error ? 15000 : 60000);
+    setBoundedCache(lyricsCache, track.id, previousLyrics);
+    if (force && tracks[currentIndex]?.id === track.id) {
+      showActionFeedback(result?.error ? "歌词重新查找失败，已保留原歌词" :
+        requireWordTiming && MedoLyricSync.hasWordLevelLines(previousLyrics.lines)
+          ? "未找到新的逐字歌词，已保留原歌词" : "未找到可用歌词，已保留原歌词");
+    }
+  };
   let request;
   request = (async () => {
     if (requestMode !== "local" && (!track.metadataLoaded || !track.duration)) {
@@ -1158,18 +1363,37 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
       duration: track.duration || playingDuration,
       mode: requestMode,
       force,
-      ignoreLocal: wordLyricsEnabled || Boolean(modeOverride),
-      requireWordTiming: wordLyricsEnabled
+      ignoreLocal: requestMode !== "local" && (force || Boolean(modeOverride)),
+      requireWordTiming
     });
   })()
     .then((result) => {
       if (lyricsRequests.get(track.id) !== request || result?.cancelled) return;
+      const parsed = parseLyrics(result?.text, track.duration);
+      const previousIsWord = previousLyrics && MedoLyricSync.hasWordLevelLines(previousLyrics.lines);
+      if (previousLyrics && (!parsed.lines.length ||
+          ((requireWordTiming || !force && !modeOverride) && previousIsWord && !MedoLyricSync.hasWordLevelLines(parsed.lines)))) {
+        retainPreviousLyrics(result);
+        return;
+      }
+      // Provider-supplied translations (QQ `trans`) are line-aligned and win
+      // over machine translation for the lines they cover.
+      if (Array.isArray(result?.translation) && result.translation.length === parsed.lines.length) {
+        parsed.lines.forEach((line, index) => {
+          const value = window.MedoZhConvert.toSimplified(String(result.translation[index] || "").trim());
+          if (value && value !== line.text) {
+            line.translations = { ...(line.translations || {}), "zh-hans": value };
+          }
+        });
+      }
+      lyricTranslations.delete(track.id);
+      lyricTranslationRequests.delete(track.id);
       setBoundedCache(lyricsCache, track.id, {
-        ...parseLyrics(result?.text, track.duration),
+        ...parsed,
         source: result?.source || null,
         confidence: result?.confidence || null,
         match: result?.match || null,
-        networkOnly: networkOnlyRequest,
+        wordTimingRequested: requireWordTiming,
         error: result?.error || null,
         metadataKey: lyricMetadataKey(track),
         retryAt: result?.retryAt || Date.now() + (result?.error ? 15000 : result?.text ? 30 * 86400000 : 120000)
@@ -1177,8 +1401,10 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
       if (lyricTranslationEnabled) ensureLyricTranslation(track);
     })
     .catch(() => {
-      if (lyricsRequests.get(track.id) === request) setBoundedCache(lyricsCache, track.id, {
-        synced: false, lines: [], networkOnly: networkOnlyRequest, error: "network",
+      if (lyricsRequests.get(track.id) !== request) return;
+      if (previousLyrics) retainPreviousLyrics({ error: "network" });
+      else setBoundedCache(lyricsCache, track.id, {
+        synced: false, lines: [], wordTimingRequested: requireWordTiming, error: "network",
         metadataKey: lyricMetadataKey(track), retryAt: Date.now() + 15000
       });
     })
@@ -1187,7 +1413,8 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
       lyricsRequests.delete(track.id);
       if (tracks[currentIndex]?.id !== track.id) return;
       const loadedLyrics = lyricsCache.get(track.id);
-      window.medo.updateLyricsWindow({
+      scheduleLyricRetry(track, requestMode);
+      sendLyricsWindowState({
         title: track.title,
         artist: track.artist,
         album: track.album,
@@ -1200,14 +1427,16 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
         updateLyricsAtTime();
       }
     });
-  request.networkOnly = networkOnlyRequest;
+  request.wordTimingRequested = requireWordTiming;
   request.metadataKey = lyricMetadataKey(track);
   lyricsRequests.set(track.id, request);
   return request;
 }
 
 function lyricsNeedChineseTranslation(lines = []) {
-  const text = lines.map((line) => line.text).join("").replace(/[♪\s\d\p{P}\p{S}]/gu, "");
+  // Existing inline translations cover only their own rows.
+  const uncovered = lines.filter(line => !line.information && !pickChineseTranslation(line));
+  const text = uncovered.map((line) => line.text).join("").replace(/[♪\s\d\p{P}\p{S}]/gu, "");
   if (!text) return false;
   const han = (text.match(/\p{Script=Han}/gu) || []).length;
   const hasJapanese = /[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(text);
@@ -1216,24 +1445,66 @@ function lyricsNeedChineseTranslation(lines = []) {
   return han / [...text].length < .45;
 }
 
+// Languages are normalized to lowercase in the parser, so `zh-hans`,
+// `zh-cn` and `zh` all count as Chinese; Simplified wins over Traditional
+// because the app's UI and the 简繁 conversion both target Simplified.
+function translationLanguageScore(language) {
+  const value = String(language || "").toLowerCase();
+  if (value === "zh-hans" || value === "zh-cn" || value === "zh-sg") return 3;
+  if (value === "zh") return 2;
+  if (value === "zh-hant" || value === "zh-tw" || value === "zh-hk") return 1;
+  return 0;
+}
+
+function pickChineseTranslation(line) {
+  const translations = line?.translations;
+  if (!translations || typeof translations !== "object") return null;
+  let best = null;
+  let bestScore = 0;
+  for (const [language, value] of Object.entries(translations)) {
+    const score = translationLanguageScore(language);
+    if (!score || !value) continue;
+    if (score > bestScore) {
+      best = value;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+function lyricTranslationIndices(lines = []) {
+  return lines.map((line, index) => pickChineseTranslation(line) ? index : -1).filter(index => index >= 0);
+}
+
 async function ensureLyricTranslation(track) {
   const lyrics = lyricsCache.get(track?.id);
   if (!lyricTranslationEnabled || !track || !lyrics?.lines?.length ||
-      !lyricsNeedChineseTranslation(lyrics.lines) || lyricTranslations.has(track.id) ||
       lyricTranslationRequests.has(track.id)) return;
+  const indices = lyrics.lines.map((line, index) => !lyricTranslationFor(track.id, lyrics, index) &&
+    lyricsNeedChineseTranslation([line]) ? index : -1).filter(index => index >= 0);
+  if (!indices.length) return;
+  const texts = indices.map(index => lyrics.lines[index].text);
+  const starts = indices.map(index => lyrics.lines[index].start);
   let request;
   request = window.medo.translateLyrics({
-    cacheKey: JSON.stringify([track.title, track.artist, track.album, lyrics.lines.map((line) => line.text)]),
+    cacheKey: JSON.stringify([track.title, track.artist, track.album, starts, texts]),
     title: track.title,
     artist: track.artist,
     album: track.album,
     duration: track.duration || audio.duration,
-    starts: lyrics.lines.map((line) => line.start),
-    lines: lyrics.lines.map((line) => line.text)
+    starts,
+    lines: texts
   }).then((translated) => {
     if (lyricTranslationRequests.get(track.id) !== request || lyricsCache.get(track.id) !== lyrics) return;
-    if (!Array.isArray(translated) || translated.length !== lyrics.lines.length || !translated.some(Boolean)) return;
-    setBoundedCache(lyricTranslations, track.id, translated);
+    if (!Array.isArray(translated) || translated.length !== indices.length || !translated.some(Boolean)) return;
+    const previous = lyricTranslations.get(track.id);
+    const map = previous instanceof Map ? new Map(previous) : new Map();
+    const values = [...(map.get('zh') || (Array.isArray(previous) ? previous : []))];
+    indices.forEach((index, position) => {
+      values[index] = window.MedoZhConvert.toSimplified(translated[position] || '');
+    });
+    map.set('zh', values);
+    setBoundedCache(lyricTranslations, track.id, map);
     if (tracks[currentIndex]?.id !== track.id) return;
     activeLyricIndex = -1;
     if (currentView === "player") renderLyrics(track);
@@ -1242,11 +1513,68 @@ async function ensureLyricTranslation(track) {
     if (lyricTranslationRequests.get(track.id) === request) lyricTranslationRequests.delete(track.id);
   });
   lyricTranslationRequests.set(track.id, request);
+  return request;
+}
+
+// Resolve one line's translation from the per-track language map, preferring
+// the line's own provider translation when it exists. Older callers and tests
+// stored a plain array for the default language; both shapes are accepted.
+function lyricTranslationFor(trackId, lyrics, index) {
+  const inline = pickChineseTranslation(lyrics?.lines?.[index]);
+  if (inline) return inline;
+  const map = lyricTranslations.get(trackId);
+  if (!map) return null;
+  if (Array.isArray(map)) return map[index] || null;
+  if (typeof map.get !== "function") return null;
+  const best = [...map.keys()].filter(key => translationLanguageScore(key) > 0).sort((left, right) =>
+    translationLanguageScore(right) - translationLanguageScore(left));
+  for (const language of best) {
+    const lines = map.get(language);
+    if (Array.isArray(lines) && lines[index]) return lines[index];
+  }
+  return null;
+}
+
+function renderLyricStatus(lyrics) {
+  const status = document.querySelector("#lyric-status");
+  const hasLines = Boolean(lyrics?.lines?.length);
+  const level = hasLines ? lyrics.level || MedoLyricSync.lyricSyncLevel(lyrics.lines, lyrics.synced) : null;
+  const failure = lyrics?.refreshError || lyrics?.error;
+  let message = "";
+  if (failure) {
+    message = hasLines
+      ? failure === "not-found" ? "未找到新歌词，已保留原歌词" : "歌词重新查找失败，已保留原歌词"
+      : failure === "timeout" ? "歌词搜索超时，请重新查找" : "歌词加载失败，请重新查找";
+  } else if (wordLyricsEnabled && (level === "plain" || level === "line")) {
+    message = "暂未找到逐字歌词";
+  } else if (wordLyricsEnabled && level === "mixed") {
+    const ordinary = lyrics.lines.filter(line => !line.information && !MedoLyricSync.hasNativeLineTiming(line)).length;
+    message = `部分逐字，其余 ${ordinary} 行逐行`;
+  }
+  // Source information accompanies an exceptional state, never a normal song.
+  status.hidden = !message;
+  if (status.hidden) {
+    status.querySelector(".lyric-status-message").textContent = "";
+    status.querySelector(".lyric-status-source").textContent = "";
+    status.removeAttribute("title");
+    return;
+  }
+  const source = lyrics.source || "";
+  const sourceName = source === "embedded" ? "内嵌歌词" : source === "sidecar" ? "本地 LRC"
+    : source === "qq" || source.startsWith("qq-") ? "QQ 音乐"
+    : source === "netease" || source.startsWith("netease-") ? "网易云音乐"
+    : source === "lrclib" ? "LRCLIB" : "未知来源";
+  const kind = { plain: "纯文本歌词", line: "逐行歌词", mixed: "混合歌词", word: "逐字歌词" }[level];
+  status.querySelector(".lyric-status-message").textContent = message;
+  status.querySelector(".lyric-status-source").textContent = hasLines ? `${sourceName} · ${kind}` : "";
+  status.title = lyrics.match?.title
+    ? `匹配曲目：${[lyrics.match.title, lyrics.match.artist].filter(Boolean).join(" · ")}` : "";
 }
 
 function renderLyrics(track) {
   const container = document.querySelector("#lyrics-lines");
   const lyrics = lyricsCache.get(track.id);
+  renderLyricStatus(lyrics);
   const state = [track.id, lyrics, lyricTranslations.get(track.id), lyricTranslationEnabled,
     hiddenLyricTranslations.has(track.id), wordLyricsEnabled];
   if (renderedLyricsState?.every((value, index) => value === state[index])) {
@@ -1262,6 +1590,7 @@ function renderLyrics(track) {
       Math.abs(nearest.offsetTop + nearest.offsetHeight / 2 + oldOffset) ? line : nearest, null);
   const anchorPosition = anchor ? anchor.offsetTop + anchor.offsetHeight / 2 + oldOffset : 0;
   renderedLyricsState = state;
+  renderedLyricElements = [];
   if (!preserveInspection) {
     clearTimeout(lyricInspectionRestoreTimer);
     lyricInspectionActive = false;
@@ -1294,7 +1623,7 @@ function renderLyrics(track) {
     retry.textContent = "重新查找";
     retry.onclick = () => { ensureLyrics(track, true); renderLyrics(track); };
     container.querySelector(".lyrics-empty").append(retry);
-    window.medo.updateLyricsWindow({
+    sendLyricsWindowState({
       title: track.title,
       artist: track.artist,
       album: track.album,
@@ -1303,29 +1632,29 @@ function renderLyrics(track) {
     });
     return;
   }
-  const translationAvailable = lyricsNeedChineseTranslation(lyrics.lines);
+  // Provider translations (offline TTML, QQ trans, Netease tlyric) can be shown
+  // as soon as lyrics load; machine translation arrives later via the map.
+  const inlineTranslations = lyricTranslationIndices(lyrics.lines).length > 0;
+  const translationAvailable = inlineTranslations || lyricsNeedChineseTranslation(lyrics.lines);
   const translations = lyricTranslations.get(track.id);
-  const showTranslations = lyricTranslationEnabled && translationAvailable &&
-    !hiddenLyricTranslations.has(track.id) && Array.isArray(translations);
-  translationButton.hidden = !lyricTranslationEnabled || !translationAvailable;
+  const loadedTranslation = lyricTranslations.get(track.id);
+  const translationsReady = loadedTranslation instanceof Map || Array.isArray(loadedTranslation);
+  const translationsAvailableNow = translationAvailable || translationsReady;
+  const showTranslations = lyricTranslationEnabled && translationsAvailableNow &&
+    !hiddenLyricTranslations.has(track.id) && (inlineTranslations || translationsReady);
+  translationButton.hidden = !lyricTranslationEnabled || !translationsAvailableNow;
   const translationTitle = showTranslations ? "隐藏中文翻译" : "显示中文翻译";
   translationButton.title = translationTitle;
   translationButton.setAttribute("aria-label", translationTitle);
   translationButton.classList.toggle("active", showTranslations);
-  if (lyricTranslationEnabled && translationAvailable && !translations) ensureLyricTranslation(track);
+  if (lyricTranslationEnabled && translationAvailable) ensureLyricTranslation(track);
   container.classList.toggle("unsynced", !lyrics.synced);
   container.innerHTML = "";
-  if (wordLyricsEnabled && lyrics.level !== "word") {
-    const note = document.createElement("p");
-    note.className = "lyric-fallback-note";
-    note.textContent = "暂未找到逐字歌词，正在显示普通歌词";
-    container.append(note);
-  }
   lyrics.lines.forEach((line, lineIndex) => {
     const item = document.createElement(lyrics.synced ? "button" : "p");
     item.className = "lyric-line";
     if (line.start !== null) item.dataset.start = String(line.start);
-    if (wordLyricsEnabled && line.words?.length) {
+    if (wordLyricsEnabled && MedoLyricSync.hasNativeLineTiming(line)) {
       const karaoke = document.createElement("span");
       karaoke.className = "lyric-karaoke";
       karaoke.innerHTML = '<span class="lyric-karaoke-base"></span><span class="lyric-karaoke-fill"></span>';
@@ -1335,20 +1664,30 @@ function renderLyrics(track) {
     } else {
       item.textContent = line.text;
     }
-    if (showTranslations && translations[lineIndex]) {
-      const translation = document.createElement("span");
-      if (wordLyricsEnabled && line.words?.length) {
-        translation.className = "lyric-translation lyric-karaoke lyric-translation-karaoke";
-        translation.innerHTML = '<span class="lyric-karaoke-base"></span><span class="lyric-karaoke-fill"></span>';
-        translation.querySelector(".lyric-karaoke-base").textContent = translations[lineIndex];
-        translation.querySelector(".lyric-karaoke-fill").textContent = translations[lineIndex];
-      } else {
-        translation.className = "lyric-translation";
-        translation.textContent = translations[lineIndex];
+    if (showTranslations) {
+      const translationText = lyricTranslationFor(track.id, lyrics, lineIndex);
+      if (translationText) {
+        const translation = document.createElement("span");
+        if (wordLyricsEnabled && MedoLyricSync.hasNativeLineTiming(line)) {
+          translation.className = "lyric-translation lyric-karaoke lyric-translation-karaoke";
+          translation.innerHTML = '<span class="lyric-karaoke-base"></span><span class="lyric-karaoke-fill"></span>';
+          translation.querySelector(".lyric-karaoke-base").textContent = translationText;
+          translation.querySelector(".lyric-karaoke-fill").textContent = translationText;
+        } else {
+          translation.className = "lyric-translation";
+          translation.textContent = translationText;
+        }
+        item.append(translation);
       }
-      item.append(translation);
+    }
+    if (line.subline?.text) {
+      const background = document.createElement("span");
+      background.className = "lyric-subline";
+      background.textContent = line.subline.text;
+      item.append(background);
     }
     container.append(item);
+    renderedLyricElements.push(item);
   });
   if (preserveInspection) {
     const lines = [...container.querySelectorAll(".lyric-line[data-start]")];
@@ -1366,7 +1705,12 @@ function updateWordHighlight(line, element) {
   if (!line?.words?.length || !element) return;
   const karaoke = element.querySelector(".lyric-karaoke");
   if (!karaoke) return;
-  const totalCharacters = Math.max(1, line.words.reduce((total, word) => total + [...word.text].length, 0));
+  let metrics = lyricWordMetrics.get(line.words);
+  if (!metrics) {
+    const lengths = line.words.map(word => [...word.text].length);
+    metrics = { lengths, total: Math.max(1, lengths.reduce((sum, value) => sum + value, 0)) };
+    lyricWordMetrics.set(line.words, metrics);
+  }
   let completedCharacters = 0;
   for (let index = 0; index < line.words.length; index += 1) {
     const word = line.words[index];
@@ -1374,24 +1718,39 @@ function updateWordHighlight(line, element) {
     const nextStart = Number(line.words[index + 1]?.start);
     const end = Number(word.end) > start ? Number(word.end) : Number.isFinite(nextStart) ? nextStart : start + .48;
     const progress = Math.max(0, Math.min(1, (audio.currentTime + .04 - start) / Math.max(.08, end - start)));
-    const length = [...word.text].length;
+    const length = metrics.lengths[index];
     if (progress >= 1) completedCharacters += length;
     else {
       completedCharacters += length * progress;
       break;
     }
   }
-  element.style.setProperty("--line-progress", `${Math.max(0, Math.min(100, completedCharacters / totalCharacters * 100))}%`);
+  const value = `${Math.max(0, Math.min(100, completedCharacters / metrics.total * 100))}%`;
+  if (element.style.getPropertyValue("--line-progress") !== value) element.style.setProperty("--line-progress", value);
+}
+
+function sendLyricsWindowState(payload) {
+  lastDesktopLyricsState = null;
+  window.medo.updateLyricsWindow(payload);
 }
 
 function updateDesktopLyrics(track, lyrics, index) {
   const line = lyrics.lines[index];
+  const translation = lyricTranslationEnabled && !hiddenLyricTranslations.has(track.id)
+    ? lyricTranslationFor(track.id, lyrics, index) : null;
+  const state = [track.id, lyrics, index, wordLyricsEnabled, translation, desktopLyricPrimaryColor,
+    desktopLyricSecondaryColor, track.title, track.artist, track.album, !audio.paused];
+  if (lastDesktopLyricsState?.every((value, offset) => value === state[offset])) {
+    window.medo.updateLyricsWindow({ positionOnly: true, position: audio.currentTime, playing: !audio.paused });
+    return;
+  }
+  lastDesktopLyricsState = state;
   window.medo.updateLyricsWindow({
     current: line?.text,
-    words: wordLyricsEnabled ? line?.words?.map((word) => ({ start: word.start, end: word.end, text: word.text })) || [] : [],
+    words: wordLyricsEnabled && MedoLyricSync.hasNativeLineTiming(line) ? line.words.map((word) => ({ start: word.start, end: word.end, text: word.text })) : [],
     position: audio.currentTime,
-    currentTranslation: lyricTranslationEnabled && !hiddenLyricTranslations.has(track.id)
-      ? lyricTranslations.get(track.id)?.[index] : null,
+    currentTranslation: translation,
+    subline: line?.subline?.text || null,
     next: lyrics.lines[index + 1]?.text,
     title: track.title,
     artist: track.artist,
@@ -1407,8 +1766,9 @@ function animateLyricFollow(container, active) {
   const target = `translateY(${-active.offsetTop - active.offsetHeight / 2}px)`;
   const liveTransform = getComputedStyle(container).transform;
   lyricFollowAnimation?.cancel();
-  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  if (lyricPresentationSuspended || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
     container.style.transform = target;
+    lyricPresentationSuspended = false;
     return;
   }
   container.style.transform = target;
@@ -1433,19 +1793,23 @@ function updateLyricsAtTime() {
   const track = tracks[currentIndex];
   const lyrics = track && lyricsCache.get(track.id);
   if (!lyrics?.synced || !lyrics.lines.length) return;
-  let index = -1;
-  for (let i = 0; i < lyrics.lines.length; i += 1) {
-    if (lyrics.lines[i].start > audio.currentTime + 0.08) break;
-    index = i;
+  let low = 0, high = lyrics.lines.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (lyrics.lines[middle].start <= audio.currentTime + .08) low = middle + 1;
+    else high = middle;
   }
-  const elements = [...document.querySelectorAll("#lyrics-lines .lyric-line")];
+  const index = low - 1;
+  updateDesktopLyrics(track, lyrics, index);
+  if (backgroundMode || currentView !== "player") { lyricPresentationSuspended = true; return; }
+  const container = document.querySelector("#lyrics-lines");
+  if (renderedLyricElements[0]?.parentElement !== container) renderedLyricElements = [...container.querySelectorAll(".lyric-line")];
+  const elements = renderedLyricElements;
   if (index === activeLyricIndex) {
     updateWordHighlight(lyrics.lines[index], elements[index]);
-    updateDesktopLyrics(track, lyrics, index);
     return;
   }
   activeLyricIndex = index;
-  const container = document.querySelector("#lyrics-lines");
   elements.forEach((element, itemIndex) => {
     element.classList.toggle("active", itemIndex === index);
     element.classList.toggle("past", itemIndex < index);
@@ -1453,7 +1817,6 @@ function updateLyricsAtTime() {
     if (itemIndex !== index) element.style.setProperty("--line-progress", "0%");
   });
   const active = elements[index];
-  updateDesktopLyrics(track, lyrics, index);
   if (active && !lyricInspectionActive) {
     animateLyricFollow(container, active);
     updateWordHighlight(lyrics.lines[index], active);
@@ -1468,19 +1831,23 @@ function visibleTracks() {
     ? selectedPlaylist.trackIds
       .map((id) => tracksById.get(id))
       .filter(Boolean)
-    : [...tracks];
+    : currentView === "now" ? playbackQueueIds.map(id => tracksById.get(id)).filter(Boolean)
+      : currentView === "recent" ? recent.map(id => tracksById.get(id)).filter(Boolean) : [...tracks];
 
+  const recentIds = new Set(recent);
+  const queueIds = new Set(playbackQueueIds);
   result = result.filter((track) => {
     if (track.transient && !currentPlaylist && currentView !== "now") return false;
     if (currentPlaylist && !selectedPlaylist?.trackIds?.length && !track.playlists?.includes(currentPlaylist)) return false;
-    if (currentView === "recent" && !recent.includes(track.id)) return false;
-    if (currentView === "now" && !playbackQueueIds.includes(track.id)) return false;
+    if (currentView === "recent" && !recentIds.has(track.id)) return false;
+    if (currentView === "now" && !queueIds.has(track.id)) return false;
     if (currentView === "favorites" && !favorites.has(track.id)) return false;
     if (currentCollection) {
       const value = currentCollection.type === "artists" ? (track.artist || "未知艺术家") : (track.album || "未知专辑");
       if (value !== currentCollection.name) return false;
       if (currentCollection.format && String(track.format || "").toUpperCase() !== currentCollection.format) return false;
     }
+    if (!query) return true;
     return `${track.title} ${track.artist || ""} ${track.album} ${(track.playlists || []).join(" ")}`
       .toLowerCase().includes(query);
   });
@@ -1539,7 +1906,7 @@ async function loadMetadata(track) {
       track.sampleRate = metadata.sampleRate || null;
       track.bitsPerSample = metadata.bitsPerSample || null;
     }
-    schedulePersist();
+    schedulePersist("tracks");
     const collectionIdentityChanged =
       (currentSort === "artists" && previousArtist !== track.artist) ||
       (currentSort === "albums" && previousAlbum !== track.album);
@@ -1714,7 +2081,7 @@ function attachPlaylistDrag(button, playlistName) {
             const [moved] = playlists.splice(sourceIndex, 1);
             const targetIndex = playlists.findIndex((playlist) => playlist.name === targetName);
             playlists.splice(Math.max(0, targetIndex), 0, moved);
-            persist();
+            persist("playlists");
           }
         }
       }
@@ -1803,12 +2170,23 @@ function setSelectionActionsVisible(visible) {
   document.querySelector("#remove-selected").hidden = !playlists.some(playlist => playlist.name === currentPlaylist);
   const actions = document.querySelector("#selection-actions");
   clearTimeout(selectionActionsHideTimer);
+  cancelAnimationFrame(selectionActionsShowFrame);
+  selectionActionsShowFrame = null;
+  actions.inert = !visible;
   if (visible) {
     actions.hidden = false;
-    requestAnimationFrame(() => actions.classList.add("visible"));
+    selectionActionsShowFrame = requestAnimationFrame(() => {
+      selectionActionsShowFrame = null;
+      actions.classList.add("visible");
+    });
     return;
   }
   actions.classList.remove("visible");
+  if (currentView === "player" || currentView === "settings") {
+    actions.hidden = true;
+    return;
+  }
+  if (actions.hidden) return;
   selectionActionsHideTimer = setTimeout(() => {
     if (!actions.classList.contains("visible")) actions.hidden = true;
   }, 220);
@@ -2060,11 +2438,18 @@ function reorderTrack(draggedId, targetId) {
   render();
 }
 
+function closePageMenus() {
+  window.MedoMenus.close();
+  const picker = document.querySelector("#listening-month-picker");
+  if (picker.matches(":popover-open")) picker.hidePopover();
+}
+
 function applyViewShellState({ preservePlaybackDetailActive = false } = {}) {
   persistNavigation();
   updateMiniCoverState();
   const settingsOpen = currentView === "settings";
   const playbackDetailOpen = currentView === "player";
+  document.querySelector(".sidebar").inert = playbackDetailOpen;
   const main = document.querySelector("main");
   main.classList.toggle("settings-open", settingsOpen);
   main.classList.toggle("playlist-open", Boolean(currentPlaylist || currentCollection || currentView === "favorites") && !settingsOpen);
@@ -2088,6 +2473,7 @@ function render() {
   updatePlaylistSaveControls();
   const main = document.querySelector("main");
   const key = JSON.stringify([currentView, currentPlaylist, currentSort, currentCollection]);
+  if (key !== renderedPageKey) closePageMenus();
   if (renderedPageKey !== null) pageScrollPositions.set(renderedPageKey, main.scrollTop);
   const savedScrollTop = query !== renderedSearch ? 0 : (pageScrollPositions.get(key) || 0);
   renderedPageKey = key;
@@ -2190,10 +2576,10 @@ function renderPage(savedScrollTop) {
 
   if (currentView === "playlists") {
     trackList.className = "track-list playlist-overview-list";
+    const playlistOverviewIndex = new Map(tracks.map(track => [track.id, track]));
     const items = playlists.map((playlist) => {
-      const firstTrack = playlist.trackIds
-        ?.map((trackId) => tracks.find((track) => track.id === trackId))
-        .find(Boolean);
+      const firstId = playlist.trackIds?.find(id => playlistOverviewIndex.has(id));
+      const firstTrack = playlistOverviewIndex.get(firstId);
       return {
         name: playlist.name,
         count: playlist.trackIds?.length || 0,
@@ -2455,14 +2841,14 @@ function renderPage(savedScrollTop) {
         const queueIndex = Math.max(-1, playbackQueueIds.indexOf(tracks[currentIndex]?.id));
         playbackQueueIds.splice(queueIndex + 1, 0, track.id);
         showActionFeedback("已安排为下一首播放");
-        schedulePersist();
+        schedulePersist(["queue", "playback"]);
         if (queueWasEmpty) playTrack(actualIndex, true);
       } else if (result.action === "add-to-queue") {
         const queueWasEmpty = !playbackQueueIds.some((id) => tracks.some((item) => item.id === id));
         playbackQueueIds = playbackQueueIds.filter((id) => id !== track.id);
         playbackQueueIds.push(track.id);
         showActionFeedback("已添加到正在播放");
-        schedulePersist();
+        schedulePersist(["queue", "playback"]);
         if (queueWasEmpty) playTrack(actualIndex, true);
       } else if (result.action === "create-playlist") {
         await createPlaylistWithTracks([track.id]);
@@ -2748,7 +3134,7 @@ function attachQueueDrag(button, trackId) {
           if (from >= 0 && to >= 0) {
             playbackQueueIds.splice(from, 1);
             playbackQueueIds.splice(to, 0, trackId);
-            persist();
+            persist(["queue", "playback"]);
           }
         }
         cleanup();
@@ -2854,7 +3240,7 @@ function renderPlaybackDetail() {
 function toggleFavorite(id = tracks[currentIndex]?.id) {
   if (!id) return;
   favorites.has(id) ? favorites.delete(id) : favorites.add(id);
-  schedulePersist();
+  schedulePersist("favorites");
   updateFavoriteButton();
   renderPlaylists();
   document.querySelectorAll(".track-row").forEach((row) => {
@@ -2936,7 +3322,7 @@ function setFavoriteFromExtension(trackId, favorite) {
   const shouldFavorite = favorite !== false;
   if (shouldFavorite) favorites.add(trackId);
   else favorites.delete(trackId);
-  persist();
+  persist("favorites");
   updateFavoriteButton();
   renderPlaylists();
   return extensionTrack(track);
@@ -3007,7 +3393,7 @@ async function handleMyFireflyCommand(payload = {}) {
       } else {
         throw new Error("unsupported-control-action");
       }
-      persist();
+      persist(["playback", "settings"]);
       return extensionPlaybackState();
     }
     default:
@@ -3310,6 +3696,7 @@ function openPlaybackDetail() {
 
 async function closePlaybackDetail() {
   if (currentView !== "player") return;
+  closePageMenus();
   const transitionId = ++playbackTransitionId;
   const main = document.querySelector("main");
   main.classList.add("playback-detail-closing");
@@ -3354,7 +3741,7 @@ async function closePlaybackDetail() {
       { duration: 260, easing: "cubic-bezier(.22,1,.36,1)" }
     );
   });
-  persist();
+  persist("playback");
 }
 
 function animateViewSurface() {
@@ -3404,7 +3791,7 @@ async function choosePlaylistCover() {
   const playlist = playlists.find((item) => item.name === currentPlaylist);
   if (!playlist) return;
   playlist.cover = cover;
-  persist();
+  persist("playlists");
   renderPlaylistHero(visibleTracks());
 }
 
@@ -3433,7 +3820,7 @@ document.querySelector("#recent-play-count-sort").addEventListener("click", (eve
   recentSortByPlays = !recentSortByPlays;
   event.currentTarget.classList.toggle("active", recentSortByPlays);
   event.currentTarget.setAttribute("aria-pressed", String(recentSortByPlays));
-  persist();
+  persist("settings");
   render();
   animateContentChange();
 });
@@ -3448,7 +3835,7 @@ document.querySelector("#detail-clear-queue").addEventListener("click", (event) 
   shuffleHistoryIndex = -1;
   lastPreviousRestartAt = 0;
   lastPreviousRestartTrackId = null;
-  persist();
+  persist(["queue", "playback"]);
   closePlaybackDetail();
 });
 document.querySelector("#detail-refresh-lyrics").addEventListener("click", async (event) => {
@@ -3491,7 +3878,7 @@ function queueSelectedTracks(playNext) {
   playbackQueueIds = remaining;
   selectedTrackIds.clear();
   multiSelectionMode = false;
-  persist();
+  persist(["queue", "playback"]);
   render();
 }
 document.querySelector("#next-selected").addEventListener("click", () => queueSelectedTracks(true));
@@ -3600,9 +3987,15 @@ document.querySelector("#open-playback-detail").addEventListener("click", () => 
   openPlaybackDetail();
 });
 document.querySelector("#back-button").addEventListener("click", goBack);
+function syncSidebarState() {
+  document.querySelector(".app-shell").classList.toggle("sidebar-collapsed", sidebarCollapsed);
+  document.querySelector(".menu-button").setAttribute("aria-expanded", String(!sidebarCollapsed));
+  document.querySelector(".side-search input").inert = sidebarCollapsed;
+  document.querySelector(".playlist-list").inert = sidebarCollapsed;
+}
 document.querySelector(".menu-button").addEventListener("click", () => {
   sidebarCollapsed = !sidebarCollapsed;
-  document.querySelector(".app-shell").classList.toggle("sidebar-collapsed", sidebarCollapsed);
+  syncSidebarState();
   localStorage.setItem("medo.sidebarCollapsed", String(sidebarCollapsed));
 });
 const sidebarResizer = document.querySelector("#sidebar-resizer");
@@ -3820,7 +4213,7 @@ document.querySelector("#volume-button").addEventListener("click", () => {
   audio.muted = !audio.muted;
   updateMuteButton();
   window.medo.setTrayMuted(audio.muted);
-  schedulePersist();
+  schedulePersist("playback");
 });
 window.medo.onLyricsWindowVisibility((visible) => {
   document.querySelector("#desktop-lyrics-button").classList.toggle("active", visible);
@@ -4222,7 +4615,7 @@ document.addEventListener("keydown", (event) => {
     applyOutputVolume();
     updateVolumeDisplay();
     showVolumeBubble(true);
-    schedulePersist();
+    schedulePersist("playback");
     return;
   }
   if (!audio.src || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
@@ -4234,7 +4627,7 @@ document.addEventListener("keydown", (event) => {
   updateRangeGradient(progress, audio.duration ? audio.currentTime / audio.duration : 0);
   document.querySelector("#current-time").textContent = formatTime(audio.currentTime);
   updateLyricsAtTime();
-  schedulePersist();
+  schedulePersist("playback");
 });
 
 audio.addEventListener("play", () => {
@@ -4255,27 +4648,28 @@ audio.addEventListener("ratechange", accumulateListeningTime);
 });
 audio.addEventListener("pause", () => {
   if (!audio.paused) return;
-  resetPlaybackFade();
+  resetPlaybackFade(0);
   if (switchingPlaybackGeneration !== 0) return;
   updatePlayButtonState(false);
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
   activeLyricIndex = -1;
   updateLyricsAtTime();
-  schedulePersist();
+  schedulePersist("playback");
 });
 audio.addEventListener("timeupdate", () => {
   accumulateListeningTime();
-  if (backgroundMode) updateLyricsAtTime();
-  if (backgroundMode && performance.now() - lastBackgroundUiUpdate < 1000) return;
-  lastBackgroundUiUpdate = performance.now();
+  updateLyricsAtTime();
+
   if (performance.now() - lastPlaybackStateSave > 5000) {
     lastPlaybackStateSave = performance.now();
     persistPlaybackState();
   }
-  progress.value = audio.duration ? (audio.currentTime / audio.duration) * 100 : 0;
-  updateRangeGradient(progress, audio.duration ? audio.currentTime / audio.duration : 0);
-  document.querySelector("#current-time").textContent = formatTime(audio.currentTime);
-  if (!backgroundMode) updateLyricsAtTime();
+  if (!backgroundMode) {
+    progress.value = audio.duration ? (audio.currentTime / audio.duration) * 100 : 0;
+    updateRangeGradient(progress, audio.duration ? audio.currentTime / audio.duration : 0);
+    const time = document.querySelector("#current-time"), value = formatTime(audio.currentTime);
+    if (time.textContent !== value) time.textContent = value;
+  }
   if ("mediaSession" in navigator && audio.duration && performance.now() - lastMediaSessionUpdate > 1000) {
     lastMediaSessionUpdate = performance.now();
     try {
@@ -4313,7 +4707,7 @@ volume.addEventListener("input", () => {
   applyOutputVolume();
   updateVolumeDisplay();
   showVolumeBubble(!volumePointerActive);
-  schedulePersist();
+  schedulePersist("playback");
 });
 volume.addEventListener("pointerdown", () => {
   volumePointerActive = true;
@@ -4338,7 +4732,11 @@ window.addEventListener("beforeunload", persist);
 function updateBackgroundMode() {
   backgroundMode = document.hidden || !nativeWindowVisible;
   document.body.classList.toggle("background-mode", backgroundMode);
-  if (backgroundMode) coverAtmosphere.finish();
+  if (backgroundMode) {
+    coverAtmosphere.finish();
+    lyricPresentationSuspended = true;
+    lyricFollowAnimation?.finish();
+  }
   if (!backgroundMode) {
     lastBackgroundUiUpdate = 0;
     updateListeningTimeDisplay();
@@ -4384,6 +4782,8 @@ applyAutoUpdateSetting(autoCheckUpdates);
 applyGlobalShortcutSettings();
 applyLyricTranslationSetting(lyricTranslationEnabled);
 applyWordLyricsSetting(wordLyricsEnabled);
+localStorage.removeItem("medo.appleMusicEnabled");
+localStorage.removeItem("medo.appleMusicStorefront");
 applyDesktopLyricSize(desktopLyricSize);
 applyDesktopLyricColors();
 applyDetailLyricSize(detailLyricSize);
@@ -4395,7 +4795,7 @@ removeRedundantMusicFolders();
 document.querySelector("#toggle-detail-track").classList.add("active");
 document.querySelector("#toggle-detail-queue").classList.add("active");
 updatePlayModeButton();
-document.querySelector(".app-shell").classList.toggle("sidebar-collapsed", sidebarCollapsed);
+syncSidebarState();
 document.documentElement.style.setProperty("--sidebar-width", `${sidebarWidth}px`);
 render();
 scheduleListeningCalendarRollover();
@@ -4428,10 +4828,12 @@ window.medo.onTrayCommand(({ command, value }) => {
     ensureAudioProcessing();
     applyOutputVolume();
     updateVolumeDisplay();
+    schedulePersist("playback");
   } else if (command === "toggle-mute") {
     audio.muted = !audio.muted;
     updateMuteButton();
     window.medo.setTrayMuted(audio.muted);
+    schedulePersist("playback");
   } else if (command === "set-mode") {
     playMode = value;
     if (playMode === "shuffle") {
@@ -4440,7 +4842,7 @@ window.medo.onTrayCommand(({ command, value }) => {
       shuffleHistoryIds = [];
       shuffleHistoryIndex = -1;
     }
-    persist();
+    persist("settings");
     updatePlayModeButton();
   } else if (command === "desktop-lyric-size") {
     applyDesktopLyricSize(value);

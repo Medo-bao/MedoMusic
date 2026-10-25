@@ -1,5 +1,6 @@
 const crypto = require("node:crypto");
-const { hasNativeWordTiming } = require("./lyrics-timing");
+const { hasNativeWordTiming, lyricTimingQuality } = require("./lyrics-timing");
+const { findNativeWordCandidate } = require("./lyrics-candidates");
 const { normalizeLyricOptions, scoreLyricCandidate, rankLyricCandidates, isUsableLyricText } = require("./lyrics-matching");
 
 const EAPI_URL = "https://interface3.music.163.com/eapi/song/lyric/v1";
@@ -71,7 +72,7 @@ async function searchNeteaseSongs(options, fetchImplementation = fetch) {
   const { title, artist } = normalizeLyricOptions(options);
   if (!title) return [];
   const query = new URLSearchParams({
-    s: `${title} ${artist}`.trim(), type: "1", offset: "0", total: "true", limit: "12"
+    s: `${title} ${artist}`.trim(), type: "1", offset: "0", total: "true", limit: "30"
   });
   const response = await fetchImplementation(`https://music.163.com/api/cloudsearch/pc?${query}`, {
     headers: { Referer: "https://music.163.com/", "User-Agent": USER_AGENT },
@@ -84,38 +85,77 @@ async function searchNeteaseSongs(options, fetchImplementation = fetch) {
   return Array.isArray(songs) ? songs : [];
 }
 
-async function fetchNeteaseLyricsOnce(options, fetchImplementation) {
+async function fetchNeteaseLyricsOnce(options, fetchImplementation, onCandidate, onFailure) {
   options = normalizeLyricOptions(options);
-  const rankSongs = songs => rankLyricCandidates(rankNeteaseSongs(songs, options), options);
-  let ranked = rankSongs(await searchNeteaseSongs(options, fetchImplementation));
-  if (!ranked.length && options.artist) ranked = rankSongs(await searchNeteaseSongs({ ...options, artist: "" }, fetchImplementation));
+  const rankSongs = songs => rankLyricCandidates(rankNeteaseSongs(songs, options).filter(item => item.song.id), options);
   const requireWords = options.requireWordTiming || options.mode === "network";
   let fallback = null;
   let failure = null;
-  for (const best of ranked.filter(item => item.song.id).slice(0, 4)) {
-    let payload;
-    try {
-      payload = await fetchNeteaseNewLyrics(best.song.id, fetchImplementation);
-      if (payload?.code && payload.code !== 200) throw new Error("netease-lyrics-unavailable");
-    } catch (error) { failure = error; continue; }
-    const wordTimed = hasNativeWordTiming(payload?.yrc?.lyric);
+  let fallbackIndex = Infinity;
+  const checked = new Set();
+  const recordFailure = error => { failure = error; onFailure?.(error); };
+  const lookup = async (best, signal = null) => {
+    const fetchCandidate = signal ? (url, init) => fetchImplementation(url, { ...init,
+      signal: AbortSignal.any([init.signal, signal]) }) : fetchImplementation;
+    const payload = await fetchNeteaseNewLyrics(best.song.id, fetchCandidate);
+    if (payload?.code && payload.code !== 200) throw new Error("netease-lyrics-unavailable");
+    const wordTimed = hasNativeWordTiming(payload?.yrc?.lyric) && isUsableLyricText(payload.yrc.lyric);
     const text = wordTimed ? payload.yrc.lyric : payload?.lrc?.lyric || "";
-    if (!isUsableLyricText(text)) continue;
-    const result = {
+    if (!isUsableLyricText(text)) return null;
+    return {
       text,
       source: wordTimed ? "netease-word" : "netease-line",
       confidence: Math.round(best.score * 100),
       match: { title: best.title, artist: best.artist, album: best.album || "", duration: best.duration }
     };
-    if (!requireWords || wordTimed) return result;
-    fallback ||= result;
+  };
+  const retain = (result, index) => {
+    const quality = lyricTimingQuality(result.text), previousQuality = lyricTimingQuality(fallback?.text);
+    if (quality > previousQuality || quality === previousQuality && index < fallbackIndex) {
+      fallback = result;
+      fallbackIndex = index;
+    }
+    onCandidate?.(result, index);
+  };
+  for (const [pass, artist] of (options.artist ? [options.artist, ""] : [""]).entries()) {
+    if (pass && lyricTimingQuality(fallback?.text) >= 1) break;
+    let ranked;
+    try { ranked = rankSongs(await searchNeteaseSongs({ ...options, artist }, fetchImplementation)); }
+    catch (error) {
+      if (!pass) throw error;
+      recordFailure(error);
+      break;
+    }
+    const candidates = [];
+    for (const best of ranked) {
+      const id = best.song.id;
+      if (!id || checked.has(String(id))) continue;
+      checked.add(String(id));
+      candidates.push(best);
+      if (candidates.length === 4) break;
+    }
+    const offset = pass * 4;
+    if (requireWords) {
+      const native = await findNativeWordCandidate(candidates, lookup,
+        (found, index) => retain(found, offset + index), recordFailure);
+      if (native) return native;
+    } else {
+      for (const [index, best] of candidates.entries()) {
+        try {
+          const result = await lookup(best);
+          if (!result) continue;
+          retain(result, offset + index);
+          if (lyricTimingQuality(result.text) >= 1) return result;
+        } catch (error) { recordFailure(error); }
+      }
+    }
   }
   if (!fallback && failure) throw failure;
   return fallback;
 }
 
-async function fetchNeteaseLyrics(options, fetchImplementation = fetch) {
-  return fetchNeteaseLyricsOnce(options, fetchImplementation);
+async function fetchNeteaseLyrics(options, fetchImplementation = fetch, onCandidate = null, onFailure = null) {
+  return fetchNeteaseLyricsOnce(options, fetchImplementation, onCandidate, onFailure);
 }
 
 module.exports = {

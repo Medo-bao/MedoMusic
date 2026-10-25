@@ -1,13 +1,27 @@
 const assert = require("node:assert/strict");
 const { encryptQrc } = require("qrc-decoder");
-const { decodeQqLyricJsonp, extractQrcLyric, searchSongsFromPayload, fetchQqMusicLyrics } = require("../src/qq-music");
+const { decodeQqLyricJsonp, decodeQqLyricText, alignQqTranslation, extractQrcLyric, searchSongsFromPayload, fetchQqMusicLyrics } = require("../src/qq-music");
 const { createOnlineLyricsSearch } = require("../src/lyrics-search");
 
 const callback = "MusicJsonCallback_lrc";
 const lyric = "[00:01.00]测试歌词";
 const payload = Buffer.from(lyric, "utf8").toString("base64");
-assert.equal(decodeQqLyricJsonp(`${callback}(${JSON.stringify({ code: 0, lyric: payload })})`, callback), lyric);
+const decoded = decodeQqLyricJsonp(`${callback}(${JSON.stringify({ code: 0, lyric: payload })})`, callback);
+assert.equal(decoded.lyric, lyric);
+assert.deepEqual(decodeQqLyricText(`${callback}(${JSON.stringify({ code: 0, lyric: payload })})`, callback), lyric);
 assert.equal(decodeQqLyricJsonp("invalid", callback), null);
+assert.equal(decodeQqLyricText("invalid", callback), null);
+
+// Translation alignment keeps only lines that share a timestamp (+-0.35 s).
+const translationLrc = "[00:01.00]转写歌词\n[00:03.50]第二句翻译";
+const aligned = alignQqTranslation(lyric + "\n[00:03.50]第二句", translationLrc);
+assert.deepEqual(aligned, ["转写歌词", "第二句翻译"]);
+assert.equal(alignQqTranslation(lyric, ""), null);
+const unaligned = alignQqTranslation("[00:10.00]只有一句", "[00:01.00]错位翻译");
+assert.deepEqual(unaligned, [""], "A distant translation never becomes a line");
+const translatedPayload = Buffer.from(translationLrc, "utf8").toString("base64");
+const withTrans = decodeQqLyricJsonp(`${callback}(${JSON.stringify({ code: 0, lyric: payload, trans: translatedPayload })})`, callback);
+assert.equal(withTrans.translation, translationLrc);
 
 const qrcText = "[1000,1000]逐(1000,500)字(1500,500)";
 const qrcXml = `<?xml version="1.0"?><QrcInfos><LyricInfo><Lyric_1 LyricType="1" LyricContent="${qrcText}"/></LyricInfo></QrcInfos>`;

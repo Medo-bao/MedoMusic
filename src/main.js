@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, globalShortcut, ipcMain, nativeImage, nativeTheme, Tray, Menu, protocol, screen, shell } = require("electron");
+const { app, BrowserWindow, dialog, globalShortcut, ipcMain, nativeImage, nativeTheme, powerMonitor, Tray, Menu, protocol, screen, shell } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs/promises");
 const fsSync = require("node:fs");
@@ -8,7 +8,7 @@ const { parseZpl } = require("./zpl");
 const { pruneCoverCache } = require("./cover-cache");
 const { decodeTextBuffer } = require("./text-decoder");
 const { createMediaFileResponse } = require("./media-file-response");
-const { hasNativeWordTiming } = require("./lyrics-timing");
+const { hasNativeWordTiming, lyricTimingQuality } = require("./lyrics-timing");
 const { createOnlineLyricsSearch, LYRICS_CACHE_VERSION } = require("./lyrics-search");
 const { cleanLyricTag, isUsableLyricText } = require("./lyrics-matching");
 const { resolveOnlineLyricProviders, selectLocalLyrics } = require("./lyrics-source-priority");
@@ -17,6 +17,7 @@ const { attachWindowMaterial } = require("./window-material");
 const { createBackgroundImageStore } = require("./background-image-store");
 const { startupBounds, attachWindowScaling } = require("./window-scaling");
 const { createGlobalShortcutManager } = require("./global-shortcuts");
+const { createSleepTimer } = require("./sleep-timer");
 
 const WINDOWS_APP_USER_MODEL_ID = "com.medomusic.desktop";
 const WINDOWS_TRAY_GUID = "8c33d388-8b65-4e7c-a54d-1af447cd8bfa";
@@ -49,10 +50,21 @@ let myFireflyExtension = null;
 const myFireflyPending = new Map();
 let closeBehavior = "background";
 let isQuitting = false;
+const sleepTimer = createSleepTimer({
+  onExpire() {
+    isQuitting = true;
+    app.quit();
+  },
+  onChange(state) {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send("app:sleep-timer", state);
+  }
+});
 let metadataCache = null;
 let metadataCacheLoad = null;
 const pendingCoverPaths = new Set();
 let metadataCacheWriteTimer = null;
+let metadataCacheDirty = false;
+let metadataCoverReferences = new Set();
 let onlineLyricsCache = null;
 let onlineLyricsCacheLoad = null;
 let onlineLyricsCacheWriteTimer = null;
@@ -179,16 +191,22 @@ async function getMetadataCache() {
       const serialized = await fs.readFile(path.join(app.getPath("userData"), "metadata-cache.json"), "utf8");
       metadataCache ||= serialized.length <= 20 * 1024 * 1024 ? JSON.parse(serialized) : {};
     } catch { metadataCache ||= {}; }
-    scheduleMetadataCacheWrite();
+    scheduleMetadataCacheWrite(true);
     return metadataCache;
   })();
   return metadataCacheLoad;
 }
 
-function scheduleMetadataCacheWrite() {
-  trimRecord(metadataCache, 1200);
+function scheduleMetadataCacheWrite(changed = false) {
+  if (changed) {
+    trimRecord(metadataCache, 1200);
+    metadataCacheDirty = true;
+    metadataCoverReferences = new Set(Object.values(metadataCache || {}).map(entry => entry.coverPath).filter(Boolean));
+  }
   clearTimeout(metadataCacheWriteTimer);
   metadataCacheWriteTimer = setTimeout(async () => {
+    const prune = metadataCacheDirty;
+    metadataCacheDirty = false;
     const entries = Object.entries(metadataCache || {}).slice(-1200);
     try {
       await fs.writeFile(
@@ -196,12 +214,12 @@ function scheduleMetadataCacheWrite() {
         JSON.stringify(Object.fromEntries(entries)),
         "utf8"
       );
-      await pruneCoverCache(coverCacheDirectory(), filePath => pendingCoverPaths.has(filePath) ||
-        Object.values(metadataCache || {}).some(entry => entry.coverPath === filePath));
+      if (prune) await pruneCoverCache(coverCacheDirectory(), filePath =>
+        pendingCoverPaths.has(filePath) || metadataCoverReferences.has(filePath));
     } catch {
       // Cache failures must never interrupt playback or library loading.
     }
-  }, 800);
+  }, metadataCacheDirty ? 800 : 30000);
 }
 
 async function getOnlineLyricsCache() {
@@ -485,6 +503,7 @@ function showLyricsWindowWhenReady(window) {
     lyricsWindowShowWhenReady = true;
     return;
   }
+  if (lastLyricsWindowPayload) window.webContents.send("lyrics-window:line", { ...lastLyricsWindowPayload, restoring: true });
   window.showInactive();
   keepLyricsWindowOnTop(window);
 }
@@ -508,7 +527,7 @@ function updateLyricsWindowPointerTracking() {
   lyricsWindowPointerTimer = null;
   lyricsWindowPointerInside = false;
   lyricsWindow?.webContents.send("lyrics-window:pointer-inside", false);
-  if (!lyricsWindowLocked || !lyricsWindow || lyricsWindow.isDestroyed()) return;
+  if (!lyricsWindowLocked || !lyricsWindow || lyricsWindow.isDestroyed() || !lyricsWindow.isVisible()) return;
   lyricsWindowPointerTimer = setInterval(() => {
     if (!lyricsWindow || lyricsWindow.isDestroyed() || !lyricsWindow.isVisible()) return;
     const point = screen.getCursorScreenPoint();
@@ -550,7 +569,6 @@ function setLyricsWindowVisible(visible, senderWindow) {
   if (visible) {
     showLyricsWindowWhenReady(window);
     keepLyricsWindowOnTop(window);
-    if (lastLyricsWindowPayload) window.webContents.send("lyrics-window:line", lastLyricsWindowPayload);
   } else {
     lyricsWindowShowWhenReady = false;
     window.hide();
@@ -568,7 +586,7 @@ async function restoreLyricsWindowVisibility() {
     const window = createLyricsWindow();
     showLyricsWindowWhenReady(window);
     keepLyricsWindowOnTop(window);
-    if (lastLyricsWindowPayload) window.webContents.send("lyrics-window:line", lastLyricsWindowPayload);
+    if (lastLyricsWindowPayload) window.webContents.send("lyrics-window:line", { ...lastLyricsWindowPayload, restoring: true });
   }
   mainWindow?.webContents.send("lyrics-window:visibility", visible);
   refreshTrayMenu();
@@ -687,7 +705,7 @@ function createLyricsWindow() {
   lyricsWindow.webContents.on("did-finish-load", () => {
     lyricsWindowReady = true;
     keepLyricsWindowOnTop(lyricsWindow);
-    if (lastLyricsWindowPayload) lyricsWindow?.webContents.send("lyrics-window:line", lastLyricsWindowPayload);
+    if (lastLyricsWindowPayload) lyricsWindow?.webContents.send("lyrics-window:line", { ...lastLyricsWindowPayload, restoring: true });
     lyricsWindow?.webContents.send("lyrics-window:lock-state", lyricsWindowLocked);
     updateLyricsWindowPointerTracking();
     if (lyricsWindowShowWhenReady && lyricsWindow && !lyricsWindow.isDestroyed()) {
@@ -696,7 +714,8 @@ function createLyricsWindow() {
       keepLyricsWindowOnTop(lyricsWindow);
     }
   });
-  lyricsWindow.on("show", () => keepLyricsWindowOnTop(lyricsWindow));
+  lyricsWindow.on("show", () => { keepLyricsWindowOnTop(lyricsWindow); updateLyricsWindowPointerTracking(); });
+  lyricsWindow.on("hide", updateLyricsWindowPointerTracking);
   lyricsWindow.on("always-on-top-changed", (_event, isAlwaysOnTop) => {
     if (!isAlwaysOnTop) setTimeout(() => keepLyricsWindowOnTop(lyricsWindow), 0);
   });
@@ -771,10 +790,25 @@ async function toTrackWithFileTimes(filePath) {
   return track;
 }
 
+async function mapFileBatch(items, read = toTrackWithFileTimes) {
+  const results = new Array(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(16, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await read(items[index]);
+    }
+  }));
+  return results;
+}
+
 app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) return;
   queueExternalAudioFiles(process.argv.slice(1));
   getMetadataCache().catch(() => {});
+  // Retire credentials saved by the removed account-only lyrics provider.
+  await fs.rm(path.join(app.getPath("userData"), "apple-music.json"), { force: true })
+    .catch(error => console.warn("Retired lyrics settings cleanup failed", error.code));
   const backgroundImages = createBackgroundImageStore(app.getPath("userData"), nativeImage);
   backgroundMaterialMode = (await backgroundImages.get()).material;
   const updateBackground = async operation => {
@@ -832,6 +866,10 @@ app.whenReady().then(async () => {
     await shell.openExternal("https://github.com/Medo-bao/MedoMusic");
     return true;
   });
+  ipcMain.handle("app:sleep-timer:get", () => sleepTimer.getState());
+  ipcMain.handle("app:sleep-timer:start", (_event, minutes) => sleepTimer.start(minutes));
+  ipcMain.handle("app:sleep-timer:cancel", () => sleepTimer.cancel());
+  powerMonitor.on("resume", sleepTimer.check);
   ipcMain.handle("app:check-update", async (_event, options) => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
@@ -881,7 +919,7 @@ app.whenReady().then(async () => {
       for (const playlistPath of playlistFiles) {
         try {
           const playlist = await parseZpl(playlistPath, toTrack);
-          playlist.tracks = await Promise.all(playlist.tracks.map(async (track) => ({ ...await toTrackWithFileTimes(track.path), playlists: track.playlists })));
+          playlist.tracks = await mapFileBatch(playlist.tracks, async track => ({ ...await toTrackWithFileTimes(track.path), playlists: track.playlists }));
           parsedPlaylists.push(playlist);
         } catch (error) {
           if (error.code) throw error;
@@ -890,7 +928,7 @@ app.whenReady().then(async () => {
       }
       return {
         folder,
-        tracks: await Promise.all(audioFiles.map(async (filePath) => ({ ...await toTrackWithFileTimes(filePath), sourceDirectory: folder }))),
+        tracks: await mapFileBatch(audioFiles, async filePath => ({ ...await toTrackWithFileTimes(filePath), sourceDirectory: folder })),
         playlists: parsedPlaylists
       };
     } catch {
@@ -953,11 +991,12 @@ app.whenReady().then(async () => {
     event.sender.once("destroyed", cancel);
     try {
       const lrcPath = path.join(path.dirname(filePath), `${path.basename(filePath, path.extname(filePath))}.lrc`);
-      const requireWordTiming = options.mode === "network" || options.requireWordTiming === true;
-      const onlineProviders = resolveOnlineLyricProviders(options.mode, requireWordTiming);
+      const mode = options.mode || "auto";
+      const requireWordTiming = mode === "network" || options.requireWordTiming === true;
+      const onlineProviders = resolveOnlineLyricProviders(mode, requireWordTiming);
       let embeddedText = "";
       let sidecarText = "";
-      if (!options.force && !options.ignoreLocal) {
+      if (mode === "local" || (!options.force && !options.ignoreLocal)) {
         try {
           const { parseFile } = await import("music-metadata");
           const metadata = await parseFile(filePath, { duration: false, skipCovers: true });
@@ -972,15 +1011,18 @@ app.whenReady().then(async () => {
       if (controller.signal.aborted) return { text: "", source: null, cancelled: true };
       const local = selectLocalLyrics(isUsableLyricText(embeddedText) ? embeddedText : "",
         isUsableLyricText(sidecarText) ? sidecarText : "");
-      if (!onlineProviders.length || (options.mode === "auto" && !requireWordTiming && local.text)) return local;
-      if (hasNativeWordTiming(embeddedText)) return { text: embeddedText, source: "embedded", confidence: null };
-      if (hasNativeWordTiming(sidecarText)) return { text: sidecarText, source: "sidecar", confidence: null };
+      if (!onlineProviders.length || (local.text && (!requireWordTiming && mode === "auto" || hasNativeWordTiming(local.text)))) return local;
       const found = await searchOnlineLyrics({
         ...options,
         title: cleanLyricTag(options.title) || path.basename(filePath, path.extname(filePath))
       }, { signal: controller.signal });
       if (found.cancelled) return found;
-      return found.text || !local.text ? found : local;
+      // Automatic word lookup upgrades local lyrics only when synchronization
+      // improves. Keep the online retry deadline for a local fallback.
+      if (local.text && lyricTimingQuality(local.text) >= lyricTimingQuality(found.text)) {
+        return { ...local, retryAt: found.retryAt };
+      }
+      return found;
     } finally {
       controller.abort();
       event.sender.removeListener("destroyed", cancel);
@@ -1023,8 +1065,9 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.on("lyrics-window:update", (_event, payload) => {
-    lastLyricsWindowPayload = payload;
-    if (!lyricsWindow || lyricsWindow.isDestroyed()) return;
+    const { positionOnly, colorsOnly, ...state } = payload;
+    lastLyricsWindowPayload = positionOnly || colorsOnly ? { ...lastLyricsWindowPayload, ...state } : state;
+    if (!lyricsWindow || lyricsWindow.isDestroyed() || !lyricsWindow.isVisible()) return;
     lyricsWindow.webContents.send("lyrics-window:line", payload);
   });
 
@@ -1187,7 +1230,7 @@ app.whenReady().then(async () => {
       delete cache[filePath];
       cache[filePath] = { mtimeMs: stat.mtimeMs, size: stat.size, coverVersion: METADATA_COVER_VERSION, coverPath: cachedCoverPath, value };
       if (writtenCoverPath) pendingCoverPaths.delete(writtenCoverPath);
-      scheduleMetadataCacheWrite();
+      scheduleMetadataCacheWrite(true);
       return value;
     } catch {
       return null;
@@ -1221,6 +1264,8 @@ app.whenReady().then(async () => {
   ipcMain.handle("music:clear-metadata-cache", async () => {
     metadataCache = {};
     metadataCacheLoad = null;
+    metadataCoverReferences.clear();
+    metadataCacheDirty = false;
     clearTimeout(metadataCacheWriteTimer);
     try {
       await fs.rm(path.join(app.getPath("userData"), "metadata-cache.json"), { force: true });
@@ -1240,7 +1285,7 @@ app.whenReady().then(async () => {
         extensions: [...AUDIO_EXTENSIONS].map((item) => item.slice(1))
       }]
     });
-    return result.canceled ? [] : Promise.all(result.filePaths.map(toTrackWithFileTimes));
+    return result.canceled ? [] : mapFileBatch(result.filePaths);
   });
 
   ipcMain.handle("music:choose-folder", async () => {
@@ -1253,10 +1298,7 @@ app.whenReady().then(async () => {
     const files = await walkDirectory(folder);
     return {
       folder,
-      tracks: await Promise.all(files.map(async (filePath) => ({
-        ...await toTrackWithFileTimes(filePath),
-        sourceDirectory: folder
-      })))
+      tracks: await mapFileBatch(files, async filePath => ({ ...await toTrackWithFileTimes(filePath), sourceDirectory: folder }))
     };
   });
 
@@ -1266,10 +1308,7 @@ app.whenReady().then(async () => {
       const files = await walkDirectory(folder);
       return {
         folder,
-        tracks: await Promise.all(files.map(async (filePath) => ({
-          ...await toTrackWithFileTimes(filePath),
-          sourceDirectory: folder
-        })))
+        tracks: await mapFileBatch(files, async filePath => ({ ...await toTrackWithFileTimes(filePath), sourceDirectory: folder }))
       };
     } catch {
       return null;
@@ -1288,7 +1327,7 @@ app.whenReady().then(async () => {
     });
     if (result.canceled) return null;
     const playlist = await parseZpl(result.filePaths[0], toTrack);
-    playlist.tracks = await Promise.all(playlist.tracks.map(async (track) => ({ ...await toTrackWithFileTimes(track.path), playlists: track.playlists })));
+    playlist.tracks = await mapFileBatch(playlist.tracks, async track => ({ ...await toTrackWithFileTimes(track.path), playlists: track.playlists }));
     return playlist;
   });
 
@@ -1308,7 +1347,7 @@ app.whenReady().then(async () => {
     }
     try {
       const playlist = await parseZpl(playlistPath, toTrack);
-      playlist.tracks = await Promise.all(playlist.tracks.map(async (track) => ({ ...await toTrackWithFileTimes(track.path), playlists: track.playlists })));
+      playlist.tracks = await mapFileBatch(playlist.tracks, async track => ({ ...await toTrackWithFileTimes(track.path), playlists: track.playlists }));
       return playlist;
     } catch {
       return null;
@@ -1340,6 +1379,7 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   isQuitting = true;
+  sleepTimer.cancel();
   globalShortcuts.stop();
   closeMusicFolderWatchers();
   for (const pending of myFireflyPending.values()) {

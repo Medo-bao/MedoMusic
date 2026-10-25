@@ -7,6 +7,8 @@ let dragPointerId = null;
 let lastScreenX = 0;
 let lastScreenY = 0;
 let activeWords = [];
+let activeWordLengths = [];
+let activeWordCharacters = 1;
 let lyricLayoutFrame = null;
 let lastRequestedHeight = 0;
 let lastRequestedWidth = 0;
@@ -126,7 +128,6 @@ function renderKaraokeText(element, text, enabled) {
 function updateWordProgress(position) {
   const time = Number(position) || 0;
   if (!activeWords.length) return;
-  const totalCharacters = Math.max(1, activeWords.reduce((total, word) => total + [...word.text].length, 0));
   let completedCharacters = 0;
   for (let index = 0; index < activeWords.length; index += 1) {
     const word = activeWords[index];
@@ -135,30 +136,36 @@ function updateWordProgress(position) {
     const nextStart = Number(activeWords[index + 1]?.start);
     const end = storedEnd > start ? storedEnd : Number.isFinite(nextStart) ? nextStart : start + .48;
     const progress = Math.max(0, Math.min(1, (time + .04 - start) / Math.max(.08, end - start)));
-    const length = [...word.text].length;
+    const length = activeWordLengths[index];
     if (progress >= 1) completedCharacters += length;
     else {
       completedCharacters += length * progress;
       break;
     }
   }
-  const value = `${Math.max(0, Math.min(100, completedCharacters / totalCharacters * 100))}%`;
-  current.style.setProperty("--line-progress", value);
-  if (next.classList.contains("translation-karaoke")) next.style.setProperty("--line-progress", value);
+  const value = `${Math.max(0, Math.min(100, completedCharacters / activeWordCharacters * 100))}%`;
+  if (current.style.getPropertyValue("--line-progress") !== value) current.style.setProperty("--line-progress", value);
+  if (next.classList.contains("translation-karaoke") && next.style.getPropertyValue("--line-progress") !== value) next.style.setProperty("--line-progress", value);
 }
 
 applyLyricSize();
 window.medo.onLyricsWindowLine((payload = {}) => {
   if (typeof payload.playing === "boolean") document.body.classList.toggle("paused", !payload.playing);
+  if (payload.positionOnly) { updateWordProgress(payload.position); return; }
   if (typeof payload.noLyrics === "boolean") document.body.classList.toggle("no-lyrics", payload.noLyrics);
   if (payload.primary) document.documentElement.style.setProperty("--lyric-primary", payload.primary);
   if (payload.secondary) document.documentElement.style.setProperty("--lyric-secondary", payload.secondary);
   if (payload.colorsOnly) return;
   const nextCurrent = payload.current || payload.title || "暂无歌词";
-  const nextLine = payload.currentTranslation
-    ? payload.currentTranslation
-    : payload.next || [payload.artist, payload.album].filter(Boolean).join(" · ") || "MedoMusic";
+  // Priority for the second row: background vocal duet line, then the existing
+  // translation, then the upcoming lyric line.
+  const secondary = payload.subline || payload.currentTranslation || payload.next ||
+    [payload.artist, payload.album].filter(Boolean).join(" · ") || "MedoMusic";
+  const nextLine = secondary;
   const incomingWords = Array.isArray(payload.words) ? payload.words : [];
+  activeWords = incomingWords;
+  activeWordLengths = activeWords.map(word => [...word.text].length);
+  activeWordCharacters = Math.max(1, activeWordLengths.reduce((sum, value) => sum + value, 0));
   const wordMode = incomingWords.length ? "word" : "line";
   const lineChanged = current.dataset.text !== nextCurrent || next.dataset.text !== nextLine || current.dataset.wordMode !== wordMode;
   if (lineChanged) {
@@ -167,12 +174,14 @@ window.medo.onLyricsWindowLine((payload = {}) => {
     current.dataset.wordMode = wordMode;
     activeWords = incomingWords;
     renderKaraokeText(current, nextCurrent, activeWords.length > 0);
-    const translationKaraoke = Boolean(payload.currentTranslation && activeWords.length);
-    next.classList.toggle("current-translation", Boolean(payload.currentTranslation));
+    const showTranslation = Boolean(payload.currentTranslation) && !payload.subline;
+    const translationKaraoke = Boolean(showTranslation && activeWords.length);
+    next.classList.toggle("current-translation", showTranslation);
     next.classList.toggle("translation-karaoke", translationKaraoke);
+    next.classList.toggle("background-vocal", Boolean(payload.subline));
     renderKaraokeText(next, nextLine, translationKaraoke);
     updateLyricLayout();
-    if (hasRenderedLyrics) animateLyricChange();
+    if (hasRenderedLyrics && !payload.restoring) animateLyricChange();
   }
   updateWordProgress(payload.position);
   hasRenderedLyrics = true;
