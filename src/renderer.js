@@ -1262,7 +1262,7 @@ function clearLyricRetry() {
 
 function scheduleLyricRetry(track, mode = null) {
   const entry = lyricsCache.get(track.id);
-  if (!wordLyricsEnabled || tracks[currentIndex]?.id !== track.id ||
+  if (!wordLyricsEnabled || entry?.manual || tracks[currentIndex]?.id !== track.id ||
       !entry?.wordTimingRequested || MedoLyricSync.hasWordLevelLines(entry.lines)) {
     if (lyricRetryState?.trackId === track.id) clearLyricRetry();
     return;
@@ -1295,6 +1295,7 @@ function scheduleLyricRetry(track, mode = null) {
 }
 
 function cancelPendingLyrics(exceptTrackId = null) {
+  if (manualLyricDialog.open && manualLyricsTrackId !== exceptTrackId) closeManualLyricSearch();
   if (!exceptTrackId || lyricRetryState?.trackId !== exceptTrackId) clearLyricRetry();
   let cancelled = false;
   for (const id of lyricsRequests.keys()) {
@@ -1303,6 +1304,27 @@ function cancelPendingLyrics(exceptTrackId = null) {
     cancelled = true;
   }
   if (cancelled) window.medo.cancelLyrics();
+}
+
+function storeTrackLyrics(track, result, parsed, requireWordTiming) {
+  // Provider translations stay aligned with the same parsed lines in both
+  // automatic lookup and a manually selected result.
+  if (Array.isArray(result?.translation) && result.translation.length === parsed.lines.length) {
+    parsed.lines.forEach((line, index) => {
+      const value = window.MedoZhConvert.toSimplified(String(result.translation[index] || "").trim());
+      if (value && value !== line.text) line.translations = { ...(line.translations || {}), "zh-hans": value };
+    });
+  }
+  lyricTranslations.delete(track.id);
+  lyricTranslationRequests.delete(track.id);
+  setBoundedCache(lyricsCache, track.id, {
+    ...parsed, source: result?.source || null, confidence: result?.confidence || null,
+    match: result?.match || null, manual: result?.manual === true,
+    wordTimingRequested: requireWordTiming, error: result?.error || null,
+    metadataKey: lyricMetadataKey(track),
+    retryAt: result?.retryAt || Date.now() + (result?.error ? 15000 : result?.text ? 30 * 86400000 : 120000)
+  });
+  if (lyricTranslationEnabled) ensureLyricTranslation(track);
 }
 
 async function ensureLyrics(track, force = false, modeOverride = null) {
@@ -1371,34 +1393,12 @@ async function ensureLyrics(track, force = false, modeOverride = null) {
       if (lyricsRequests.get(track.id) !== request || result?.cancelled) return;
       const parsed = parseLyrics(result?.text, track.duration);
       const previousIsWord = previousLyrics && MedoLyricSync.hasWordLevelLines(previousLyrics.lines);
-      if (previousLyrics && (!parsed.lines.length ||
+      if (previousLyrics && !result?.manual && (!parsed.lines.length ||
           ((requireWordTiming || !force && !modeOverride) && previousIsWord && !MedoLyricSync.hasWordLevelLines(parsed.lines)))) {
         retainPreviousLyrics(result);
         return;
       }
-      // Provider-supplied translations (QQ `trans`) are line-aligned and win
-      // over machine translation for the lines they cover.
-      if (Array.isArray(result?.translation) && result.translation.length === parsed.lines.length) {
-        parsed.lines.forEach((line, index) => {
-          const value = window.MedoZhConvert.toSimplified(String(result.translation[index] || "").trim());
-          if (value && value !== line.text) {
-            line.translations = { ...(line.translations || {}), "zh-hans": value };
-          }
-        });
-      }
-      lyricTranslations.delete(track.id);
-      lyricTranslationRequests.delete(track.id);
-      setBoundedCache(lyricsCache, track.id, {
-        ...parsed,
-        source: result?.source || null,
-        confidence: result?.confidence || null,
-        match: result?.match || null,
-        wordTimingRequested: requireWordTiming,
-        error: result?.error || null,
-        metadataKey: lyricMetadataKey(track),
-        retryAt: result?.retryAt || Date.now() + (result?.error ? 15000 : result?.text ? 30 * 86400000 : 120000)
-      });
-      if (lyricTranslationEnabled) ensureLyricTranslation(track);
+      storeTrackLyrics(track, result, parsed, requireWordTiming);
     })
     .catch(() => {
       if (lyricsRequests.get(track.id) !== request) return;
@@ -1566,7 +1566,7 @@ function renderLyricStatus(lyrics) {
     : source === "lrclib" ? "LRCLIB" : "未知来源";
   const kind = { plain: "纯文本歌词", line: "逐行歌词", mixed: "混合歌词", word: "逐字歌词" }[level];
   status.querySelector(".lyric-status-message").textContent = message;
-  status.querySelector(".lyric-status-source").textContent = hasLines ? `${sourceName} · ${kind}` : "";
+  status.querySelector(".lyric-status-source").textContent = hasLines ? `${sourceName} · ${kind}${lyrics.manual ? " · 手动选择" : ""}` : "";
   status.title = lyrics.match?.title
     ? `匹配曲目：${[lyrics.match.title, lyrics.match.artist].filter(Boolean).join(" · ")}` : "";
 }

@@ -516,6 +516,7 @@
                 <span>正在播放</span>
                 <span class="detail-queue-meta">
                   <strong id="detail-queue-count">0 首歌曲</strong>
+                  <button id="detail-search-lyrics" class="glyph" title="手动搜索网络歌词" aria-label="手动搜索网络歌词" aria-haspopup="dialog" aria-controls="lyric-search-dialog">&#xE721;</button>
                   <button id="detail-refresh-lyrics" class="glyph" title="从网络重新获取歌词" aria-label="从网络重新获取歌词">&#xE72C;</button>
                   <button id="detail-clear-queue" class="glyph" title="清空播放队列" aria-label="清空播放队列">&#xE74D;</button>
                 </span>
@@ -570,6 +571,24 @@
     </footer>
   </div>
   <audio id="audio"></audio>
+  <dialog id="lyric-search-dialog" class="lyric-search-dialog" aria-labelledby="lyric-search-heading">
+    <header class="lyric-search-header">
+      <div><h2 id="lyric-search-heading">手动搜索网络歌词</h2><p id="lyric-search-target"></p></div>
+      <button id="lyric-search-close" type="button" aria-label="关闭歌词搜索" autofocus>✕</button>
+    </header>
+    <form id="lyric-search-form" class="lyric-search-form">
+      <label>歌名<input id="lyric-search-title" name="title" required autocomplete="off" placeholder="输入歌名"></label>
+      <label>歌手<input id="lyric-search-artist" name="artist" autocomplete="off" placeholder="可选"></label>
+      <label class="lyric-search-source">来源<select id="lyric-search-provider" name="provider"><option value="auto">自动匹配</option><option value="all">全部来源</option><option value="qq">QQ 音乐</option><option value="netease">网易云音乐</option><option value="lrclib">LRCLIB</option></select></label>
+      <button id="lyric-search-submit" class="primary" type="submit">搜索</button>
+    </form>
+    <p id="lyric-search-status" class="lyric-search-status" role="status" aria-live="polite">输入歌名，搜索后选择结果预览</p>
+    <div class="lyric-search-body">
+      <section class="lyric-search-results-panel" aria-label="搜索结果"><div id="lyric-search-results" role="listbox" aria-label="歌词候选结果"></div></section>
+      <section class="lyric-search-preview-panel" aria-labelledby="lyric-preview-heading"><header><h3 id="lyric-preview-heading">歌词预览</h3><span id="lyric-preview-kind"></span></header><pre id="lyric-search-preview">选择左侧结果预览歌词</pre></section>
+    </div>
+    <footer class="lyric-search-footer"><button id="lyric-search-reset" type="button">恢复自动匹配</button><span>仅为当前歌曲记住选择</span><button id="lyric-search-apply" class="primary" type="button" disabled>使用</button></footer>
+  </dialog>
   <dialog id="sound-dialog" class="sound-dialog" aria-labelledby="sound-heading">
     <header class="sound-dialog-header"><div><h2 id="sound-heading">声音增强</h2></div><button id="close-sound-settings" aria-label="关闭声音增强">✕</button></header>
     <div class="sound-dialog-body">
@@ -627,6 +646,7 @@
   <script src="./shortcut-settings.js"></script>
   <script src="./zh-convert.js"></script>
   <script src="./ttml.js"></script>
+  <script src="./renderer-lyrics-search.js"></script>
   <script src="./renderer.js"></script>
   <script src="./renderer-sleep-timer.js"></script>
 </body>

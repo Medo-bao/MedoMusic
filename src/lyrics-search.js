@@ -230,4 +230,4 @@ function createOnlineLyricsSearch({
   };
 }
 
-module.exports = { createOnlineLyricsSearch, LYRICS_CACHE_VERSION };
+module.exports = { createOnlineLyricsSearch, LYRICS_CACHE_VERSION, withinDeadline };

@@ -112,7 +112,8 @@ body.settings-view {
 }
 .sidebar-resizer { top: 0; }
 .side-search { background: var(--control-material); border: 1px solid var(--module-edge); box-shadow: inset 0 1px var(--module-highlight); }
-.side-search:focus-within { border-color: var(--accent-ink); box-shadow: inset 0 1px var(--module-highlight); }
+/* Keep focus from adding a second background or border inside the search field. */
+#search-input:focus-visible { background: transparent; box-shadow: none; }
 .nav-item.active, .playlist-item.active { background: color-mix(in srgb, var(--accent) 10%, var(--surface)); color: var(--accent-ink); }
 .nav-item.active > span, .playlist-title.active > span,
 .playlist-item.active .playlist-item-name, .playlist-item.active .playlist-count,
@@ -350,7 +351,6 @@ body.playback-detail-active #toggle-detail-queue.active, body.playback-detail-ac
 .sound-band output, .sound-band span { color: var(--secondary); font-variant-numeric: tabular-nums; }
 button:focus-visible, input:not([type="range"]):focus-visible, select:focus-visible {
   background-color: color-mix(in srgb, var(--accent) 15%, var(--solid-panel));
-  box-shadow: inset 0 0 0 1px var(--accent-ink);
 }
 .sound-dialog .frequency-knob:focus-visible { background: transparent; box-shadow: none; }
 .sound-dialog .frequency-knob:focus-visible .knob-track { stroke: var(--accent-ink); }
@@ -408,7 +408,7 @@ button:focus-visible, input:not([type="range"]):focus-visible, select:focus-visi
   .detail-queue header .detail-queue-title { gap: 5px; }
   .detail-queue header .detail-queue-meta { gap: 2px; }
   .detail-queue-title > span:first-child { font-size: 14px; }
-  #detail-refresh-lyrics, #detail-clear-queue { width: 25px; }
+  #detail-search-lyrics, #detail-refresh-lyrics, #detail-clear-queue { width: 25px; }
 }
 @media (prefers-reduced-motion: reduce) {
   :root { transition: none; }

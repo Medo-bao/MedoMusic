@@ -112,7 +112,7 @@ async function searchQqSongs(query, fetchImplementation) {
     body: JSON.stringify(searchBody),
     signal: AbortSignal.timeout(6500)
   });
-  if (!response.ok) return [];
+  if (!response.ok) throw new Error("qq-search-unavailable");
   const payload = await response.json();
   if (payload.code || payload["music.search.SearchCgiService"]?.code || payload.req_1?.code) throw new Error("qq-search-unavailable");
   const songs = searchSongsFromPayload(payload);
@@ -262,6 +262,8 @@ module.exports = {
   alignQqTranslation,
   extractQrcLyric,
   searchSongsFromPayload,
+  searchQqSongs,
+  fetchQrcBySongId,
   fetchLineLyricWithTranslation,
   fetchQqMusicLyrics
 };

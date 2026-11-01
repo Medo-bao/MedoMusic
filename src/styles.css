@@ -239,11 +239,6 @@ button:focus-visible, input:focus-visible {
   border-radius: var(--radius-sm);
   transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
 }
-.side-search:focus-within {
-  background: var(--surface-raised);
-  border-color: var(--line-strong);
-  box-shadow: none;
-}
 .side-search input { min-width: 0; flex: 1; height: 100%; padding: 0 10px 0 0; border: 0; outline: 0; background: transparent; color: var(--text); }
 .side-search input::placeholder { color: var(--tertiary); }
 .side-search .glyph { order: -1; flex: 0 0 48px; width: 48px; padding: 0; font-size: 16px; text-align: center; }
@@ -831,7 +826,7 @@ h1 { margin: 0; font-size: 34px; line-height: 1.08; font-weight: 350; letter-spa
 .shortcut-modifiers input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .shortcut-modifiers span { display: block; min-width: 50px; padding: 7px 10px; border: 1px solid var(--glass-edge); border-radius: 6px; color: var(--secondary); background: var(--surface); text-align: center; font-size: 12px; }
 .shortcut-modifiers input:checked + span { color: var(--on-accent, white); background: var(--accent-gradient); border-color: transparent; }
-.shortcut-modifiers input:focus-visible + span { box-shadow: 0 0 0 2px var(--module-edge); }
+.shortcut-modifiers input:focus-visible + span { filter: brightness(1.12); }
 .shortcut-combination .shortcut-key-input { width: 112px; min-width: 0; padding: 7px 10px; border: 1px solid var(--glass-edge); border-radius: 6px; color: var(--text); background: var(--surface); font: inherit; font-size: 13px; }
 .shortcut-editor .secondary-button, .shortcut-editor .primary-button { min-width: 0; margin: 0; padding: 7px 13px; font-size: 12px; }
 .shortcut-editor .shortcut-draft { margin-top: 12px; color: var(--text); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
@@ -1231,6 +1226,7 @@ button.lyric-line { cursor: pointer; }
 .detail-queue header .detail-queue-meta { display: inline-flex; align-items: center; gap: 7px; }
 .detail-queue header span { font-size: 16px; font-weight: 600; }
 .detail-queue header strong { color: rgba(255,255,255,.55); font-size: 11px; font-weight: 400; }
+#detail-search-lyrics,
 #detail-refresh-lyrics,
 #detail-clear-queue {
   width: 28px;
@@ -1243,11 +1239,54 @@ button.lyric-line { cursor: pointer; }
   font-size: 15px;
   transition: color 160ms ease, background-color 160ms ease, transform 180ms var(--ease-out);
 }
+#detail-search-lyrics:hover,
 #detail-refresh-lyrics:hover,
 #detail-clear-queue:hover { color: white; background: rgba(255,255,255,.1); transform: scale(1.05); }
+#detail-search-lyrics:active,
 #detail-refresh-lyrics:active,
 #detail-clear-queue:active { transform: scale(.9); }
 #detail-refresh-lyrics.loading { color: white; animation: lyric-refresh-spin .72s linear infinite; pointer-events: none; }
+.lyric-search-dialog { width: min(900px, calc(100vw - 40px)); height: min(650px, calc(100vh - 48px)); padding: 0; color: var(--text); border: 1px solid var(--line); border-radius: 14px; background: var(--surface-raised); overflow: hidden; }
+.lyric-search-dialog[open] { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; }
+.lyric-search-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 22px 22px 16px; }
+.lyric-search-header h2 { margin: 0; font-size: 20px; font-weight: 620; }
+.lyric-search-header p { margin: 7px 0 0; color: var(--secondary); font-size: 12px; }
+#lyric-search-close { width: 30px; height: 30px; border-radius: 7px; flex-shrink: 0; }
+#lyric-search-close:hover { background: var(--surface-hover); }
+.lyric-search-form { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) 130px auto; align-items: end; gap: 12px; padding: 0 22px; }
+.lyric-search-form label { display: grid; gap: 7px; color: var(--secondary); font-size: 12px; }
+.lyric-search-form input, .lyric-search-form select { width: 100%; min-width: 0; height: 36px; padding: 0 10px; color: var(--text); border: 1px solid var(--line); border-radius: 7px; background: var(--control-material, var(--surface)); font: inherit; }
+.lyric-search-source { position: relative; }
+.lyric-search-source select { appearance: none; padding-right: 36px; }
+.lyric-search-source::after { content: ""; position: absolute; right: 14px; bottom: 16px; width: 7px; height: 7px; box-sizing: border-box; border: solid var(--text); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); pointer-events: none; }
+.lyric-search-form select option { background: var(--solid-panel, var(--background)); color: var(--text); }
+.lyric-search-dialog .primary { min-height: 36px; padding: 0 18px; color: var(--on-accent, white); border-radius: 7px; background: var(--accent); font-weight: 550; }
+.lyric-search-dialog button:disabled { opacity: .45; cursor: default; }
+.lyric-search-status { min-height: 18px; margin: 12px 22px; color: var(--secondary); font-size: 12px; }
+.lyric-search-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-height: 0; border-block: 1px solid var(--line); }
+.lyric-search-results-panel { min-width: 0; overflow: auto; border-right: 1px solid var(--line); padding: 8px; }
+.lyric-search-result { width: 100%; display: grid; gap: 6px; padding: 12px; border-radius: 8px; text-align: left; color: var(--text); }
+.lyric-search-result:hover { background: var(--surface-hover); }
+.lyric-search-result[aria-selected="true"] { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+.lyric-search-result strong { font-size: 14px; font-weight: 580; }
+.lyric-search-result span { color: var(--secondary); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.lyric-search-preview-panel { display: grid; grid-template-rows: auto minmax(0, 1fr); min-width: 0; min-height: 0; }
+.lyric-search-preview-panel header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 15px 18px 9px; }
+.lyric-search-preview-panel h3 { margin: 0; font-size: 13px; font-weight: 580; }
+#lyric-preview-kind { color: var(--secondary); font-size: 11px; }
+#lyric-search-preview { margin: 0; padding: 6px 18px 18px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 14px; line-height: 1.9; user-select: text; }
+.lyric-search-footer { display: flex; align-items: center; gap: 12px; padding: 15px 22px; }
+#lyric-search-reset { padding: 8px 0; color: var(--secondary); }
+#lyric-search-reset:hover { color: var(--text); }
+.lyric-search-footer > span { margin-left: auto; color: var(--secondary); font-size: 11px; }
+@media (max-width: 760px) {
+  .lyric-search-form { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .lyric-search-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(100px, 1fr) minmax(120px, 1.2fr); }
+  .lyric-search-results-panel { border-right: 0; border-bottom: 1px solid var(--line); }
+  .lyric-search-footer { flex-wrap: wrap; }
+  .lyric-search-footer > span { display: none; }
+  #lyric-search-apply { margin-left: auto; }
+}
 .detail-save-queue { min-height: 30px; display: flex; align-items: center; justify-content: center; gap: 7px; color: white; border-radius: 7px; background: rgba(var(--detail-theme-rgb, 113,135,255), .16); font-size: 12px; }
 .detail-save-queue:hover { color: white; background: rgba(var(--detail-theme-rgb, 113,135,255), .26); }
 .detail-save-queue .glyph,
@@ -1850,8 +1889,10 @@ body.playback-detail-active #lyric-translation-toggle:not([hidden]) {
 [data-theme="light"] .detail-queue header strong,
 [data-theme="light"] .queue-index,
 [data-theme="light"] .queue-copy small { color: rgba(24,33,38,.68); }
+[data-theme="light"] #detail-search-lyrics,
 [data-theme="light"] #detail-refresh-lyrics,
 [data-theme="light"] #detail-clear-queue { color: rgba(24,33,38,.62); }
+[data-theme="light"] #detail-search-lyrics:hover,
 [data-theme="light"] #detail-refresh-lyrics:hover,
 [data-theme="light"] #detail-clear-queue:hover { color: #111a20; background: rgba(24,33,38,.08); }
 [data-theme="light"] .queue-index { color: rgba(24,33,38,.76); font-weight: 620; }
@@ -2308,7 +2349,7 @@ input[type="range"] { height: 3px; accent-color: var(--accent); cursor: pointer;
 .sound-frequency[hidden], .sound-frequency-input[hidden] { display:none; }
 
 /* Use quiet tonal keyboard feedback without focus rings. */
-select:focus, input:focus, button:focus, [role="button"]:focus { outline:none; }
+select:focus, input:focus, button:focus, [role="button"]:focus, [tabindex]:focus { outline:none; }
 button:focus-visible, select:focus-visible { filter:brightness(1.12); }
 input:not([type="range"]):not([type="checkbox"]):focus-visible { background-color:var(--surface-raised); }
 #progress:focus-visible::-webkit-slider-thumb, #volume:focus-visible::-webkit-slider-thumb { box-shadow:0 2px 6px #0003; }

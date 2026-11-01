@@ -12,6 +12,7 @@ const { hasNativeWordTiming, lyricTimingQuality } = require("./lyrics-timing");
 const { createOnlineLyricsSearch, LYRICS_CACHE_VERSION } = require("./lyrics-search");
 const { cleanLyricTag, isUsableLyricText } = require("./lyrics-matching");
 const { resolveOnlineLyricProviders, selectLocalLyrics } = require("./lyrics-source-priority");
+const { searchManualLyrics, readManualLyrics, createLyricSelections } = require("./manual-lyrics");
 const { startMyFireflyExtension } = require("./myfirefly-extension");
 const { attachWindowMaterial } = require("./window-material");
 const { createBackgroundImageStore } = require("./background-image-store");
@@ -69,11 +70,38 @@ let onlineLyricsCache = null;
 let onlineLyricsCacheLoad = null;
 let onlineLyricsCacheWriteTimer = null;
 const lyricSearchRequests = new Map();
+const manualLyricSessions = new Map();
+const lyricSelections = createLyricSelections(path.join(app.getPath("userData"), "lyric-selections.json"));
 const searchOnlineLyrics = createOnlineLyricsSearch({
   getCache: getOnlineLyricsCache,
   onCacheChange: scheduleOnlineLyricsCacheWrite,
   userAgent: `MedoMusic/${app.getVersion()} (local Windows music player)`
 });
+
+function manualLyricSession(sender) {
+  if (!manualLyricSessions.has(sender.id)) {
+    const session = { candidates: new Map(), controller: null };
+    manualLyricSessions.set(sender.id, session);
+    sender.once("destroyed", () => {
+      session.controller?.abort();
+      manualLyricSessions.delete(sender.id);
+    });
+  }
+  return manualLyricSessions.get(sender.id);
+}
+
+async function runManualLyricRequest(sender, operation) {
+  const session = manualLyricSession(sender);
+  session.controller?.abort();
+  const controller = new AbortController();
+  session.controller = controller;
+  try { return await operation(session, controller.signal); }
+  catch { return controller.signal.aborted ? { cancelled: true } : { error: "network" }; }
+  finally {
+    controller.abort();
+    if (session.controller === controller) session.controller = null;
+  }
+}
 let lyricTranslationCache = null;
 let lyricTranslationCacheWriteTimer = null;
 let lyricsWindow = null;
@@ -979,6 +1007,64 @@ app.whenReady().then(async () => {
   ipcMain.on("music:cancel-lyrics", event => {
     lyricSearchRequests.get(event.sender.id)?.abort();
   });
+  ipcMain.on("music:cancel-manual-lyrics", event => {
+    const session = manualLyricSessions.get(event.sender.id);
+    session?.controller?.abort();
+    session?.candidates.clear();
+  });
+  ipcMain.handle("music:search-lyrics-candidates", (event, options) => runManualLyricRequest(event.sender, async (session, signal) => {
+    session.candidates.clear();
+    const publishMatch = (result, remembered = false) => {
+      const provider = result.source.split("-")[0];
+      const candidate = {
+        key: `${remembered ? "remembered" : "auto"}:${provider}`, provider,
+        title: result.match?.title || options.title, artist: result.match?.artist || options.artist || "",
+        album: result.match?.album || options.album || "", duration: result.match?.duration || options.duration || 0
+      };
+      session.candidates.set(candidate.key, { candidate, result });
+      return { candidates: [candidate], failedSources: [], preferredKey: candidate.key,
+        provider: remembered ? provider : "auto", remembered };
+    };
+    if (options?.initial && typeof options.filePath === "string") {
+      const selected = await lyricSelections.get(options.filePath);
+      if (signal.aborted) return { cancelled: true };
+      if (selected) return publishMatch(selected, true);
+    }
+    if (options?.provider === "auto") {
+      const result = await searchOnlineLyrics({ ...options, mode: "auto", force: !options.initial }, { signal });
+      if (signal.aborted || result.cancelled) return { cancelled: true };
+      return result.text ? publishMatch(result) : { candidates: [], failedSources: [], error: result.error || null };
+    }
+    const result = await searchManualLyrics(options, { signal });
+    if (signal.aborted) return { cancelled: true };
+    result.candidates.forEach(candidate => session.candidates.set(candidate.key, { candidate, result: null }));
+    return {
+      candidates: result.candidates.map(({ key, provider, title, artist, album, duration }) => ({ key, provider, title, artist, album, duration })),
+      failedSources: result.failedSources
+    };
+  }));
+  ipcMain.handle("music:preview-lyrics-candidate", (event, key) => runManualLyricRequest(event.sender, async (session, signal) => {
+    const entry = session.candidates.get(key);
+    if (!entry) return { error: "not-found" };
+    const result = entry.result || await readManualLyrics(entry.candidate, { signal });
+    if (signal.aborted) return { cancelled: true };
+    if (!result) return { error: "no-lyrics" };
+    entry.result = result;
+    return result;
+  }));
+  ipcMain.handle("music:apply-lyrics-candidate", async (event, options = {}) => {
+    const entry = manualLyricSessions.get(event.sender.id)?.candidates.get(options.key);
+    if (typeof options.filePath !== "string" || !options.filePath.trim() || !entry?.result) return { error: "not-found" };
+    try {
+      await lyricSelections.save(options.filePath, entry.result);
+      return { ...entry.result, manual: true, retryAt: Number.MAX_SAFE_INTEGER };
+    } catch { return { error: "storage" }; }
+  });
+  ipcMain.handle("music:clear-lyrics-selection", async (_event, filePath) => {
+    if (typeof filePath !== "string" || !filePath.trim()) return { error: "invalid-file" };
+    try { await lyricSelections.clear(filePath); return { ok: true }; }
+    catch { return { error: "storage" }; }
+  });
   ipcMain.handle("music:lyrics", async (event, rawOptions) => {
     const options = typeof rawOptions === "string" ? { filePath: rawOptions, mode: "auto" } : rawOptions || {};
     const { filePath } = options;
@@ -992,6 +1078,11 @@ app.whenReady().then(async () => {
     try {
       const lrcPath = path.join(path.dirname(filePath), `${path.basename(filePath, path.extname(filePath))}.lrc`);
       const mode = options.mode || "auto";
+      if (mode === "auto" && !options.force && !options.ignoreLocal) {
+        const selected = await lyricSelections.get(filePath);
+        if (controller.signal.aborted) return { text: "", source: null, cancelled: true };
+        if (selected) return selected;
+      }
       const requireWordTiming = mode === "network" || options.requireWordTiming === true;
       const onlineProviders = resolveOnlineLyricProviders(mode, requireWordTiming);
       let embeddedText = "";
@@ -1017,6 +1108,13 @@ app.whenReady().then(async () => {
         title: cleanLyricTag(options.title) || path.basename(filePath, path.extname(filePath))
       }, { signal: controller.signal });
       if (found.cancelled) return found;
+      if (found.text && (options.force || options.ignoreLocal)) {
+        const selected = await lyricSelections.get(filePath);
+        if (controller.signal.aborted) return { text: "", source: null, cancelled: true };
+        if (!requireWordTiming || !hasNativeWordTiming(selected?.text) || hasNativeWordTiming(found.text)) {
+          await lyricSelections.clear(filePath);
+        }
+      }
       // Automatic word lookup upgrades local lyrics only when synchronization
       // improves. Keep the online retry deadline for a local fallback.
       if (local.text && lyricTimingQuality(local.text) >= lyricTimingQuality(found.text)) {

@@ -78,7 +78,7 @@ async function searchNeteaseSongs(options, fetchImplementation = fetch) {
     headers: { Referer: "https://music.163.com/", "User-Agent": USER_AGENT },
     signal: AbortSignal.timeout(6500)
   });
-  if (!response.ok) return [];
+  if (!response.ok) throw new Error("netease-search-unavailable");
   const payload = await response.json();
   if (payload.code && payload.code !== 200) throw new Error("netease-search-unavailable");
   const songs = payload?.result?.songs;
