@@ -136,7 +136,8 @@ let nativeWindowVisible = true;
 let lastBackgroundUiUpdate = 0;
 let lastMediaSessionUpdate = 0;
 let playbackGeneration = 0;
-let switchingPlaybackGeneration = 0;
+let pendingTrackPlayback = null;
+let pendingTrackHistoryId = null;
 const playbackFailedIds = new Set();
 let lastPreviousRestartAt = 0;
 let lastPreviousRestartTrackId = null;
@@ -1827,7 +1828,7 @@ function visibleTracks() {
   if (currentView === "recent") normalizeRecentVersions();
   const selectedPlaylist = playlists.find((playlist) => playlist.name === currentPlaylist);
   const tracksById = new Map(tracks.map((track) => [track.id, track]));
-  let result = currentPlaylist && selectedPlaylist?.trackIds?.length
+  let result = currentPlaylist && Array.isArray(selectedPlaylist?.trackIds)
     ? selectedPlaylist.trackIds
       .map((id) => tracksById.get(id))
       .filter(Boolean)
@@ -1838,7 +1839,7 @@ function visibleTracks() {
   const queueIds = new Set(playbackQueueIds);
   result = result.filter((track) => {
     if (track.transient && !currentPlaylist && currentView !== "now") return false;
-    if (currentPlaylist && !selectedPlaylist?.trackIds?.length && !track.playlists?.includes(currentPlaylist)) return false;
+    if (currentPlaylist && !Array.isArray(selectedPlaylist?.trackIds) && !track.playlists?.includes(currentPlaylist)) return false;
     if (currentView === "recent" && !recentIds.has(track.id)) return false;
     if (currentView === "now" && !queueIds.has(track.id)) return false;
     if (currentView === "favorites" && !favorites.has(track.id)) return false;
@@ -2896,11 +2897,13 @@ function renderPage(savedScrollTop) {
       } else if (result.action === "edit-info") {
         const edits = await editTrackInfo(track);
         if (!edits) return;
-        track.title = edits.title || track.title;
-        track.artist = edits.artist || "未知艺术家";
-        track.album = edits.album || "未知专辑";
-        track.userEditedMetadata = true;
-        track.metadataLoaded = true;
+        const currentTrack = tracks.find(item => item.id === track.id);
+        if (!currentTrack) return;
+        currentTrack.title = edits.title || currentTrack.title;
+        currentTrack.artist = edits.artist || "未知艺术家";
+        currentTrack.album = edits.album || "未知专辑";
+        currentTrack.userEditedMetadata = true;
+        currentTrack.metadataLoaded = true;
         persist();
         render();
       } else if (result.action === "properties") {
@@ -3357,7 +3360,7 @@ async function handleMyFireflyCommand(payload = {}) {
     case "control": {
       const action = String(payload.action || "");
       if (action === "play") {
-        if (!audio.src || audio.paused || playbackPausePending) togglePlayback();
+        requestPlayback();
       } else if (action === "pause") {
         pausePlayback();
       } else if (action === "toggle") {
@@ -4631,15 +4634,20 @@ document.addEventListener("keydown", (event) => {
 });
 
 audio.addEventListener("play", () => {
-  switchingPlaybackGeneration = 0;
-  updatePlayButtonState(!playbackPausePending);
-  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = playbackPausePending ? "paused" : "playing";
+  const playing = pendingTrackPlayback?.shouldPlay ?? (!audio.paused && !playbackPausePending);
+  updatePlayButtonState(playing);
+  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = playing ? "playing" : "paused";
   activeLyricIndex = -1;
   updateLyricsAtTime();
 });
 audio.addEventListener("playing", () => {
   if (playbackFadeEnabled && !playbackPausePending) setPlaybackFadeTarget(1, .24);
   startListeningTime();
+  const track = tracks[currentIndex];
+  if (!audio.paused && track && pendingTrackHistoryId === track.id) {
+    pendingTrackHistoryId = null;
+    recordTrackPlayback(track);
+  }
 });
 audio.addEventListener("seeked", startListeningTime);
 audio.addEventListener("ratechange", accumulateListeningTime);
@@ -4649,7 +4657,7 @@ audio.addEventListener("ratechange", accumulateListeningTime);
 audio.addEventListener("pause", () => {
   if (!audio.paused) return;
   resetPlaybackFade(0);
-  if (switchingPlaybackGeneration !== 0) return;
+  if (pendingTrackPlayback?.shouldPlay) return;
   updatePlayButtonState(false);
   if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
   activeLyricIndex = -1;
@@ -4685,6 +4693,7 @@ audio.addEventListener("loadedmetadata", () => {
   document.querySelector("#duration").textContent = formatTime(audio.duration);
 });
 audio.addEventListener("ended", () => {
+  if (pendingTrackPlayback) return;
   if (playMode === "repeat-one") return playTrack(currentIndex, true);
   if (playMode === "list-once") {
     const queueIndex = playbackQueueIds.indexOf(tracks[currentIndex]?.id);
@@ -4696,7 +4705,9 @@ audio.addEventListener("ended", () => {
   }
   nextTrack();
 });
-audio.addEventListener("error", () => recoverPlaybackFailure(tracks[currentIndex]));
+audio.addEventListener("error", () => {
+  if (!pendingTrackPlayback) recoverPlaybackFailure(tracks[currentIndex]);
+});
 
 progress.addEventListener("input", () => {
   if (audio.duration) seekPlaybackTo((Number(progress.value) / 100) * audio.duration);
@@ -4754,9 +4765,7 @@ window.medo.onWindowVisibility((visible) => {
 });
 
 if ("mediaSession" in navigator) {
-  navigator.mediaSession.setActionHandler("play", () => {
-    if (!audio.src || audio.paused || playbackPausePending) togglePlayback();
-  });
+  navigator.mediaSession.setActionHandler("play", requestPlayback);
   navigator.mediaSession.setActionHandler("pause", pausePlayback);
   navigator.mediaSession.setActionHandler("previoustrack", () => nextTrack(-1));
   navigator.mediaSession.setActionHandler("nexttrack", () => nextTrack(1));

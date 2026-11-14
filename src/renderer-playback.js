@@ -304,6 +304,11 @@ function resumePlayback() {
 }
 
 function pausePlayback() {
+  if (pendingTrackPlayback) {
+    pendingTrackPlayback.shouldPlay = false;
+    updatePlayButtonState(false);
+    if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
+  }
   if (audio.paused || playbackPausePending) return;
   if (!playbackFadeEnabled || !outputFadeGain || outputAudioContext.state !== "running" || audio.ended) {
     // Gate the final output as well as the media element; queued media frames
@@ -340,40 +345,48 @@ function showPlaybackError(track, message = "播放失败，已自动跳到下�
   showPlaybackError.timer = setTimeout(() => toast.classList.remove("visible"), 4200);
 }
 
-function recoverPlaybackFailure(track) {
+function recoverPlaybackFailure(track, shouldPlay = pendingTrackPlayback?.shouldPlay ?? (!audio.paused || !audio.src)) {
   if (!track || playbackFailedIds.has(track.id)) return;
   playbackFailedIds.add(track.id);
-  showPlaybackError(track);
   const tracksById = new Map(tracks.map((item) => [item.id, item]));
   const queue = playbackQueueIds.map((id) => tracksById.get(id)).filter(Boolean);
   const start = Math.max(0, queue.findIndex((item) => item.id === track.id));
   for (let offset = 1; offset <= queue.length; offset += 1) {
     const candidate = queue[(start + offset) % queue.length];
     if (!playbackFailedIds.has(candidate.id)) {
-      playTrack(tracks.findIndex((item) => item.id === candidate.id), true);
+      showPlaybackError(track);
+      playTrack(tracks.findIndex((item) => item.id === candidate.id), true, false, shouldPlay);
       return;
     }
   }
   showPlaybackError(track, "队列中没有可播放的文件");
 }
 
-async function playTrack(index, preserveQueue = false, preservePreviousNavigation = false) {
+async function playTrack(index, preserveQueue = false, preservePreviousNavigation = false, shouldPlay = true) {
   if (!tracks[index]) return;
   ensureAudioProcessing();
   if (!preserveQueue) playbackFailedIds.clear();
   const generation = ++playbackGeneration;
+  const request = { shouldPlay };
   if (!preserveQueue && currentView !== "now") {
     playbackQueueIds = visibleTracks().map((track) => track.id);
   }
   if (!playbackQueueIds.length) playbackQueueIds = [tracks[index].id];
-  const track = tracks[index];
-  sendLyricsWindowState({ noLyrics: false, playing: true });
-  const resolvedSource = await window.medo.resolveMediaSource(track.path).catch(() => null);
+  pendingTrackPlayback = request;
+  updatePlayButtonState(shouldPlay);
+  const requestedTrack = tracks[index];
+  sendLyricsWindowState({ noLyrics: false, playing: request.shouldPlay && !audio.paused });
+  const resolvedSource = await window.medo.resolveMediaSource(requestedTrack.path).catch(() => null);
   if (generation !== playbackGeneration) return;
-  index = tracks.findIndex((candidate) => candidate.id === track.id);
-  if (index < 0) return;
+  index = tracks.findIndex((candidate) => candidate.id === requestedTrack.id);
+  if (index < 0) {
+    finishTrackSwitch(request);
+    return;
+  }
+  const track = tracks[index];
   if (!resolvedSource) {
     recoverPlaybackFailure(track);
+    finishTrackSwitch(request);
     return;
   }
   track.url = resolvedSource;
@@ -387,22 +400,14 @@ async function playTrack(index, preserveQueue = false, preservePreviousNavigatio
     primary: desktopLyricPrimaryColor,
     secondary: desktopLyricSecondaryColor,
     noLyrics: false,
-    playing: true
+    playing: false
   });
-  if (!track.transient) {
-    const identity = normalizedSongIdentity(track);
-    const nextCount = mergedPlayCount(track) + 1;
-    playStats[identity] = nextCount;
-    tracksWithSameSongIdentity(track).forEach((version) => {
-      version.playCount = nextCount;
-    });
-  }
-  switchingPlaybackGeneration = generation;
   resetPlaybackFade(0);
   stopListeningTime();
   audio.pause();
   if (generation !== playbackGeneration) return;
   currentIndex = index;
+  pendingTrackHistoryId = track.id;
   if (!preservePreviousNavigation) {
     lastPreviousRestartAt = 0;
     lastPreviousRestartTrackId = null;
@@ -431,36 +436,19 @@ async function playTrack(index, preserveQueue = false, preservePreviousNavigatio
   }).catch(() => false);
   if (generation !== playbackGeneration) return;
   if (ready === false) {
-    switchingPlaybackGeneration = 0;
     recoverPlaybackFailure(track);
+    finishTrackSwitch(request);
     return;
   }
-  resumePlayback().then(() => {
-    if (generation !== playbackGeneration) return;
-    playbackFailedIds.delete(track.id);
-  }).catch((error) => {
-    if (generation !== playbackGeneration || error?.name === "AbortError") return;
-    switchingPlaybackGeneration = 0;
-    recoverPlaybackFailure(track);
-  });
-  if (!track.transient) {
-    const identity = normalizedSongIdentity(track);
-    const preferred = preferredRecentVersion(track);
-    recent = [
-      preferred.id,
-      ...recent.filter((id) => {
-        const candidate = tracks.find((item) => item.id === id);
-        return candidate && normalizedSongIdentity(candidate) !== identity;
-      })
-    ].slice(0, 100);
-  }
+  pendingTrackPlayback = null;
+  if (request.shouldPlay) startPlayback(track);
   try {
     updateNowPlaying(track);
   } catch {
     // Visual metadata, artwork and lyrics are isolated from audio playback.
   }
-  schedulePersist(["tracks", "recent", "queue", "playback"]);
-  if (currentView === "recent" || currentView === "now") {
+  schedulePersist(["queue", "playback"]);
+  if (currentView === "now") {
     render();
   } else {
     document.querySelectorAll(".track-row").forEach((row) => {
@@ -476,7 +464,56 @@ async function playTrack(index, preserveQueue = false, preservePreviousNavigatio
   }
 }
 
+function finishTrackSwitch(request) {
+  if (pendingTrackPlayback !== request) return;
+  pendingTrackPlayback = null;
+  const playing = request.shouldPlay && !audio.paused && !playbackPausePending;
+  updatePlayButtonState(playing);
+  if ("mediaSession" in navigator) navigator.mediaSession.playbackState = playing ? "playing" : "paused";
+}
+
+function recordTrackPlayback(track) {
+  if (track.transient) return;
+  const identity = normalizedSongIdentity(track);
+  const nextCount = mergedPlayCount(track) + 1;
+  playStats[identity] = nextCount;
+  tracksWithSameSongIdentity(track).forEach((version) => {
+    version.playCount = nextCount;
+  });
+  const preferred = preferredRecentVersion(track);
+  recent = [
+    preferred.id,
+    ...recent.filter((id) => {
+      const candidate = tracks.find((item) => item.id === id);
+      return candidate && normalizedSongIdentity(candidate) !== identity;
+    })
+  ].slice(0, 100);
+  schedulePersist(["tracks", "recent"]);
+  if (currentView === "recent") render();
+}
+
+function startPlayback(track) {
+  const generation = playbackGeneration;
+  resumePlayback().then(() => {
+    if (generation === playbackGeneration && track) playbackFailedIds.delete(track.id);
+  }).catch((error) => {
+    if (generation === playbackGeneration && error?.name !== "AbortError") recoverPlaybackFailure(track, true);
+  });
+}
+
 function togglePlayback() {
+  const playing = pendingTrackPlayback?.shouldPlay ?? Boolean(audio.src && !audio.paused && !playbackPausePending);
+  if (playing) pausePlayback();
+  else requestPlayback();
+}
+
+function requestPlayback() {
+  if (pendingTrackPlayback) {
+    pendingTrackPlayback.shouldPlay = true;
+    updatePlayButtonState(true);
+    if ("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
+    return;
+  }
   if (!audio.src) {
     const available = visibleTracks().filter((track) => track && !track.transient);
     const first = available[0] || tracks.find((track) => !track.transient);
@@ -488,13 +525,7 @@ function togglePlayback() {
       playTrack(tracks.findIndex((track) => track.id === first.id), true);
     }
   } else if (audio.paused || playbackPausePending) {
-    const generation = playbackGeneration;
-    const track = tracks[currentIndex];
-    resumePlayback().catch((error) => {
-      if (generation === playbackGeneration && error?.name !== "AbortError") recoverPlaybackFailure(track);
-    });
-  } else {
-    pausePlayback();
+    startPlayback(tracks[currentIndex]);
   }
 }
 
@@ -503,7 +534,8 @@ function clearCurrentPlayback() {
   renderedLyricElements = [];
   cancelPendingLyrics();
   playbackGeneration += 1;
-  switchingPlaybackGeneration = 0;
+  pendingTrackPlayback = null;
+  pendingTrackHistoryId = null;
   resetPlaybackFade(0);
   stopListeningTime();
   audio.pause();

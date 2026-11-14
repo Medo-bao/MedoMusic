@@ -582,7 +582,10 @@
       <label class="lyric-search-source">来源<select id="lyric-search-provider" name="provider"><option value="auto">自动匹配</option><option value="all">全部来源</option><option value="qq">QQ 音乐</option><option value="netease">网易云音乐</option><option value="lrclib">LRCLIB</option></select></label>
       <button id="lyric-search-submit" class="primary" type="submit">搜索</button>
     </form>
-    <p id="lyric-search-status" class="lyric-search-status" role="status" aria-live="polite">输入歌名，搜索后选择结果预览</p>
+    <div class="lyric-search-status-row">
+      <p id="lyric-search-status" class="lyric-search-status" role="status" aria-live="polite">输入歌名，搜索后选择结果预览</p>
+      <button id="lyric-search-all" type="button">查全部来源</button>
+    </div>
     <div class="lyric-search-body">
       <section class="lyric-search-results-panel" aria-label="搜索结果"><div id="lyric-search-results" role="listbox" aria-label="歌词候选结果"></div></section>
       <section class="lyric-search-preview-panel" aria-labelledby="lyric-preview-heading"><header><h3 id="lyric-preview-heading">歌词预览</h3><span id="lyric-preview-kind"></span></header><pre id="lyric-search-preview">选择左侧结果预览歌词</pre></section>

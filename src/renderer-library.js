@@ -1,15 +1,24 @@
 // Renderer library. Loaded before renderer.js; shares its application state.
 
 function removeRedundantMusicFolders() {
-  const normalized = musicFolders.map((folder) => folder.replaceAll("/", "\\").replace(/[\\]+$/, ""));
-  const filtered = normalized.filter((folder, index) => !normalized.some((parent, parentIndex) =>
-    parentIndex !== index && folder.toLowerCase().startsWith(`${parent.toLowerCase()}\\`)
-  ));
-  if (filtered.length !== musicFolders.length) {
-    musicFolders = filtered;
-    persist();
-    syncMusicFolderWatchers();
+  const registered = musicFolders.map(folder => ({ folder, key: normalizedWindowsPath(folder) }));
+  const retained = registered.filter(({ key }) => !registered.some(parent => key.startsWith(`${parent.key}\\`)));
+  const foldersChanged = retained.length !== registered.length;
+  if (foldersChanged) musicFolders = retained.map(({ folder }) => folder);
+  const retainedKeys = new Set(retained.map(({ key }) => key));
+  let tracksChanged = false;
+  for (const track of tracks) {
+    if (!track.sourceDirectory) continue;
+    const source = normalizedWindowsPath(track.sourceDirectory);
+    if (retainedKeys.has(source)) continue;
+    // Also repair entries from older profiles that already lost the child folder.
+    const parent = retained.find(({ key }) => source.startsWith(`${key}\\`));
+    if (!parent) continue;
+    track.sourceDirectory = parent.folder;
+    tracksChanged = true;
   }
+  if (foldersChanged || tracksChanged) persist(["folders", "tracks"]);
+  if (foldersChanged) syncMusicFolderWatchers();
 }
 
 function syncMusicFolderWatchers() {
@@ -279,8 +288,6 @@ async function rebuildMusicLibraryIndex() {
   button.textContent = "正在重建索引…";
   try {
     await window.medo.clearMetadataCache();
-    const previousIndex = createTrackIndex(tracks);
-    const manualOrder = new Map(tracks.map((track, index) => [track.id, index]));
     const batches = [];
     let failedFolderCount = 0;
     for (const folder of [...musicFolders]) {
@@ -291,26 +298,28 @@ async function rebuildMusicLibraryIndex() {
         failedFolderCount += 1;
         continue;
       }
-      const rebuilt = result.tracks.map((incoming) => {
-        const previous = previousIndex.find(incoming);
-        return {
-          ...incoming,
-          id: previous?.id || incoming.id,
-          addedAt: previous?.addedAt || Date.now(),
-          playCount: previous?.playCount || 0,
-          playlists: previous?.playlists || incoming.playlists || [],
-          ...(previous?.userEditedMetadata ? {
-            title: previous.title,
-            artist: previous.artist,
-            album: previous.album,
-            userEditedMetadata: true
-          } : {})
-        };
-      });
-      batches.push({ scan, rebuilt });
+      batches.push({ scan, incomingTracks: result.tracks });
     }
     const currentBatches = batches.filter(batch => isCurrentFolderScan(batch.scan));
-    const rebuilt = currentBatches.flatMap(batch => batch.rebuilt);
+    // Read edits and playlist membership after the last scan has finished.
+    const currentTrackIndex = createTrackIndex(tracks);
+    const manualOrder = new Map(tracks.map((track, index) => [track.id, index]));
+    const rebuilt = currentBatches.flatMap(({ incomingTracks }) => incomingTracks.map(incoming => {
+      const current = currentTrackIndex.find(incoming);
+      return {
+        ...incoming,
+        id: current?.id || incoming.id,
+        addedAt: current?.addedAt || Date.now(),
+        playCount: current?.playCount || 0,
+        playlists: current?.playlists || incoming.playlists || [],
+        ...(current?.userEditedMetadata ? {
+          title: current.title,
+          artist: current.artist,
+          album: current.album,
+          userEditedMetadata: true
+        } : {})
+      };
+    }));
     const scannedFolders = new Set(currentBatches.map(batch => batch.scan.key));
     const rebuiltIds = new Set(rebuilt.map(track => track.id));
     const retainedPlaylistIds = playlistTrackIds();
@@ -349,11 +358,17 @@ function removeFolder(folder) {
   syncMusicFolderWatchers();
   tracks = tracks.filter((track) => {
     const fromFolder = normalizedWindowsPath(track.sourceDirectory) === folderKey;
-    if (fromFolder && (retainedIds.has(track.id) || track.playlists?.length)) {
+    if (!fromFolder) return true;
+    const otherFolder = managedFolderForFile(track.path);
+    if (otherFolder) {
+      track.sourceDirectory = otherFolder;
+      return true;
+    }
+    if (retainedIds.has(track.id) || track.playlists?.length) {
       delete track.sourceDirectory;
       return true;
     }
-    return !fromFolder;
+    return false;
   });
   const validIds = new Set(tracks.map((track) => track.id));
   favorites = new Set([...favorites].filter((id) => validIds.has(id)));
@@ -385,7 +400,7 @@ async function initializeDefaultLibrary() {
       const merged = mergeTracks(imported.tracks || [], false);
       const existing = playlists.find((playlist) => playlist.path === imported.path);
       const next = {
-        name: imported.name,
+        name: uniquePlaylistName(existing?.name || imported.name, existing),
         path: imported.path,
         trackIds: merged.map((track) => track.id)
       };

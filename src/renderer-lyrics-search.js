@@ -7,6 +7,8 @@ const manualLyricStatus = document.querySelector("#lyric-search-status");
 const manualLyricApply = document.querySelector("#lyric-search-apply");
 const manualLyricReset = document.querySelector("#lyric-search-reset");
 const manualLyricSubmit = document.querySelector("#lyric-search-submit");
+const manualLyricProvider = document.querySelector("#lyric-search-provider");
+const manualLyricSearchAll = document.querySelector("#lyric-search-all");
 let manualLyricsTrackId = null;
 let manualLyricsGeneration = 0;
 let manualLyricsCandidateKey = null;
@@ -31,7 +33,8 @@ function openManualLyricSearch() {
   document.querySelector("#lyric-search-title").value = track.title || "";
   document.querySelector("#lyric-search-artist").value = track.artist === "未知艺术家" ? "" : track.artist || "";
   const remembered = lyricsCache.get(track.id);
-  document.querySelector("#lyric-search-provider").value = remembered?.manual ? remembered.source.split("-")[0] : "auto";
+  manualLyricProvider.value = remembered?.manual ? remembered.source.split("-")[0] : "auto";
+  manualLyricSearchAll.hidden = false;
   manualLyricResults.replaceChildren();
   manualLyricPreview.textContent = "选择左侧结果预览歌词";
   document.querySelector("#lyric-preview-kind").textContent = "";
@@ -45,6 +48,19 @@ function openManualLyricSearch() {
 }
 
 const manualLyricProviderNames = { qq: "QQ 音乐", netease: "网易云音乐", lrclib: "LRCLIB" };
+
+function describeManualLyricSources(provider, { candidates, failedSources, titleOnlySources }) {
+  const counts = new Map();
+  for (const candidate of candidates) counts.set(candidate.provider, (counts.get(candidate.provider) || 0) + 1);
+  const sources = provider === "all" ? Object.keys(manualLyricProviderNames) : [provider];
+  return sources.map(source => {
+    const name = manualLyricProviderNames[source];
+    if (failedSources.includes(source)) return `${name} 暂不可用`;
+    const count = counts.get(source);
+    if (!count) return `${name} 无结果`;
+    return `${name} ${count} 条${titleOnlySources.includes(source) ? "（仅按歌名）" : ""}`;
+  }).join(" · ");
+}
 
 async function previewManualLyric(candidate, button) {
   const generation = ++manualLyricsGeneration;
@@ -86,9 +102,9 @@ async function runManualLyricSearch({ initial = false } = {}) {
   manualLyricResults.replaceChildren();
   manualLyricPreview.textContent = "选择左侧结果预览歌词";
   document.querySelector("#lyric-preview-kind").textContent = "";
-  manualLyricStatus.textContent = "正在搜索网络歌词…";
+  const provider = manualLyricProvider.value;
+  manualLyricStatus.textContent = provider === "all" ? "正在查询 QQ 音乐、网易云音乐和 LRCLIB…" : "正在搜索网络歌词…";
   let preferredCandidate = null, preferredButton = null;
-  const provider = document.querySelector("#lyric-search-provider").value;
   try {
     if (initial && (!track.metadataLoaded || !track.duration)) {
       const previousArtist = document.querySelector("#lyric-search-artist").value;
@@ -119,16 +135,19 @@ async function runManualLyricSearch({ initial = false } = {}) {
       if (candidate.key === result.preferredKey) { preferredCandidate = candidate; preferredButton = button; }
     }
     manualLyricResults.append(fragment);
-    const failed = (result?.failedSources || []).map(provider => manualLyricProviderNames[provider]);
-    if (initial && result.provider && document.querySelector("#lyric-search-provider").value === provider) {
-      document.querySelector("#lyric-search-provider").value = result.provider;
+    if (initial && result.provider && manualLyricProvider.value === provider) {
+      manualLyricProvider.value = result.provider;
     }
-    if (result.remembered) manualLyricReset.disabled = manualLyricsSelectionPending;
-    manualLyricStatus.textContent = result.remembered
-      ? `已记住 ${manualLyricProviderNames[result.provider]} 的歌词；可重新搜索或恢复自动匹配`
-      : candidates.length
-      ? `找到 ${candidates.length} 条结果，选择后可预览${failed.length ? `；${failed.join("、")}暂不可用` : ""}`
-      : result?.error || failed.length ? "搜索失败或来源暂不可用，请稍后重试或切换来源" : "没有找到结果，请调整歌名、歌手或来源";
+    if (result.remembered) {
+      manualLyricReset.disabled = manualLyricsSelectionPending;
+      manualLyricStatus.textContent = `已记住 ${manualLyricProviderNames[result.provider]} 的歌词，可重新搜索或恢复自动匹配`;
+    } else if (result.error) {
+      manualLyricStatus.textContent = "搜索失败，请检查网络后重试";
+    } else if (provider === "auto") {
+      manualLyricStatus.textContent = candidates.length ? "自动匹配找到 1 条结果" : "自动匹配无结果，可调整歌名、歌手或查询全部来源";
+    } else {
+      manualLyricStatus.textContent = describeManualLyricSources(provider, result);
+    }
   } catch {
     if (generation === manualLyricsGeneration) manualLyricStatus.textContent = "搜索失败，请检查网络后重试";
   } finally {
@@ -138,6 +157,15 @@ async function runManualLyricSearch({ initial = false } = {}) {
 }
 
 manualLyricForm.addEventListener("submit", event => { event.preventDefault(); runManualLyricSearch(); });
+manualLyricProvider.addEventListener("change", () => {
+  manualLyricSearchAll.hidden = manualLyricProvider.value === "all";
+});
+manualLyricSearchAll.addEventListener("click", () => {
+  manualLyricProvider.value = "all";
+  manualLyricSearchAll.hidden = true;
+  manualLyricProvider.focus({ preventScroll: true });
+  manualLyricForm.requestSubmit();
+});
 
 manualLyricApply.addEventListener("click", async () => {
   const track = tracks[currentIndex];

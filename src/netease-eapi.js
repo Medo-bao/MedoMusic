@@ -54,8 +54,12 @@ async function fetchNeteaseNewLyrics(songId, fetchImplementation = fetch) {
     body: request.body,
     signal: AbortSignal.timeout(6500)
   });
-  if (!response.ok) return null;
-  return await response.json();
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error("netease-lyrics-unavailable");
+  const payload = await response.json();
+  if (payload?.code === 404) return null;
+  if (payload?.code && payload.code !== 200) throw new Error("netease-lyrics-unavailable");
+  return payload;
 }
 
 function rankNeteaseSongs(songs, options) {
@@ -98,7 +102,6 @@ async function fetchNeteaseLyricsOnce(options, fetchImplementation, onCandidate,
     const fetchCandidate = signal ? (url, init) => fetchImplementation(url, { ...init,
       signal: AbortSignal.any([init.signal, signal]) }) : fetchImplementation;
     const payload = await fetchNeteaseNewLyrics(best.song.id, fetchCandidate);
-    if (payload?.code && payload.code !== 200) throw new Error("netease-lyrics-unavailable");
     const wordTimed = hasNativeWordTiming(payload?.yrc?.lyric) && isUsableLyricText(payload.yrc.lyric);
     const text = wordTimed ? payload.yrc.lyric : payload?.lrc?.lyric || "";
     if (!isUsableLyricText(text)) return null;

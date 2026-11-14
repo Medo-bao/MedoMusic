@@ -1040,7 +1040,8 @@ app.whenReady().then(async () => {
     result.candidates.forEach(candidate => session.candidates.set(candidate.key, { candidate, result: null }));
     return {
       candidates: result.candidates.map(({ key, provider, title, artist, album, duration }) => ({ key, provider, title, artist, album, duration })),
-      failedSources: result.failedSources
+      failedSources: result.failedSources,
+      titleOnlySources: result.titleOnlySources
     };
   }));
   ipcMain.handle("music:preview-lyrics-candidate", (event, key) => runManualLyricRequest(event.sender, async (session, signal) => {

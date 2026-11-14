@@ -1,6 +1,21 @@
 // Renderer playlists. Loaded before renderer.js; shares its application state.
 
+function uniquePlaylistName(name, excluded = null) {
+  const used = new Set(playlists.filter(item => item !== excluded).map(item => item.name.toLocaleLowerCase()));
+  let candidate = name;
+  let suffix = 2;
+  while (used.has(candidate.toLocaleLowerCase())) candidate = `${name} (${suffix++})`;
+  return candidate;
+}
+
 function repairPlaylistMemberships() {
+  // Existing imports may already share a name. Keep the first and repair
+  // subsequent names before rebuilding memberships from their track IDs.
+  const seen = new Set();
+  for (const playlist of playlists) {
+    if (seen.has(playlist.name.toLocaleLowerCase())) playlist.name = uniquePlaylistName(playlist.name, playlist);
+    seen.add(playlist.name.toLocaleLowerCase());
+  }
   const byId = new Map(tracks.map(track => [track.id, track]));
   for (const playlist of playlists) {
     if (!Array.isArray(playlist.trackIds)) continue;
@@ -68,15 +83,16 @@ async function choosePlaylist() {
   const result = await window.medo.choosePlaylist();
   if (!result) return;
   const existing = playlists.find((item) => item.path === result.path);
-  const trackIds = mergeTracks(result.tracks).map((track) => track.id);
+  const name = uniquePlaylistName(existing?.name || result.name, existing);
+  const trackIds = mergeTracks(result.tracks, false).map((track) => track.id);
   if (existing) {
-    existing.name = result.name;
+    existing.name = name;
     existing.trackIds = trackIds;
   } else {
-    playlists.push({ name: result.name, path: result.path, trackIds });
+    playlists.push({ name, path: result.path, trackIds });
   }
   repairPlaylistMemberships();
-  currentPlaylist = result.name;
+  currentPlaylist = name;
   currentCollection = null;
   currentView = "library";
   currentSort = "songs";
@@ -279,15 +295,16 @@ async function savePlaybackQueueAsPlaylist() {
 
 async function migratePlaylistOrder() {
   let changed = false;
-  for (const playlist of playlists.filter((item) => !item.trackIds?.length)) {
+  for (const playlist of playlists.filter((item) => !Array.isArray(item.trackIds))) {
     const result = await window.medo.loadPlaylist(playlist.path);
-    if (!result) continue;
-    const merged = mergeTracks(result.tracks);
-    playlist.name = result.name;
+    if (!result || !playlists.includes(playlist) || Array.isArray(playlist.trackIds)) continue;
+    const merged = mergeTracks(result.tracks, false);
+    playlist.name = uniquePlaylistName(playlist.name || result.name, playlist);
     playlist.trackIds = merged.map((track) => track.id);
     changed = true;
   }
   if (changed) {
+    repairPlaylistMemberships();
     persist(["tracks", "playlists", "playback"]);
     render();
   }

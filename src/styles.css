@@ -1262,7 +1262,11 @@ button.lyric-line { cursor: pointer; }
 .lyric-search-form select option { background: var(--solid-panel, var(--background)); color: var(--text); }
 .lyric-search-dialog .primary { min-height: 36px; padding: 0 18px; color: var(--on-accent, white); border-radius: 7px; background: var(--accent); font-weight: 550; }
 .lyric-search-dialog button:disabled { opacity: .45; cursor: default; }
-.lyric-search-status { min-height: 18px; margin: 12px 22px; color: var(--secondary); font-size: 12px; }
+.lyric-search-status-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-height: 30px; margin: 6px 22px; }
+.lyric-search-status { flex: 1 1 240px; margin: 0; color: var(--secondary); font-size: 12px; }
+#lyric-search-all { padding: 6px 8px; color: var(--accent); border-radius: 7px; font-size: 12px; white-space: nowrap; }
+#lyric-search-all:hover { background: var(--surface-hover); }
+#lyric-search-all:focus-visible { outline: 2px solid var(--accent); }
 .lyric-search-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-height: 0; border-block: 1px solid var(--line); }
 .lyric-search-results-panel { min-width: 0; overflow: auto; border-right: 1px solid var(--line); padding: 8px; }
 .lyric-search-result { width: 100%; display: grid; gap: 6px; padding: 12px; border-radius: 8px; text-align: left; color: var(--text); }
