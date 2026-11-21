@@ -102,7 +102,19 @@ body { margin: 0; overflow: hidden; background: transparent; font-family: "Segoe
   background-clip: text;
 }
 .dragging .lyrics-island { cursor: grabbing; }
-.locked.pointer-inside .lyrics-island { opacity: 0; }
+.capture-mode .lyrics-island {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: calc(var(--desktop-lyric-size, 34px) * 1.36) calc(var(--desktop-next-size, 20px) * 1.42);
+  align-items: center;
+  row-gap: max(6px, calc(var(--desktop-lyric-size, 34px) * .18));
+}
+.capture-mode .lyrics-island > :is(#desktop-lyric, #desktop-next-lyric) {
+  justify-self: center;
+  width: max-content;
+  max-width: none;
+  scale: var(--capture-line-scale, 1);
+}
+.locked.pointer-inside:not(.capture-mode) .lyrics-island { opacity: 0; }
 .paused .lyrics-island { opacity: 0; }
 .no-lyrics .lyrics-island { opacity: 0; }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }

@@ -103,6 +103,25 @@ function managedFolderForFile(filePath) {
   }) || null;
 }
 
+async function openExternalFiles(filePaths) {
+  const audioFiles = [];
+  for (const filePath of filePaths) {
+    if (!filePath.toLowerCase().endsWith(".zpl")) {
+      audioFiles.push(filePath);
+      continue;
+    }
+    const existing = importedPlaylistAt(filePath);
+    if (existing) {
+      openPlaylistView(existing.name);
+      continue;
+    }
+    const playlist = await window.medo.loadPlaylist(filePath);
+    if (playlist) importPlaylist(playlist);
+    else showActionFeedback("无法打开播放列表，请检查文件是否可访问");
+  }
+  if (audioFiles.length) await openExternalAudioFiles(audioFiles);
+}
+
 async function openExternalAudioFiles(filePaths) {
   const incomingTracks = await window.medo.getExternalTracks(filePaths);
   if (!incomingTracks?.length) return;
@@ -116,7 +135,7 @@ async function openExternalAudioFiles(filePaths) {
   const queueIds = [];
   for (const incoming of incomingTracks) {
     let existing = tracks.find((track) => tracksReferToSameFile(track, incoming));
-    const managedFolder = managedFolderForFile(incoming.path);
+    const managedFolder = !excludedLibraryPaths.has(normalizedWindowsPath(incoming.path)) && managedFolderForFile(incoming.path);
     if (existing) {
       existing.transient = false;
       if (managedFolder) existing.sourceDirectory = managedFolder;
@@ -134,7 +153,7 @@ async function openExternalAudioFiles(filePaths) {
     queueIds.push(incoming.id);
   }
 
-  playbackQueueIds = queueIds;
+  replacePlaybackQueue(queueIds);
   playMode = "sequence";
   shuffleQueueSignature = "";
   shuffleRemainingIds = [];
@@ -199,15 +218,35 @@ function mergeTrackBatch(newTracks) {
   return { merged, changed };
 }
 
+function includedLibraryTracks(items) {
+  if (!excludedLibraryPaths.size) return items;
+  return items.filter(track => !excludedLibraryPaths.has(normalizedWindowsPath(track.path)));
+}
+
 function mergeTracks(newTracks, commit = true) {
+  // Explicit file and playlist imports restore previously excluded songs.
+  let restored = false;
+  for (const track of newTracks) {
+    if (excludedLibraryPaths.delete(normalizedWindowsPath(track.path))) {
+      const folder = managedFolderForFile(track.path);
+      if (folder) track.sourceDirectory = folder;
+      restored = true;
+    }
+  }
   const result = mergeTrackBatch(newTracks);
-  if (commit && result.changed) { persist(); render(); }
+  if (commit && (result.changed || restored)) { persist(); render(); }
   return result.merged;
 }
 
 async function chooseFolder() {
-  const result = await window.medo.chooseFolder();
-  if (result) applyFolderScan(result);
+  try {
+    const result = await window.medo.chooseFolder();
+    if (!result) return;
+    applyFolderScan(result);
+    showScanWarnings(result.skippedDirectories?.length);
+  } catch {
+    showActionFeedback("无法读取所选音乐文件夹，请检查访问权限或连接状态");
+  }
 }
 
 async function chooseFiles() {
@@ -222,6 +261,7 @@ async function chooseFiles() {
 function reconcileCurrentTrack(currentId) {
   const validIds = new Set(tracks.map((track) => track.id));
   playbackQueueIds = playbackQueueIds.filter((id) => validIds.has(id));
+  playNextIds = playNextIds.filter(id => validIds.has(id));
   currentIndex = tracks.findIndex((track) => track.id === currentId);
   if (currentId && currentIndex < 0) {
     clearCurrentPlayback();
@@ -229,12 +269,31 @@ function reconcileCurrentTrack(currentId) {
   }
 }
 
+function retainedScanTrackIds(skippedDirectories = []) {
+  const retained = playlistTrackIds();
+  if (!skippedDirectories.length) return retained;
+  const prefixes = skippedDirectories.map(folder => normalizedWindowsPath(folder) + "\\");
+  for (const track of tracks) {
+    const file = normalizedWindowsPath(track.path);
+    if (prefixes.some(prefix => file.startsWith(prefix))) retained.add(track.id);
+  }
+  return retained;
+}
+
+function showScanWarnings(skipped = 0, failed = 0) {
+  const issues = [];
+  if (failed) issues.push(`${failed} 个音乐文件夹未能读取`);
+  if (skipped) issues.push(`已跳过 ${skipped} 个无法读取的子目录`);
+  if (issues.length) showActionFeedback(issues.join("，") + "，已保留原有歌曲记录");
+}
+
 function applyFolderScan(result, commit = true) {
   if (!result?.folder || !Array.isArray(result.tracks)) return false;
   const currentId = tracks[currentIndex]?.id;
   const folderKey = normalizedWindowsPath(result.folder);
-  const incomingIndex = createTrackIndex(result.tracks);
-  const retainedIds = playlistTrackIds();
+  const incoming = includedLibraryTracks(result.tracks);
+  const incomingIndex = createTrackIndex(incoming);
+  const retainedIds = retainedScanTrackIds(result.skippedDirectories);
   const oldLength = tracks.length;
   tracks = tracks.filter(track => normalizedWindowsPath(track.sourceDirectory) !== folderKey ||
     incomingIndex.find(track) || retainedIds.has(track.id) || track.playlists?.length);
@@ -245,7 +304,7 @@ function applyFolderScan(result, commit = true) {
     syncMusicFolderWatchers();
     changed = true;
   }
-  changed = mergeTrackBatch(result.tracks).changed || changed;
+  changed = mergeTrackBatch(incoming).changed || changed;
   if (changed) {
     reconcileCurrentTrack(currentId);
     if (commit) { persist(); render(); }
@@ -255,7 +314,12 @@ function applyFolderScan(result, commit = true) {
 
 async function rescanFolder(folder) {
   const result = await scanCurrentFolder(folder, true);
-  if (result) applyFolderScan(result);
+  if (result) {
+    applyFolderScan(result);
+    showScanWarnings(result.skippedDirectories?.length);
+  } else if (musicFolders.includes(folder)) {
+    showScanWarnings(0, 1);
+  }
 }
 
 async function refreshMusicLibrary() {
@@ -298,13 +362,13 @@ async function rebuildMusicLibraryIndex() {
         failedFolderCount += 1;
         continue;
       }
-      batches.push({ scan, incomingTracks: result.tracks });
+      batches.push({ scan, result });
     }
     const currentBatches = batches.filter(batch => isCurrentFolderScan(batch.scan));
     // Read edits and playlist membership after the last scan has finished.
     const currentTrackIndex = createTrackIndex(tracks);
     const manualOrder = new Map(tracks.map((track, index) => [track.id, index]));
-    const rebuilt = currentBatches.flatMap(({ incomingTracks }) => incomingTracks.map(incoming => {
+    const rebuilt = currentBatches.flatMap(({ result }) => includedLibraryTracks(result.tracks).map(incoming => {
       const current = currentTrackIndex.find(incoming);
       return {
         ...incoming,
@@ -322,23 +386,30 @@ async function rebuildMusicLibraryIndex() {
     }));
     const scannedFolders = new Set(currentBatches.map(batch => batch.scan.key));
     const rebuiltIds = new Set(rebuilt.map(track => track.id));
-    const retainedPlaylistIds = playlistTrackIds();
+    const skippedDirectories = currentBatches.flatMap(({ result }) => result.skippedDirectories || []);
+    const retainedIds = retainedScanTrackIds(skippedDirectories);
     // Only a successful scan can replace a folder's existing records.
     const retainedTracks = tracks.filter((track) =>
       !scannedFolders.has(normalizedWindowsPath(track.sourceDirectory)) ||
-      (!rebuiltIds.has(track.id) && retainedPlaylistIds.has(track.id))
+      (!rebuiltIds.has(track.id) && retainedIds.has(track.id))
     ).map((track) => ({ ...track, metadataLoaded: false, cover: null }));
     const currentId = tracks[currentIndex]?.id;
     tracks = [...new Map([...retainedTracks, ...rebuilt].map((track) => [track.id, track])).values()];
     if (librarySort === "manual") tracks.sort((a, b) => (manualOrder.get(a.id) ?? Infinity) - (manualOrder.get(b.id) ?? Infinity));
     reconcileCurrentTrack(currentId);
     metadataRequests.clear();
+    cancelPendingLyrics();
+    const playingTrack = tracks[currentIndex];
+    const currentLyrics = playingTrack && lyricsCache.get(playingTrack.id);
     lyricsCache.clear();
-    lyricsRequests.clear();
+    // Keep the active timeline usable while refreshed tags and lyrics are read.
+    if (currentLyrics?.lines?.length) lyricsCache.set(playingTrack.id, { ...currentLyrics, retryAt: 0 });
     persist();
     render();
-    if (failedFolderCount) {
-      showActionFeedback(`${failedFolderCount} 个音乐文件夹未能读取，已保留原有歌曲记录，请连接或恢复访问后重试`);
+    showScanWarnings(skippedDirectories.length, failedFolderCount);
+    if (playingTrack) {
+      await loadMetadata(playingTrack);
+      if (tracks[currentIndex] === playingTrack) ensureLyrics(playingTrack);
     }
   } finally {
     button.disabled = false;
@@ -395,10 +466,11 @@ async function initializeDefaultLibrary() {
     if (discovered.folder && !musicFolders.some((folder) => folder.toLowerCase() === discovered.folder.toLowerCase())) {
       musicFolders.push(discovered.folder);
     }
-    mergeTracks(discovered.tracks || [], false);
+    mergeTrackBatch(includedLibraryTracks(discovered.tracks || []));
     for (const imported of discovered.playlists || []) {
-      const merged = mergeTracks(imported.tracks || [], false);
-      const existing = playlists.find((playlist) => playlist.path === imported.path);
+      const existing = importedPlaylistAt(imported.path);
+      if (existing && Array.isArray(existing.trackIds)) continue;
+      const { merged } = mergeTrackBatch(includedLibraryTracks(imported.tracks || []));
       const next = {
         name: uniquePlaylistName(existing?.name || imported.name, existing),
         path: imported.path,
@@ -413,6 +485,7 @@ async function initializeDefaultLibrary() {
     persist();
     render();
     syncMusicFolderWatchers();
+    showScanWarnings(discovered.skippedDirectories?.length);
   } catch {
     // Leave the flag unset so a temporary first-run failure can retry next launch.
   }

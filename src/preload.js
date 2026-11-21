@@ -1,12 +1,12 @@
 const { contextBridge, ipcRenderer } = require("electron");
-const pendingOpenAudioFiles = [];
-const openAudioListeners = new Set();
+const pendingOpenFiles = [];
+const openFileListeners = new Set();
 
-ipcRenderer.on("app:open-audio-files", (_event, filePaths) => {
-  if (openAudioListeners.size) {
-    openAudioListeners.forEach((callback) => callback(filePaths));
+ipcRenderer.on("app:open-files", (_event, filePaths) => {
+  if (openFileListeners.size) {
+    openFileListeners.forEach((callback) => callback(filePaths));
   } else {
-    pendingOpenAudioFiles.push(filePaths);
+    pendingOpenFiles.push(filePaths);
   }
 });
 
@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld("medo", {
   toggleLyricsWindow: () => ipcRenderer.send("lyrics-window:toggle"),
   updateLyricsWindow: (payload) => ipcRenderer.send("lyrics-window:update", payload),
   lockLyricsWindow: (locked = true) => ipcRenderer.send("lyrics-window:set-locked", Boolean(locked)),
+  setLyricsWindowCaptureMode: (enabled) => ipcRenderer.invoke("lyrics-window:set-capture-mode", enabled),
   resetLyricsWindowPosition: () => ipcRenderer.send("lyrics-window:reset-position"),
   getLyricsWindowState: () => ipcRenderer.invoke("lyrics-window:get-state"),
   sendLyricsWindowCommand: (command) => ipcRenderer.send("lyrics-window:command", command),
@@ -57,13 +58,14 @@ contextBridge.exposeInMainWorld("medo", {
   moveLyricsWindow: (delta) => ipcRenderer.send("lyrics-window:move", delta),
   onLyricsWindowLine: (callback) => ipcRenderer.on("lyrics-window:line", (_event, payload) => callback(payload)),
   onLyricsWindowLockState: (callback) => ipcRenderer.on("lyrics-window:lock-state", (_event, locked) => callback(locked)),
+  onLyricsWindowCaptureMode: (callback) => ipcRenderer.on("lyrics-window:capture-mode", (_event, enabled) => callback(enabled)),
   onLyricsWindowPointerInside: (callback) => ipcRenderer.on("lyrics-window:pointer-inside", (_event, inside) => callback(inside)),
   onLyricsWindowSize: (callback) => ipcRenderer.on("lyrics-window:size", (_event, size) => callback(size)),
   onLyricsWindowVisibility: (callback) => ipcRenderer.on("lyrics-window:visibility", (_event, visible) => callback(visible)),
-  onOpenAudioFiles: (callback) => {
-    openAudioListeners.add(callback);
-    pendingOpenAudioFiles.splice(0).forEach((filePaths) => callback(filePaths));
-    return () => openAudioListeners.delete(callback);
+  onOpenFiles: (callback) => {
+    openFileListeners.add(callback);
+    pendingOpenFiles.splice(0).forEach((filePaths) => callback(filePaths));
+    return () => openFileListeners.delete(callback);
   },
   setTitleBarTheme: (theme) => ipcRenderer.send("theme:set-titlebar", theme),
   getWindowMaterial: () => ipcRenderer.invoke("window:get-material"),

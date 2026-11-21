@@ -2,7 +2,6 @@ const island = document.querySelector(".lyrics-island");
 const current = document.querySelector("#desktop-lyric");
 const next = document.querySelector("#desktop-next-lyric");
 let lyricSize = Math.min(64, Math.max(16, Number(localStorage.getItem("medo.desktopLyricSize")) || 34));
-if (lyricSize === 28) lyricSize = 34;
 let dragPointerId = null;
 let lastScreenX = 0;
 let lastScreenY = 0;
@@ -49,6 +48,15 @@ function updateLyricLayout() {
     const horizontalPadding = parseFloat(islandStyle.paddingLeft) + parseFloat(islandStyle.paddingRight);
     document.documentElement.style.removeProperty("--desktop-current-fit-size");
     document.documentElement.style.removeProperty("--desktop-next-fit-size");
+    if (document.body.classList.contains("capture-mode")) {
+      const availableWidth = Math.max(1, island.clientWidth - horizontalPadding - 8);
+      for (const line of [current, next]) {
+        // offsetWidth is the unscaled line, including its karaoke layers.
+        const scale = Math.min(1, availableWidth / Math.max(1, line.offsetWidth));
+        line.style.setProperty("--capture-line-scale", String(scale));
+      }
+      return;
+    }
     const naturalCurrentWidth = measureTextWidth(current);
     const naturalNextWidth = measureTextWidth(next);
     const availableTextWidth = Math.max(1, window.innerWidth - horizontalPadding - 8);
@@ -181,7 +189,7 @@ window.medo.onLyricsWindowLine((payload = {}) => {
     next.classList.toggle("background-vocal", Boolean(payload.subline));
     renderKaraokeText(next, nextLine, translationKaraoke);
     updateLyricLayout();
-    if (hasRenderedLyrics && !payload.restoring) animateLyricChange();
+    if (hasRenderedLyrics && !payload.restoring && !document.body.classList.contains("capture-mode")) animateLyricChange();
   }
   updateWordProgress(payload.position);
   hasRenderedLyrics = true;
@@ -191,6 +199,15 @@ window.medo.onLyricsWindowLine((payload = {}) => {
 window.medo.onLyricsWindowSize((size) => {
   lyricSize = Math.min(64, Math.max(16, Number(size) || 34));
   applyLyricSize();
+});
+window.medo.onLyricsWindowCaptureMode((enabled) => {
+  document.body.classList.toggle("capture-mode", enabled);
+  if (enabled) {
+    for (const line of [current, next]) line.getAnimations().forEach((animation) => animation.cancel());
+  }
+  lastRequestedHeight = 0;
+  lastRequestedWidth = 0;
+  updateLyricLayout();
 });
 window.medo.onLyricsWindowLockState((locked) => {
   document.body.classList.toggle("locked", locked);

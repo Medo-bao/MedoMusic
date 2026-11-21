@@ -25,6 +25,7 @@ const WINDOWS_TRAY_GUID = "8c33d388-8b65-4e7c-a54d-1af447cd8bfa";
 const AUDIO_EXTENSIONS = new Set([
   ".mp3", ".flac", ".wav", ".m4a", ".aac", ".ogg", ".opus", ".wma"
 ]);
+const SHELL_EXTENSIONS = new Set([...AUDIO_EXTENSIONS, ".zpl"]);
 protocol.registerSchemesAsPrivileged([{
   scheme: "medo-media",
   privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true }
@@ -35,16 +36,16 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
-  app.on("second-instance", (_event, commandLine) => {
+  app.on("second-instance", (_event, commandLine, workingDirectory) => {
     showMainWindow();
-    queueExternalAudioFiles(commandLine);
+    queueExternalFiles(commandLine, workingDirectory);
   });
 }
 let mainWindow = null;
 let applicationInitialized = false;
 let backgroundMaterialMode = 'frosted';
-let pendingExternalAudioFiles = [];
-let externalAudioDispatchTimer = null;
+let pendingExternalFiles = [];
+let externalDispatchTimer = null;
 let tray = null;
 let trayEnabled = false;
 let myFireflyExtension = null;
@@ -107,6 +108,8 @@ let lyricTranslationCacheWriteTimer = null;
 let lyricsWindow = null;
 let lastLyricsWindowPayload = null;
 let lyricsWindowLocked = true;
+let lyricsWindowCaptureMode = false;
+let lyricsWindowNormalBounds = null;
 let lyricsWindowReady = false;
 let lyricsWindowShowWhenReady = false;
 let lyricsWindowPointerTimer = null;
@@ -117,7 +120,7 @@ let trayLyricsSize = 34;
 const globalShortcuts = createGlobalShortcutManager(globalShortcut, {
   onCommand(command) {
     if (command === "toggle-desktop-lyrics") {
-      setLyricsWindowVisible(!(lyricsWindow && !lyricsWindow.isDestroyed() && lyricsWindow.isVisible()));
+      setLyricsWindowVisible(!lyricsWindowIsShown());
     } else {
       sendGlobalPlaybackCommand(command);
     }
@@ -180,31 +183,33 @@ function updateMusicFolderWatchers(folders = []) {
   }
 }
 
-function audioPathsFromArguments(args = []) {
+function pathsFromArguments(args, extensions, workingDirectory = process.cwd()) {
   return [...new Set(args
     .map((value) => String(value || "").replace(/^"|"$/g, ""))
-    .filter((value) => AUDIO_EXTENSIONS.has(path.extname(value).toLowerCase()))
-    .map((value) => path.resolve(value)))];
+    .filter((value) => !value.startsWith("--") && extensions.has(path.extname(value).toLowerCase()))
+    .map((value) => path.resolve(workingDirectory, value)))];
 }
 
-function queueExternalAudioFiles(args) {
-  const files = audioPathsFromArguments(args);
+function queueExternalFiles(args, workingDirectory) {
+  const files = pathsFromArguments(args, SHELL_EXTENSIONS, workingDirectory);
   if (!files.length) return;
-  pendingExternalAudioFiles = [...new Set([...pendingExternalAudioFiles, ...files])];
+  pendingExternalFiles = [...new Set([...pendingExternalFiles, ...files])];
   if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading()) return;
-  clearTimeout(externalAudioDispatchTimer);
-  externalAudioDispatchTimer = setTimeout(() => {
-    externalAudioDispatchTimer = null;
-    if (!pendingExternalAudioFiles.length || !mainWindow || mainWindow.isDestroyed()) return;
-    const queuedFiles = pendingExternalAudioFiles;
-    pendingExternalAudioFiles = [];
-    mainWindow.webContents.send("app:open-audio-files", queuedFiles);
-  }, 60);
+  clearTimeout(externalDispatchTimer);
+  externalDispatchTimer = setTimeout(dispatchExternalFiles, 60);
+}
+
+function dispatchExternalFiles() {
+  clearTimeout(externalDispatchTimer);
+  externalDispatchTimer = null;
+  if (!pendingExternalFiles.length || !mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("app:open-files", pendingExternalFiles);
+  pendingExternalFiles = [];
 }
 
 app.on("open-file", (event, filePath) => {
   event.preventDefault();
-  queueExternalAudioFiles([filePath]);
+  queueExternalFiles([filePath]);
 });
 
 function trimRecord(record, limit) {
@@ -428,13 +433,7 @@ function createWindow() {
   window.once("ready-to-show", () => {
     if (!window.isDestroyed()) window.show();
   });
-  window.webContents.on("did-finish-load", () => {
-    if (!pendingExternalAudioFiles.length) return;
-    clearTimeout(externalAudioDispatchTimer);
-    externalAudioDispatchTimer = null;
-    window.webContents.send("app:open-audio-files", pendingExternalAudioFiles);
-    pendingExternalAudioFiles = [];
-  });
+  window.webContents.on("did-finish-load", dispatchExternalFiles);
   window.on("close", (event) => {
     if (!isQuitting && closeBehavior === "background") {
       event.preventDefault();
@@ -555,7 +554,7 @@ function updateLyricsWindowPointerTracking() {
   lyricsWindowPointerTimer = null;
   lyricsWindowPointerInside = false;
   lyricsWindow?.webContents.send("lyrics-window:pointer-inside", false);
-  if (!lyricsWindowLocked || !lyricsWindow || lyricsWindow.isDestroyed() || !lyricsWindow.isVisible()) return;
+  if (lyricsWindowCaptureMode || !lyricsWindowLocked || !lyricsWindow || lyricsWindow.isDestroyed() || !lyricsWindow.isVisible()) return;
   lyricsWindowPointerTimer = setInterval(() => {
     if (!lyricsWindow || lyricsWindow.isDestroyed() || !lyricsWindow.isVisible()) return;
     const point = screen.getCursorScreenPoint();
@@ -572,24 +571,50 @@ function lyricsVisibilityStatePath() {
   return path.join(app.getPath("userData"), "desktop-lyrics-state.json");
 }
 
-async function readSavedLyricsVisibility() {
+async function readSavedLyricsWindowState() {
   try {
     const serialized = await fs.readFile(lyricsVisibilityStatePath(), "utf8");
-    return JSON.parse(serialized)?.visible === true;
+    return JSON.parse(serialized) || {};
   } catch {
-    return false;
+    return {};
   }
 }
 
-function persistLyricsVisibility(visible) {
-  const payload = JSON.stringify({ visible: Boolean(visible), savedAt: new Date().toISOString() });
-  fs.writeFile(lyricsVisibilityStatePath(), payload, "utf8").catch(() => {});
+function lyricsWindowIsShown() {
+  return lyricsWindowShowWhenReady || Boolean(lyricsWindow && !lyricsWindow.isDestroyed() && lyricsWindow.isVisible());
 }
 
-function persistLyricsVisibilitySync(visible) {
+function persistLyricsWindowState(visible) {
+  const state = { visible, captureMode: lyricsWindowCaptureMode, savedAt: new Date().toISOString() };
   try {
-    fsSync.writeFileSync(lyricsVisibilityStatePath(), JSON.stringify({ visible: Boolean(visible), savedAt: new Date().toISOString() }), "utf8");
+    fsSync.writeFileSync(lyricsVisibilityStatePath(), JSON.stringify(state), "utf8");
   } catch {}
+}
+
+function applyLyricsWindowCaptureMode(window) {
+  if (lyricsWindowCaptureMode) lyricsWindowNormalBounds = window.getBounds();
+  const bounds = lyricsWindowNormalBounds;
+  const area = screen.getDisplayMatching(bounds).workArea;
+  const width = Math.min(area.width, lyricsWindowCaptureMode ? 1280 : bounds.width);
+  const height = Math.min(area.height, lyricsWindowCaptureMode ? 180 : bounds.height);
+  const x = Math.max(area.x, Math.min(area.x + area.width - width, Math.round(bounds.x + (bounds.width - width) / 2)));
+  const y = Math.max(area.y, Math.min(area.y + area.height - height, bounds.y));
+  window.setResizable(!lyricsWindowCaptureMode);
+  window.setBounds({ x, y, width, height });
+  window.setSkipTaskbar(!lyricsWindowCaptureMode);
+  window.webContents.setBackgroundThrottling(!lyricsWindowCaptureMode);
+  window.webContents.send("lyrics-window:capture-mode", lyricsWindowCaptureMode);
+  updateLyricsWindowPointerTracking();
+}
+
+function setLyricsWindowCaptureMode(enabled) {
+  if (lyricsWindowCaptureMode !== enabled) {
+    lyricsWindowCaptureMode = enabled;
+    if (lyricsWindow && !lyricsWindow.isDestroyed()) applyLyricsWindowCaptureMode(lyricsWindow);
+  }
+  if (enabled) setLyricsWindowVisible(true);
+  else persistLyricsWindowState(lyricsWindowIsShown());
+  return lyricsWindowCaptureMode;
 }
 
 function setLyricsWindowVisible(visible, senderWindow) {
@@ -602,14 +627,13 @@ function setLyricsWindowVisible(visible, senderWindow) {
     window.hide();
   }
   const current = Boolean(visible);
-  persistLyricsVisibility(current);
+  persistLyricsWindowState(current);
   (senderWindow || mainWindow)?.webContents.send("lyrics-window:visibility", current);
   refreshTrayMenu();
   return current;
 }
 
-async function restoreLyricsWindowVisibility() {
-  const visible = await readSavedLyricsVisibility();
+function restoreLyricsWindowVisibility(visible) {
   if (visible) {
     const window = createLyricsWindow();
     showLyricsWindowWhenReady(window);
@@ -624,9 +648,9 @@ function refreshTrayMenu() {
   if (!tray) return;
   tray.setContextMenu(Menu.buildFromTemplate([
     {
-      label: lyricsWindow?.isVisible() ? "隐藏桌面歌词" : "显示桌面歌词",
+      label: lyricsWindowIsShown() ? "隐藏桌面歌词" : "显示桌面歌词",
       click: () => {
-        setLyricsWindowVisible(!(lyricsWindow && !lyricsWindow.isDestroyed() && lyricsWindow.isVisible()));
+        setLyricsWindowVisible(!lyricsWindowIsShown());
       }
     },
     {
@@ -727,12 +751,14 @@ function createLyricsWindow() {
   });
   lyricsWindowReady = false;
   lyricsWindowShowWhenReady = false;
+  if (lyricsWindowCaptureMode) applyLyricsWindowCaptureMode(lyricsWindow);
   lyricsWindow.setIgnoreMouseEvents(lyricsWindowLocked);
   lyricsWindow.setAlwaysOnTop(true, "screen-saver");
   lyricsWindow.loadFile(path.join(__dirname, "lyrics.html"));
   lyricsWindow.webContents.on("did-finish-load", () => {
     lyricsWindowReady = true;
     keepLyricsWindowOnTop(lyricsWindow);
+    lyricsWindow.webContents.send("lyrics-window:capture-mode", lyricsWindowCaptureMode);
     if (lastLyricsWindowPayload) lyricsWindow?.webContents.send("lyrics-window:line", { ...lastLyricsWindowPayload, restoring: true });
     lyricsWindow?.webContents.send("lyrics-window:lock-state", lyricsWindowLocked);
     updateLyricsWindowPointerTracking();
@@ -744,6 +770,11 @@ function createLyricsWindow() {
   });
   lyricsWindow.on("show", () => { keepLyricsWindowOnTop(lyricsWindow); updateLyricsWindowPointerTracking(); });
   lyricsWindow.on("hide", updateLyricsWindowPointerTracking);
+  lyricsWindow.on("close", (event) => {
+    if (!lyricsWindowCaptureMode || isQuitting) return;
+    event.preventDefault();
+    setLyricsWindowVisible(false);
+  });
   lyricsWindow.on("always-on-top-changed", (_event, isAlwaysOnTop) => {
     if (!isAlwaysOnTop) setTimeout(() => keepLyricsWindowOnTop(lyricsWindow), 0);
   });
@@ -755,38 +786,51 @@ function createLyricsWindow() {
     lyricsWindowTopTimer = null;
     lyricsWindowReady = false;
     lyricsWindowShowWhenReady = false;
+    lyricsWindowNormalBounds = null;
     lyricsWindow = null;
   });
   return lyricsWindow;
 }
 
-async function walkDirectory(directory) {
-  const results = [];
-  const entries = await fs.readdir(directory, { withFileTypes: true });
-
-  for (const entry of entries) {
-    const fullPath = path.join(directory, entry.name);
-    if (entry.isDirectory()) {
-      results.push(...await walkDirectory(fullPath));
-    } else if (AUDIO_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
-      results.push(fullPath);
-    }
-  }
-  return results;
+async function readPlaylistFile(playlistPath) {
+  const playlist = await parseZpl(playlistPath, toTrack);
+  playlist.tracks = await mapFileBatch(playlist.tracks, async track => ({
+    ...await toTrackWithFileTimes(track.path), playlists: track.playlists
+  }));
+  return playlist;
 }
 
-async function walkPlaylistFiles(directory) {
-  const results = [];
-  const entries = await fs.readdir(directory, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = path.join(directory, entry.name);
-    if (entry.isDirectory()) {
-      results.push(...await walkPlaylistFiles(fullPath));
-    } else if (path.extname(entry.name).toLowerCase() === ".zpl") {
-      results.push(fullPath);
+async function scanMusicFolder(folder, discoverPlaylists = false) {
+  const audioFiles = [];
+  const playlistFiles = [];
+  const skippedDirectories = [];
+  async function visit(directory) {
+    let entries;
+    try {
+      entries = await fs.readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if (directory === folder) throw error;
+      skippedDirectories.push(directory);
+      return;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(directory, entry.name);
+      const extension = path.extname(entry.name).toLowerCase();
+      if (entry.isDirectory()) await visit(fullPath);
+      else if (AUDIO_EXTENSIONS.has(extension)) audioFiles.push(fullPath);
+      else if (discoverPlaylists && extension === ".zpl") playlistFiles.push(fullPath);
     }
   }
-  return results;
+  await visit(folder);
+  const tracks = await mapFileBatch(audioFiles, async filePath => ({
+    ...await toTrackWithFileTimes(filePath), sourceDirectory: folder
+  }));
+  const playlists = [];
+  for (const file of playlistFiles) {
+    try { playlists.push(await readPlaylistFile(file)); }
+    catch { /* One unreadable playlist must not discard the rest of the library. */ }
+  }
+  return { folder, tracks, playlists, skippedDirectories };
 }
 
 function toTrack(filePath) {
@@ -832,7 +876,9 @@ async function mapFileBatch(items, read = toTrackWithFileTimes) {
 
 app.whenReady().then(async () => {
   if (!hasSingleInstanceLock) return;
-  queueExternalAudioFiles(process.argv.slice(1));
+  const savedLyricsState = await readSavedLyricsWindowState();
+  lyricsWindowCaptureMode = savedLyricsState.captureMode === true;
+  queueExternalFiles(process.argv.slice(1));
   getMetadataCache().catch(() => {});
   // Retire credentials saved by the removed account-only lyrics provider.
   await fs.rm(path.join(app.getPath("userData"), "apple-music.json"), { force: true })
@@ -939,26 +985,7 @@ app.whenReady().then(async () => {
   ipcMain.handle("music:discover-default-library", async () => {
     const folder = app.getPath("music");
     try {
-      const [audioFiles, playlistFiles] = await Promise.all([
-        walkDirectory(folder),
-        walkPlaylistFiles(folder)
-      ]);
-      const parsedPlaylists = [];
-      for (const playlistPath of playlistFiles) {
-        try {
-          const playlist = await parseZpl(playlistPath, toTrack);
-          playlist.tracks = await mapFileBatch(playlist.tracks, async track => ({ ...await toTrackWithFileTimes(track.path), playlists: track.playlists }));
-          parsedPlaylists.push(playlist);
-        } catch (error) {
-          if (error.code) throw error;
-          // Ignore malformed playlists while continuing the first-run scan.
-        }
-      }
-      return {
-        folder,
-        tracks: await mapFileBatch(audioFiles, async filePath => ({ ...await toTrackWithFileTimes(filePath), sourceDirectory: folder })),
-        playlists: parsedPlaylists
-      };
+      return await scanMusicFolder(folder, true);
     } catch {
       return null;
     }
@@ -1155,7 +1182,7 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.on("lyrics-window:toggle", (event) => {
-    setLyricsWindowVisible(!(lyricsWindow && !lyricsWindow.isDestroyed() && lyricsWindow.isVisible()), BrowserWindow.fromWebContents(event.sender));
+    setLyricsWindowVisible(!lyricsWindowIsShown(), BrowserWindow.fromWebContents(event.sender));
   });
 
   ipcMain.on("tray:set-muted", (_event, muted) => {
@@ -1165,7 +1192,10 @@ app.whenReady().then(async () => {
 
   ipcMain.on("lyrics-window:update", (_event, payload) => {
     const { positionOnly, colorsOnly, ...state } = payload;
-    lastLyricsWindowPayload = positionOnly || colorsOnly ? { ...lastLyricsWindowPayload, ...state } : state;
+    // Replaying a style or time update before the first lyric must leave the canvas empty.
+    lastLyricsWindowPayload = positionOnly || colorsOnly
+      ? { ...(lastLyricsWindowPayload || { colorsOnly: true }), ...state }
+      : state;
     if (!lyricsWindow || lyricsWindow.isDestroyed() || !lyricsWindow.isVisible()) return;
     lyricsWindow.webContents.send("lyrics-window:line", payload);
   });
@@ -1173,6 +1203,7 @@ app.whenReady().then(async () => {
   ipcMain.on("lyrics-window:set-locked", (_event, locked) => {
     setLyricsWindowLocked(Boolean(locked));
   });
+  ipcMain.handle("lyrics-window:set-capture-mode", (_event, enabled) => setLyricsWindowCaptureMode(enabled === true));
   ipcMain.on("lyrics-window:reset-position", () => {
     const window = createLyricsWindow();
     const bounds = window.getBounds();
@@ -1185,7 +1216,8 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle("lyrics-window:get-state", () => ({
     locked: lyricsWindowLocked,
-    visible: Boolean(lyricsWindow && !lyricsWindow.isDestroyed() && lyricsWindow.isVisible())
+    captureMode: lyricsWindowCaptureMode,
+    visible: lyricsWindowIsShown()
   }));
 
   ipcMain.on("lyrics-window:set-size", (_event, size) => {
@@ -1195,7 +1227,7 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.on("lyrics-window:fit-height", (_event, height) => {
-    if (!lyricsWindow || lyricsWindow.isDestroyed()) return;
+    if (lyricsWindowCaptureMode || !lyricsWindow || lyricsWindow.isDestroyed()) return;
     const bounds = lyricsWindow.getBounds();
     const workArea = screen.getDisplayMatching(bounds).workArea;
     const targetHeight = Math.min(180, Math.max(68, Math.ceil(Number(height) || 88)));
@@ -1208,7 +1240,7 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.on("lyrics-window:fit-width", (_event, width) => {
-    if (!lyricsWindow || lyricsWindow.isDestroyed()) return;
+    if (lyricsWindowCaptureMode || !lyricsWindow || lyricsWindow.isDestroyed()) return;
     const bounds = lyricsWindow.getBounds();
     const workArea = screen.getDisplayMatching(bounds).workArea;
     const targetWidth = Math.min(workArea.width, Math.max(420, Math.ceil(Number(width) || 680)));
@@ -1347,7 +1379,7 @@ app.whenReady().then(async () => {
   });
 
   ipcMain.handle("music:external-tracks", async (_event, filePaths = []) => {
-    const validPaths = audioPathsFromArguments(filePaths);
+    const validPaths = pathsFromArguments(filePaths, AUDIO_EXTENSIONS);
     const tracks = [];
     for (const filePath of validPaths) {
       try {
@@ -1393,22 +1425,13 @@ app.whenReady().then(async () => {
       properties: ["openDirectory"]
     });
     if (result.canceled) return null;
-    const folder = result.filePaths[0];
-    const files = await walkDirectory(folder);
-    return {
-      folder,
-      tracks: await mapFileBatch(files, async filePath => ({ ...await toTrackWithFileTimes(filePath), sourceDirectory: folder }))
-    };
+    return scanMusicFolder(result.filePaths[0]);
   });
 
   ipcMain.handle("music:scan-folder", async (_event, folder) => {
     if (typeof folder !== "string") return null;
     try {
-      const files = await walkDirectory(folder);
-      return {
-        folder,
-        tracks: await mapFileBatch(files, async filePath => ({ ...await toTrackWithFileTimes(filePath), sourceDirectory: folder }))
-      };
+      return await scanMusicFolder(folder);
     } catch {
       return null;
     }
@@ -1425,9 +1448,7 @@ app.whenReady().then(async () => {
       filters: [{ name: "Groove / Zune 播放列表", extensions: ["zpl"] }]
     });
     if (result.canceled) return null;
-    const playlist = await parseZpl(result.filePaths[0], toTrack);
-    playlist.tracks = await mapFileBatch(playlist.tracks, async track => ({ ...await toTrackWithFileTimes(track.path), playlists: track.playlists }));
-    return playlist;
+    return readPlaylistFile(result.filePaths[0]);
   });
 
   ipcMain.handle("music:choose-cover", async () => {
@@ -1445,9 +1466,7 @@ app.whenReady().then(async () => {
       return null;
     }
     try {
-      const playlist = await parseZpl(playlistPath, toTrack);
-      playlist.tracks = await mapFileBatch(playlist.tracks, async track => ({ ...await toTrackWithFileTimes(track.path), playlists: track.playlists }));
-      return playlist;
+      return await readPlaylistFile(playlistPath);
     } catch {
       return null;
     }
@@ -1466,7 +1485,7 @@ app.whenReady().then(async () => {
     console.error("[MyFirefly] Failed to start MedoMusic extension:", error);
   });
   setTrayEnabled(false);
-  restoreLyricsWindowVisibility();
+  restoreLyricsWindowVisibility(savedLyricsState.visible === true);
   app.on("activate", () => {
     showMainWindow();
   });
@@ -1487,5 +1506,5 @@ app.on("before-quit", () => {
   }
   myFireflyPending.clear();
   myFireflyExtension?.stop().catch(() => {});
-  persistLyricsVisibilitySync(Boolean(lyricsWindow && !lyricsWindow.isDestroyed() && lyricsWindow.isVisible()));
+  if (applicationInitialized) persistLyricsWindowState(lyricsWindowIsShown());
 });

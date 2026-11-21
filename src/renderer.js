@@ -31,6 +31,7 @@ if (localStorage.getItem("medo.coverSizing") !== "proportional") {
 }
 let playlists = loadJson("medo.playlists", []);
 let musicFolders = loadJson("medo.musicFolders", []);
+const excludedLibraryPaths = new Set(loadJson("medo.excludedLibraryPaths", []));
 let favorites = new Set(loadJson("medo.favorites", []));
 let recent = loadJson("medo.recent", []);
 let playStats = loadJson("medo.playStats", {});
@@ -83,9 +84,7 @@ let lyricTranslationEnabled = localStorage.getItem("medo.lyricTranslationEnabled
 const hasWordLyricsPreference = localStorage.getItem("medo.wordLyricsPreferenceSet") === "true";
 let wordLyricsEnabled = hasWordLyricsPreference && localStorage.getItem("medo.wordLyricsEnabled") === "true";
 let desktopLyricSize = Math.min(64, Math.max(16, Number(localStorage.getItem("medo.desktopLyricSize")) || 34));
-if (desktopLyricSize === 28) desktopLyricSize = 34;
 let detailLyricSize = Math.min(38, Math.max(18, Number(localStorage.getItem("medo.detailLyricSize")) || 26));
-if (detailLyricSize === 28) detailLyricSize = 26;
 let sidebarCollapsed = localStorage.getItem("medo.sidebarCollapsed") === "true";
 let sidebarWidth = Math.min(360, Math.max(190, Number(localStorage.getItem("medo.sidebarWidth")) || 220));
 let selectedTrackIds = new Set();
@@ -94,6 +93,7 @@ let draggedTrackId = null;
 let suppressRowClickUntil = 0;
 let playbackTransitionId = 0;
 let playbackQueueIds = loadJson("medo.playbackQueue", []);
+let playNextIds = loadJson("medo.playNextIds", []);
 let persistTimer = null;
 let activeMetadataReads = 0;
 const metadataWaiters = [];
@@ -1097,6 +1097,14 @@ function syncDesktopLyricLockSetting(locked) {
   });
 }
 
+function syncDesktopLyricCaptureSetting(enabled) {
+  document.querySelectorAll("[data-lyrics-capture]").forEach((button) => {
+    const active = (button.dataset.lyricsCapture === "true") === enabled;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-checked", String(active));
+  });
+}
+
 function applyWordLyricsSetting(enabled, userInitiated = false) {
   wordLyricsEnabled = Boolean(enabled);
   if (!wordLyricsEnabled || userInitiated) clearLyricRetry();
@@ -1890,7 +1898,7 @@ async function loadMetadata(track) {
       metadata = null;
     } finally {
       releaseMetadataSlot();
-      metadataRequests.delete(track.id);
+      if (metadataRequests.get(track.id) === request) metadataRequests.delete(track.id);
     }
     const previousArtist = track.artist;
     const previousAlbum = track.album;
@@ -1920,7 +1928,7 @@ async function loadMetadata(track) {
         (currentView === "favorites" && favorites.has(track.id))) {
       renderPlaylistHero(visibleTracks());
     }
-    if (tracks[currentIndex]?.id === track.id) updateNowPlaying(track);
+    if (tracks[currentIndex] === track) updateNowPlaying(track);
     return metadata;
   })();
   metadataRequests.set(track.id, request);
@@ -2836,19 +2844,12 @@ function renderPage(savedScrollTop) {
       if (!result) return;
       if (result.action === "play") {
         playTrack(actualIndex);
-      } else if (result.action === "play-next") {
+      } else if (result.action === "play-next" || result.action === "add-to-queue") {
         const queueWasEmpty = !playbackQueueIds.some((id) => tracks.some((item) => item.id === id));
-        playbackQueueIds = playbackQueueIds.filter((id) => id !== track.id);
-        const queueIndex = Math.max(-1, playbackQueueIds.indexOf(tracks[currentIndex]?.id));
-        playbackQueueIds.splice(queueIndex + 1, 0, track.id);
-        showActionFeedback("已安排为下一首播放");
-        schedulePersist(["queue", "playback"]);
-        if (queueWasEmpty) playTrack(actualIndex, true);
-      } else if (result.action === "add-to-queue") {
-        const queueWasEmpty = !playbackQueueIds.some((id) => tracks.some((item) => item.id === id));
-        playbackQueueIds = playbackQueueIds.filter((id) => id !== track.id);
-        playbackQueueIds.push(track.id);
-        showActionFeedback("已添加到正在播放");
+        const playNext = result.action === "play-next";
+        enqueueTracks([track.id], playNext);
+        showActionFeedback(track.id === tracks[currentIndex]?.id ? "所选歌曲已是当前播放歌曲" :
+          playNext ? "已安排为下一首播放" : "已添加到正在播放");
         schedulePersist(["queue", "playback"]);
         if (queueWasEmpty) playTrack(actualIndex, true);
       } else if (result.action === "create-playlist") {
@@ -2871,6 +2872,9 @@ function renderPage(savedScrollTop) {
       } else if (result.action === "remove-from-library") {
         if (!await confirmPlaylistAction("删除歌曲", `从 MedoMusic 音乐库中删除“${track.title}”？\n不会删除本地音频文件。`)) return;
         const currentId = tracks[currentIndex]?.id;
+        if (track.path && (track.sourceDirectory || managedFolderForFile(track.path))) {
+          excludedLibraryPaths.add(normalizedWindowsPath(track.path));
+        }
         tracks = tracks.filter((item) => item.id !== track.id);
         playbackQueueIds = playbackQueueIds.filter((id) => id !== track.id);
         recent = recent.filter((id) => id !== track.id);
@@ -3810,13 +3814,14 @@ document.querySelector("#shuffle-all").addEventListener("click", () => {
     .map((track) => track.id)
     .sort(() => Math.random() - 0.5);
   if (!queue.length) return;
-  playbackQueueIds = queue;
+  replacePlaybackQueue(queue);
   playMode = "shuffle";
   shuffleQueueSignature = [...queue].sort().join("\u001f");
   shuffleHistoryIds = [queue[0]];
   shuffleHistoryIndex = 0;
   shuffleRemainingIds = queue.slice(1);
   updatePlayModeButton();
+  schedulePersist("settings");
   playTrack(tracks.findIndex((track) => track.id === queue[0]), true);
 });
 document.querySelector("#recent-play-count-sort").addEventListener("click", (event) => {
@@ -3830,7 +3835,7 @@ document.querySelector("#recent-play-count-sort").addEventListener("click", (eve
 document.querySelector("#detail-clear-queue").addEventListener("click", (event) => {
   animatePlayerToolButton(event.currentTarget);
   clearCurrentPlayback();
-  playbackQueueIds = [];
+  replacePlaybackQueue([]);
   playbackFailedIds.clear();
   shuffleQueueSignature = "";
   shuffleRemainingIds = [];
@@ -3864,7 +3869,7 @@ document.querySelector("#select-all").addEventListener("click", () => {
 document.querySelector("#play-selected").addEventListener("click", () => {
   const selected = visibleTracks().filter((track) => selectedTrackIds.has(track.id));
   if (!selected.length) return;
-  playbackQueueIds = selected.map((track) => track.id);
+  replacePlaybackQueue(selected.map((track) => track.id));
   selectedTrackIds.clear();
   multiSelectionMode = false;
   playTrack(tracks.findIndex((track) => track.id === playbackQueueIds[0]), true);
@@ -3873,12 +3878,8 @@ document.querySelector("#play-selected").addEventListener("click", () => {
 function queueSelectedTracks(playNext) {
   const currentId = tracks[currentIndex]?.id;
   const selected = visibleTracks().filter((track) => selectedTrackIds.has(track.id) && track.id !== currentId).map((track) => track.id);
-  const remaining = playbackQueueIds.filter((id) => !selected.includes(id));
-  if (currentId && !remaining.includes(currentId)) remaining.unshift(currentId);
-  const insertAt = playNext ? Math.max(0, remaining.indexOf(currentId) + 1) : remaining.length;
-  remaining.splice(insertAt, 0, ...selected);
+  enqueueTracks(selected, playNext);
   showActionFeedback(selected.length ? `已将 ${selected.length} 首歌曲${playNext ? "安排为下一首播放" : "添加到正在播放"}` : "所选歌曲已是当前播放歌曲");
-  playbackQueueIds = remaining;
   selectedTrackIds.clear();
   multiSelectionMode = false;
   persist(["queue", "playback"]);
@@ -4568,6 +4569,12 @@ document.querySelectorAll(".desktop-lyric-lock-option").forEach((button) => {
     window.medo.lockLyricsWindow(locked);
   });
 });
+document.querySelectorAll("[data-lyrics-capture]").forEach((button) => {
+  button.addEventListener("click", async () => {
+    const enabled = await window.medo.setLyricsWindowCaptureMode(button.dataset.lyricsCapture === "true");
+    syncDesktopLyricCaptureSetting(enabled);
+  });
+});
 document.querySelector("#reset-desktop-lyric-position").addEventListener("click", (event) => {
   window.medo.resetLyricsWindowPosition();
   const button = event.currentTarget;
@@ -4798,6 +4805,7 @@ applyDesktopLyricColors();
 applyDetailLyricSize(detailLyricSize);
 window.medo.getLyricsWindowState().then((state) => {
   syncDesktopLyricLockSetting(state?.locked);
+  syncDesktopLyricCaptureSetting(state?.captureMode === true);
   document.querySelector("#desktop-lyrics-button").classList.toggle("active", Boolean(state?.visible));
 }).catch(() => {});
 removeRedundantMusicFolders();
@@ -4810,8 +4818,10 @@ render();
 scheduleListeningCalendarRollover();
 scheduleStartupMaintenance();
 restorePlaybackState();
-window.medo.onOpenAudioFiles((filePaths) => {
-  openExternalAudioFiles(filePaths).catch(() => {});
+let externalFileTask = Promise.resolve();
+window.medo.onOpenFiles((filePaths) => {
+  externalFileTask = externalFileTask.then(() => openExternalFiles(filePaths))
+    .catch(() => showActionFeedback("无法打开所选文件，请检查文件是否可访问"));
 });
 window.medo.onLibraryFolderChanged(scheduleAutomaticFolderScan);
 syncMusicFolderWatchers();

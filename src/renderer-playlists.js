@@ -49,16 +49,12 @@ async function showPlaylistContextMenu(playlistName, favoritesList, event) {
   }, event);
   if (!result || !validIds.length && ["play", "play-next", "add-to-playlist", "create-playlist"].includes(result.action)) return;
   if (result.action === "play") {
-    playbackQueueIds = [...validIds];
+    replacePlaybackQueue([...validIds]);
     const firstIndex = tracks.findIndex((track) => track.id === validIds[0]);
     if (firstIndex >= 0) playTrack(firstIndex, true);
   } else if (result.action === "play-next") {
     const queueWasEmpty = !playbackQueueIds.some((id) => tracks.some((track) => track.id === id));
-    const currentId = tracks[currentIndex]?.id;
-    const remaining = playbackQueueIds.filter((id) => !validIds.includes(id));
-    const insertAt = currentId ? Math.max(0, remaining.indexOf(currentId) + 1) : 0;
-    remaining.splice(insertAt, 0, ...validIds);
-    playbackQueueIds = remaining;
+    enqueueTracks(validIds, true);
     schedulePersist(["queue", "playback"]);
     if (queueWasEmpty) {
       const firstIndex = tracks.findIndex((track) => track.id === validIds[0]);
@@ -80,9 +76,21 @@ async function showPlaylistContextMenu(playlistName, favoritesList, event) {
 }
 
 async function choosePlaylist() {
-  const result = await window.medo.choosePlaylist();
-  if (!result) return;
-  const existing = playlists.find((item) => item.path === result.path);
+  try {
+    const result = await window.medo.choosePlaylist();
+    if (result) importPlaylist(result);
+  } catch {
+    showActionFeedback("无法读取播放列表，请检查文件是否可访问");
+  }
+}
+
+function importedPlaylistAt(filePath) {
+  const key = normalizedWindowsPath(filePath);
+  return playlists.find(item => item.path && normalizedWindowsPath(item.path) === key);
+}
+
+function importPlaylist(result) {
+  const existing = importedPlaylistAt(result.path);
   const name = uniquePlaylistName(existing?.name || result.name, existing);
   const trackIds = mergeTracks(result.tracks, false).map((track) => track.id);
   if (existing) {
@@ -92,15 +100,24 @@ async function choosePlaylist() {
     playlists.push({ name, path: result.path, trackIds });
   }
   repairPlaylistMemberships();
+  openPlaylistView(name);
+  persist(["tracks", "playlists", "playback"]);
+}
+
+function openPlaylistView(name) {
   currentPlaylist = name;
   currentCollection = null;
   currentView = "library";
   currentSort = "songs";
+  selectedTrackIds.clear();
+  multiSelectionMode = false;
+  query = "";
+  document.querySelector("#search-input").value = "";
   document.querySelectorAll(".pivot").forEach((item) => {
     item.classList.toggle("active", item.dataset.sort === "songs");
   });
   setActiveNav(null);
-  persist(["tracks", "playlists", "playback"]);
+  persistNavigation();
   render();
 }
 
@@ -298,7 +315,7 @@ async function migratePlaylistOrder() {
   for (const playlist of playlists.filter((item) => !Array.isArray(item.trackIds))) {
     const result = await window.medo.loadPlaylist(playlist.path);
     if (!result || !playlists.includes(playlist) || Array.isArray(playlist.trackIds)) continue;
-    const merged = mergeTracks(result.tracks, false);
+    const { merged } = mergeTrackBatch(includedLibraryTracks(result.tracks));
     playlist.name = uniquePlaylistName(playlist.name || result.name, playlist);
     playlist.trackIds = merged.map((track) => track.id);
     changed = true;

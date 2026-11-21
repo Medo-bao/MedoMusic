@@ -139,7 +139,7 @@ async function run() {
       onGlobalShortcutStatus: (callback) => { window.__shortcutStatus = callback; return () => {}; },
       onLyricsWindowVisibility: () => () => {},
       onResolvedTheme: () => () => {},
-      onOpenAudioFiles: () => () => {},
+      onOpenFiles: () => () => {},
       onMyFireflyCommand: () => () => {},
       respondToMyFirefly: () => {},
       onTrayCommand: (callback) => { window.__trayCommand = callback; return () => {}; },
@@ -632,6 +632,7 @@ async function run() {
       moveLyricsWindow: () => {},
       onLyricsWindowLine: (callback) => { window.__lyricsLine = callback; },
       onLyricsWindowSize: () => {},
+      onLyricsWindowCaptureMode: (callback) => { window.__setLyricCaptureMode = callback; },
       onLyricsWindowLockState: () => {},
       onLyricsWindowPointerInside: () => {}
     };
@@ -714,6 +715,26 @@ async function run() {
     throw new Error(`Long desktop lyric is truncated: ${JSON.stringify(longDesktopLyric)}`);
   }
   await lyricPage.screenshot({ path: path.join(artifacts, "desktop-lyrics-karaoke.png"), omitBackground: true });
+  const captureFits = await lyricPage.evaluate(async () => {
+    const frame = () => new Promise(requestAnimationFrame);
+    const current = document.querySelector("#desktop-lyric");
+    const next = document.querySelector("#desktop-next-lyric");
+    window.__requestedLyricWidth = 0;
+    window.__setLyricCaptureMode(true);
+    window.__lyricsLine({ current: "短句", next: "下一句" });
+    await frame();
+    const initial = current.getBoundingClientRect();
+    const long = "长句和翻译".repeat(60);
+    window.__lyricsLine({ current: long, currentTranslation: long, words: [{ text: long, start: 0, end: 4 }] });
+    await frame();
+    const fitted = current.getBoundingClientRect();
+    const sameRow = Math.abs(initial.y + initial.height / 2 - fitted.y - fitted.height / 2) < 1;
+    return sameRow && window.__requestedLyricWidth === 0 && [current, next].every(line => {
+      const rect = line.getBoundingClientRect();
+      return rect.left > 0 && rect.right < innerWidth && line.scrollWidth <= line.clientWidth + 1;
+    });
+  });
+  if (!captureFits) throw new Error("Capture mode moved, clipped or requested a resize for long lyrics");
   await lyricPage.close();
 
   await require("./playback-experience")(page);

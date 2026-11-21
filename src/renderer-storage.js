@@ -26,6 +26,7 @@ function persist(sections = persistedSections) {
   if (changed.has("tracks")) {
     const storedTracks = tracks.filter(track => !track.transient).map(({ transient, ...track }) => track);
     writeStoredValue("medo.tracks", JSON.stringify(storedTracks));
+    writeStoredValue("medo.excludedLibraryPaths", JSON.stringify([...excludedLibraryPaths]));
   }
   if (changed.has("playlists")) writeStoredValue("medo.playlists", JSON.stringify(playlists));
   if (changed.has("folders")) writeStoredValue("medo.musicFolders", JSON.stringify(musicFolders));
@@ -37,6 +38,7 @@ function persist(sections = persistedSections) {
   if (changed.has("queue") || changed.has("tracks")) {
     const persistentTrackIds = new Set(tracks.filter(track => !track.transient).map(track => track.id));
     writeStoredValue("medo.playbackQueue", JSON.stringify(playbackQueueIds.filter(id => persistentTrackIds.has(id))));
+    writeStoredValue("medo.playNextIds", JSON.stringify(playNextIds.filter(id => persistentTrackIds.has(id))));
   }
   if (changed.has("settings")) {
     writeStoredValue("medo.theme", theme);

@@ -362,6 +362,24 @@ function recoverPlaybackFailure(track, shouldPlay = pendingTrackPlayback?.should
   showPlaybackError(track, "队列中没有可播放的文件");
 }
 
+function replacePlaybackQueue(ids) {
+  playbackQueueIds = ids;
+  playNextIds = [];
+}
+
+function enqueueTracks(ids, playNext) {
+  const currentId = tracks[currentIndex]?.id;
+  const requested = new Set(ids);
+  requested.delete(currentId);
+  if (!requested.size) return;
+  const remaining = playbackQueueIds.filter(id => !requested.has(id));
+  if (currentId && !remaining.includes(currentId)) remaining.unshift(currentId);
+  const insertAt = playNext ? remaining.indexOf(currentId) + 1 : remaining.length;
+  playbackQueueIds = [...remaining.slice(0, insertAt), ...requested, ...remaining.slice(insertAt)];
+  playNextIds = playNextIds.filter(id => !requested.has(id));
+  if (playNext) playNextIds = [...requested, ...playNextIds];
+}
+
 async function playTrack(index, preserveQueue = false, preservePreviousNavigation = false, shouldPlay = true) {
   if (!tracks[index]) return;
   ensureAudioProcessing();
@@ -369,12 +387,16 @@ async function playTrack(index, preserveQueue = false, preservePreviousNavigatio
   const generation = ++playbackGeneration;
   const request = { shouldPlay };
   if (!preserveQueue && currentView !== "now") {
-    playbackQueueIds = visibleTracks().map((track) => track.id);
+    replacePlaybackQueue(visibleTracks().map((track) => track.id));
   }
-  if (!playbackQueueIds.length) playbackQueueIds = [tracks[index].id];
+  if (!playbackQueueIds.length) replacePlaybackQueue([tracks[index].id]);
   pendingTrackPlayback = request;
   updatePlayButtonState(shouldPlay);
   const requestedTrack = tracks[index];
+  if (playNextIds.includes(requestedTrack.id)) {
+    playNextIds = playNextIds.filter(id => id !== requestedTrack.id);
+    schedulePersist("queue");
+  }
   sendLyricsWindowState({ noLyrics: false, playing: request.shouldPlay && !audio.paused });
   const resolvedSource = await window.medo.resolveMediaSource(requestedTrack.path).catch(() => null);
   if (generation !== playbackGeneration) return;
@@ -639,12 +661,13 @@ function nextTrack(direction = 1) {
       const previousId = shuffleHistoryIds[shuffleHistoryIndex];
       return playTrack(tracks.findIndex((track) => track.id === previousId), true, continuingPreviousNavigation);
     }
-    if (direction > 0 && shuffleHistoryIndex < shuffleHistoryIds.length - 1) {
+    const scheduled = direction > 0 && playNextIds.find(id => queueIds.includes(id));
+    if (!scheduled && direction > 0 && shuffleHistoryIndex < shuffleHistoryIds.length - 1) {
       shuffleHistoryIndex += 1;
       const forwardId = shuffleHistoryIds[shuffleHistoryIndex];
       return playTrack(tracks.findIndex((track) => track.id === forwardId), true);
     }
-    if (!shuffleRemainingIds.length) {
+    if (!scheduled && !shuffleRemainingIds.length) {
       shuffleRemainingIds = queueIds.filter((id) => id !== currentId);
       for (let index = shuffleRemainingIds.length - 1; index > 0; index -= 1) {
         const swapIndex = Math.floor(Math.random() * (index + 1));
@@ -654,8 +677,9 @@ function nextTrack(direction = 1) {
       shuffleHistoryIds = currentId ? [currentId] : [];
       shuffleHistoryIndex = shuffleHistoryIds.length - 1;
     }
-    const nextId = shuffleRemainingIds.pop();
+    const nextId = scheduled || shuffleRemainingIds.pop();
     if (!nextId) return;
+    if (scheduled) shuffleRemainingIds = shuffleRemainingIds.filter(id => id !== scheduled);
     shuffleHistoryIds = shuffleHistoryIds.slice(0, shuffleHistoryIndex + 1);
     shuffleHistoryIds.push(nextId);
     shuffleHistoryIndex = shuffleHistoryIds.length - 1;
